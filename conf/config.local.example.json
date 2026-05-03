@@ -1,0 +1,9 @@
+{
+  "port": "8080",
+  "lark_app_id": "",
+  "lark_app_secret": "",
+  "lark_notify_receive_id": "",
+  "lark_mention_enabled": true,
+  "waiting_transition_seconds": 2,
+  "notify_idle_seconds": 5
+}

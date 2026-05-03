@@ -1,0 +1,349 @@
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import http from "node:http";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const root = path.resolve(new URL("..", import.meta.url).pathname);
+const bin = path.join(root, "easy_terminal");
+const port = 18080;
+const chromePort = 19223;
+const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "easy-terminal-e2e-"));
+
+let server;
+let chrome;
+let cdp;
+
+async function main() {
+try {
+  await fs.mkdir(path.join(tmp, "data", "uploads"), { recursive: true });
+  await fs.mkdir(path.join(tmp, "log"), { recursive: true });
+  server = spawn(bin, {
+    cwd: tmp,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      TERMINAL_WORKING_DIR: root,
+      AGENT_MONITOR_DB: path.join(tmp, "easy_terminal.db"),
+      AGENT_MONITOR_UPLOADS_DIR: path.join(tmp, "data", "uploads"),
+      AGENT_MONITOR_LOG_DIR: path.join(tmp, "log"),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  pipeLogs(server, "server");
+  await waitForHTTP(`http://localhost:${port}/api/sessions`);
+
+  chrome = spawn("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
+    "--headless=new",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-default-browser-check",
+    `--remote-debugging-port=${chromePort}`,
+    `--user-data-dir=${path.join(tmp, "chrome-profile")}`,
+    `http://localhost:${port}`,
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  pipeLogs(chrome, "chrome");
+  await waitForHTTP(`http://localhost:${chromePort}/json/version`);
+
+  const pageInfo = await newPage(`http://localhost:${port}`);
+  cdp = await CDPClient.connect(pageInfo.webSocketDebuggerUrl);
+  await cdp.send("Page.enable");
+  await cdp.send("Runtime.enable");
+  await cdp.send("Page.navigate", { url: `http://localhost:${port}` });
+  await waitFor(() => evalExpr("document.readyState === 'complete' || document.readyState === 'interactive'"));
+  await waitFor(() => evalExpr("Boolean(window.easyTerminalApp && document.querySelector('#session-name'))"));
+
+  await createSession("browser-e2e");
+  await waitFor(() => evalExpr("document.querySelectorAll('.session').length === 1"));
+  await waitFor(() => evalExpr("window.easyTerminalApp.state.active && window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
+  await waitFor(() => evalExpr("window.easyTerminalApp.state.term.cols >= 80 && window.easyTerminalApp.state.term.rows >= 20"));
+
+  await clickNotify();
+  const notifyResponse = await fetchJSON(`http://localhost:${port}/api/sessions`);
+  assert.equal(notifyResponse[0].notify_on_waiting, true, "notification toggle should PATCH notify_on_waiting=true");
+
+  await fillComposer("echo BROWSER_BUTTON_E2E");
+  await click("document.querySelector('#composer button').click()");
+  await waitForOutput("BROWSER_BUTTON_E2E");
+
+  await fillComposer("plain enter line");
+  await keydownComposer({ key: "Enter", metaKey: false, ctrlKey: false });
+  assert.equal(await evalExpr("document.querySelector('#composer-input').value"), "plain enter line", "plain Enter should not send");
+
+  await fillComposer("echo BROWSER_CMD_ENTER_E2E");
+  await keydownComposer({ key: "Enter", metaKey: true, ctrlKey: false });
+  await waitForOutput("BROWSER_CMD_ENTER_E2E");
+
+  await openQuickDialogAndAdd("pwd", "pwd");
+  assert.equal(await evalExpr("document.querySelectorAll('.quick-chip').length"), 1, "quick command chip should be added");
+
+  await deleteActiveSession();
+  assert.deepEqual(await fetchJSON(`http://localhost:${port}/api/sessions`), [], "test session should be cleaned up");
+  console.log("browser e2e ok");
+} finally {
+  await cdp?.close().catch(() => {});
+  chrome?.kill("SIGTERM");
+  server?.kill("SIGTERM");
+  await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+}
+}
+
+async function createSession(name) {
+  await evalExpr(`document.querySelector('#session-name').value = ${JSON.stringify(name)}; document.querySelector('#new-session').requestSubmit(); true`);
+}
+
+async function clickNotify() {
+  await waitFor(() => evalExpr("Boolean(document.querySelector('.notify-input'))"));
+  await click("document.querySelector('.notify-input').click()");
+  await waitFor(() => evalExpr("document.querySelector('.notify-input').checked === true"));
+}
+
+async function fillComposer(value) {
+  await evalExpr(`document.querySelector('#composer-input').value = ${JSON.stringify(value)}; true`);
+}
+
+async function keydownComposer(event) {
+  await evalExpr(`
+    document.querySelector('#composer-input').dispatchEvent(new KeyboardEvent('keydown', {
+      key: ${JSON.stringify(event.key)},
+      metaKey: ${Boolean(event.metaKey)},
+      ctrlKey: ${Boolean(event.ctrlKey)},
+      bubbles: true,
+      cancelable: true
+    }));
+    true
+  `);
+}
+
+async function waitForOutput(text) {
+  await waitFor(() => fetchJSON(`http://localhost:${port}/api/sessions`).then((sessions) => {
+    const live = sessions.find((session) => session.live);
+    if (!live) return false;
+    return fetchJSON(`http://localhost:${port}/api/sessions/${live.id}/output`).then((out) => out.content.includes(text));
+  }), 8000);
+}
+
+async function openQuickDialogAndAdd(name, text) {
+  await click("document.querySelector('.add-quick').click()");
+  await waitFor(() => evalExpr("document.querySelector('#quick-dialog').open === true"));
+  await evalExpr(`
+    document.querySelector('#quick-name').value = ${JSON.stringify(name)};
+    document.querySelector('#quick-text').value = ${JSON.stringify(text)};
+    document.querySelector('#quick-form').requestSubmit();
+    true
+  `);
+  await waitFor(() => evalExpr("document.querySelectorAll('.quick-chip').length === 1"));
+}
+
+async function deleteActiveSession() {
+  const sessions = await fetchJSON(`http://localhost:${port}/api/sessions`);
+  for (const session of sessions) {
+    await fetch(`http://localhost:${port}/api/sessions/${session.id}`, { method: "DELETE" });
+  }
+}
+
+async function click(script) {
+  await evalExpr(`${script}; true`);
+}
+
+async function evalExpr(expression) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (result.exceptionDetails) {
+    throw new Error(result.exceptionDetails.text || "Runtime.evaluate failed");
+  }
+  return result.result?.value;
+}
+
+async function newPage(url) {
+  return fetchJSON(`http://localhost:${chromePort}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
+}
+
+async function fetchJSON(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) throw new Error(`${url} returned ${res.status}`);
+  return res.json();
+}
+
+async function waitForHTTP(url, timeoutMs = 10000) {
+  await waitFor(async () => {
+    try {
+      const res = await fetch(url);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }, timeoutMs);
+}
+
+async function waitFor(fn, timeoutMs = 10000) {
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      if (await fn()) return;
+    } catch (err) {
+      lastError = err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw lastError || new Error("timed out waiting for condition");
+}
+
+function pipeLogs(proc, name) {
+  proc.stdout?.on("data", (chunk) => {
+    if (process.env.E2E_VERBOSE) process.stdout.write(`[${name}] ${chunk}`);
+  });
+  proc.stderr?.on("data", (chunk) => {
+    if (process.env.E2E_VERBOSE) process.stderr.write(`[${name}] ${chunk}`);
+  });
+}
+
+class CDPClient {
+  constructor(socket, pathName, host) {
+    this.socket = socket;
+    this.pathName = pathName;
+    this.host = host;
+    this.nextID = 1;
+    this.pending = new Map();
+    this.buffer = Buffer.alloc(0);
+    this.connected = false;
+    socket.on("data", (chunk) => this.onData(chunk));
+    socket.on("error", (err) => {
+      for (const { reject } of this.pending.values()) reject(err);
+      this.pending.clear();
+    });
+  }
+
+  static async connect(wsURL) {
+    const url = new URL(wsURL);
+    const socket = net.connect(Number(url.port), url.hostname);
+    const client = new CDPClient(socket, `${url.pathname}${url.search}`, url.host);
+    await client.handshake();
+    return client;
+  }
+
+  handshake() {
+    return new Promise((resolve, reject) => {
+      const key = crypto.randomBytes(16).toString("base64");
+      const req = [
+        `GET ${this.pathName} HTTP/1.1`,
+        `Host: ${this.host}`,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Key: ${key}`,
+        "Sec-WebSocket-Version: 13",
+        "\r\n",
+      ].join("\r\n");
+      const onData = (chunk) => {
+        this.buffer = Buffer.concat([this.buffer, chunk]);
+        const marker = this.buffer.indexOf("\r\n\r\n");
+        if (marker === -1) return;
+        const head = this.buffer.slice(0, marker).toString("utf8");
+        this.buffer = this.buffer.slice(marker + 4);
+        this.socket.off("data", onData);
+        if (!head.includes(" 101 ")) {
+          reject(new Error(`CDP websocket handshake failed: ${head}`));
+          return;
+        }
+        this.connected = true;
+        if (this.buffer.length) this.onData(Buffer.alloc(0));
+        resolve();
+      };
+      this.socket.on("data", onData);
+      this.socket.once("error", reject);
+      this.socket.write(req);
+    });
+  }
+
+  send(method, params = {}) {
+    const id = this.nextID++;
+    const payload = JSON.stringify({ id, method, params });
+    this.socket.write(encodeFrame(payload));
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+  }
+
+  onData(chunk) {
+    if (!this.connected) return;
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    for (;;) {
+      const frame = decodeFrame(this.buffer);
+      if (!frame) return;
+      this.buffer = this.buffer.slice(frame.bytes);
+      if (frame.opcode === 8) return;
+      if (frame.opcode !== 1) continue;
+      const msg = JSON.parse(frame.payload.toString("utf8"));
+      if (msg.id && this.pending.has(msg.id)) {
+        const pending = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        if (msg.error) pending.reject(new Error(JSON.stringify(msg.error)));
+        else pending.resolve(msg.result);
+      }
+    }
+  }
+
+  async close() {
+    this.socket.end();
+  }
+}
+
+function encodeFrame(text) {
+  const payload = Buffer.from(text);
+  const mask = crypto.randomBytes(4);
+  let header;
+  if (payload.length < 126) {
+    header = Buffer.from([0x81, 0x80 | payload.length]);
+  } else if (payload.length < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 0x80 | 126;
+    header.writeUInt16BE(payload.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 0x80 | 127;
+    header.writeBigUInt64BE(BigInt(payload.length), 2);
+  }
+  const masked = Buffer.alloc(payload.length);
+  for (let i = 0; i < payload.length; i++) masked[i] = payload[i] ^ mask[i % 4];
+  return Buffer.concat([header, mask, masked]);
+}
+
+function decodeFrame(buffer) {
+  if (buffer.length < 2) return null;
+  const opcode = buffer[0] & 0x0f;
+  let length = buffer[1] & 0x7f;
+  let offset = 2;
+  if (length === 126) {
+    if (buffer.length < 4) return null;
+    length = buffer.readUInt16BE(2);
+    offset = 4;
+  } else if (length === 127) {
+    if (buffer.length < 10) return null;
+    length = Number(buffer.readBigUInt64BE(2));
+    offset = 10;
+  }
+  const masked = (buffer[1] & 0x80) !== 0;
+  let mask;
+  if (masked) {
+    if (buffer.length < offset + 4) return null;
+    mask = buffer.slice(offset, offset + 4);
+    offset += 4;
+  }
+  if (buffer.length < offset + length) return null;
+  const payload = Buffer.from(buffer.slice(offset, offset + length));
+  if (masked) {
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return { opcode, payload, bytes: offset + length };
+}
+
+await main();

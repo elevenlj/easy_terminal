@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>easy_terminal</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="eyebrow">EASY_TERMINAL</div>
+      <div class="brand">easy_terminal</div>
+      <form id="new-session" class="new-session">
+        <input id="session-name" placeholder="Session name" autocomplete="off">
+        <button title="New Session">New Session</button>
+      </form>
+      <input id="session-search" class="search" placeholder="Search sessions" autocomplete="off">
+      <label class="ended-toggle"><input id="show-ended" type="checkbox"> 显示已结束会话</label>
+      <div id="sessions" class="sessions"></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div id="active-title">No session</div>
+      </header>
+      <div class="terminal-shell">
+        <div id="terminal"></div>
+      </div>
+      <div id="quick-list" class="quick-list"></div>
+      <form id="composer" class="composer">
+        <textarea id="composer-input" placeholder="Write text here, then send it to the terminal."></textarea>
+        <button>Send</button>
+      </form>
+    </main>
+    <dialog id="quick-dialog">
+      <form id="quick-form" method="dialog">
+        <div class="dialog-title">Add Quick Command</div>
+        <input id="quick-name" placeholder="Name">
+        <textarea id="quick-text" placeholder="Command text"></textarea>
+        <div class="dialog-actions">
+          <button value="cancel" type="button" id="quick-cancel">Cancel</button>
+          <button value="default">Add</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
