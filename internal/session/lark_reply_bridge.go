@@ -27,13 +27,17 @@ type LarkReplyBridge struct {
 	mu            sync.Mutex
 	seenMessages  map[string]time.Time
 	pendingImages map[string][]string
+	pipelines     map[string][]string
 	replyText     func(context.Context, string, string) error
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
 	b := &LarkReplyBridge{
 		appID: appID, appSecret: appSecret, manager: manager, agent: NewCommandAgent(agentCfg), uploadsDir: uploadsDir,
-		seenMessages: make(map[string]time.Time), pendingImages: make(map[string][]string),
+		seenMessages: make(map[string]time.Time), pendingImages: make(map[string][]string), pipelines: make(map[string][]string),
+	}
+	if manager != nil {
+		manager.SetNotificationSentHook(b.OnNotificationSent)
 	}
 	if appID != "" && appSecret != "" {
 		b.apiClient = lark.NewClient(appID, appSecret)
@@ -106,11 +110,17 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 		return "", nil
 	}
 	text = cleanLarkText(text)
+	parts := splitLarkPipeline(text)
+	if len(parts) == 0 {
+		return "", nil
+	}
+	text = parts[0]
 	if strings.HasPrefix(text, "/new ") || strings.HasPrefix(text, "新会话 ") || strings.HasPrefix(text, "开始 ") {
 		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(text, "/new "), "新会话 "), "开始 "))
 		s, err := b.createLarkSession(ctx, name)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
+			b.enqueuePipeline(s.ID, parts[1:])
 		}
 		return s.ID, err
 	}
@@ -162,7 +172,9 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 		}
 		text = cmd
 	}
-	if err := rt.WriteInput(PrepareStructuredInput(text)); err != nil {
+	b.manager.EnsureBrowser(sessionID)
+	b.enqueuePipeline(sessionID, parts[1:])
+	if err := SubmitStructuredInput(rt, text); err != nil {
 		return sessionID, err
 	}
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
@@ -178,7 +190,57 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 	if err != nil || !ok {
 		return s, err
 	}
+	b.manager.EnsureBrowser(updated.ID)
 	return updated, nil
+}
+
+func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
+	next := b.popPipeline(sessionID)
+	if next == "" {
+		return
+	}
+	rt, ok := b.manager.GetRuntime(sessionID)
+	if !ok {
+		return
+	}
+	b.manager.EnsureBrowser(sessionID)
+	if err := SubmitStructuredInput(rt, next); err != nil {
+		log.Printf("lark reply bridge failed to continue pipeline for %s: %v", sessionID, err)
+	}
+}
+
+func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string) {
+	if sessionID == "" || len(parts) == 0 {
+		return
+	}
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	if len(cleaned) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pipelines[sessionID] = append(b.pipelines[sessionID], cleaned...)
+}
+
+func (b *LarkReplyBridge) popPipeline(sessionID string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	queue := b.pipelines[sessionID]
+	if len(queue) == 0 {
+		return ""
+	}
+	next := queue[0]
+	if len(queue) == 1 {
+		delete(b.pipelines, sessionID)
+	} else {
+		b.pipelines[sessionID] = queue[1:]
+	}
+	return next
 }
 
 func isCurrentRoundCommand(text string) bool {
@@ -250,10 +312,62 @@ func cleanLarkText(text string) string {
 	return strings.TrimSpace(text)
 }
 
+func splitLarkPipeline(text string) []string {
+	var parts []string
+	var b strings.Builder
+	escaped := false
+	for _, r := range text {
+		switch {
+		case escaped:
+			if r != '|' {
+				b.WriteRune('\\')
+			}
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case isLarkPipelineSeparator(r):
+			if part := strings.TrimSpace(b.String()); part != "" {
+				parts = append(parts, part)
+			}
+			b.Reset()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if part := strings.TrimSpace(b.String()); part != "" {
+		parts = append(parts, part)
+	}
+	return parts
+}
+
+func isLarkPipelineSeparator(r rune) bool {
+	switch r {
+	case '|', '｜', '︱', '￨':
+		return true
+	default:
+		return false
+	}
+}
+
 func PrepareStructuredInput(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
 	return text + "\r"
+}
+
+func SubmitStructuredInput(rt *RuntimeSession, text string) error {
+	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	if text != "" {
+		if err := rt.WriteInput(text); err != nil {
+			return err
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	return rt.WriteInput("\r")
 }
 
 func extractLarkMessageText(content string, messageType string) string {

@@ -84,6 +84,12 @@ try {
   assert.equal(await evalExpr("document.querySelectorAll('.quick-chip').length"), 1, "quick command chip should be added");
   assert.equal(await evalExpr("document.querySelector('.quick-chip span').textContent"), "pwd", "quick command chip should display command text");
 
+  const headlessTarget = await createSessionViaAPI("headless-target");
+  await cdp.send("Page.navigate", { url: `http://localhost:${port}/?session=${encodeURIComponent(headlessTarget.id)}` });
+  await waitFor(() => evalExpr("Boolean(window.easyTerminalApp && document.querySelector('#session-name'))"));
+  await waitFor(() => evalExpr(`window.easyTerminalApp.state.active === ${JSON.stringify(headlessTarget.id)}`));
+  await waitFor(() => evalExpr("window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
+
   await deleteActiveSession();
   assert.deepEqual(await fetchJSON(`http://localhost:${port}/api/sessions`), [], "test session should be cleaned up");
   console.log("browser e2e ok");
@@ -97,6 +103,16 @@ try {
 
 async function createSession(name) {
   await evalExpr(`document.querySelector('#session-name').value = ${JSON.stringify(name)}; document.querySelector('#new-session').requestSubmit(); true`);
+}
+
+async function createSessionViaAPI(name) {
+  const res = await fetch(`http://localhost:${port}/api/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(`create session returned ${res.status}`);
+  return res.json();
 }
 
 async function clickNotify() {

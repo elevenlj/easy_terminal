@@ -63,8 +63,8 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 	}
 }
 
-func TestNotifyDelayFastForPlainOutputAndConservativeForCodex(t *testing.T) {
-	m := NewManager(nil, nil, WithNotifyIdleTimeout(7*time.Second))
+func TestNotifyStableDelayFastForPlainOutputAndConservativeForCodex(t *testing.T) {
+	m := NewManager(nil, nil, WithWaitingTransitionDelays(120*time.Millisecond, 450*time.Millisecond))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
@@ -72,25 +72,126 @@ func TestNotifyDelayFastForPlainOutputAndConservativeForCodex(t *testing.T) {
 	rt.MarkInputActivity("echo hello\r")
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
 	rt.mu.Lock()
-	fast := rt.notifyDelayLocked()
+	fast := rt.notifyStableDelayLocked()
 	rt.mu.Unlock()
-	if fast != 0 {
-		t.Fatalf("plain output notify delay = %v, want fast path", fast)
+	if fast != 120*time.Millisecond {
+		t.Fatalf("plain output stable delay = %v, want %v", fast, 120*time.Millisecond)
 	}
 
 	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？\n> Use /skills to list available skills\ngpt-5.5 medium · ~")
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• Working (1s • esc to interrupt)")
 	rt.mu.Lock()
-	conservative := rt.notifyDelayLocked()
+	conservative := rt.notifyStableDelayLocked()
 	rt.mu.Unlock()
-	if conservative != 7*time.Second {
-		t.Fatalf("codex output notify delay = %v, want configured delay", conservative)
+	if conservative != 450*time.Millisecond {
+		t.Fatalf("codex output stable delay = %v, want %v", conservative, 450*time.Millisecond)
+	}
+}
+
+func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	version := rt.stateVersion
+
+	rt.notifyAfterStable(version)
+	if got := rt.Snapshot().Status; got != StatusWaiting {
+		t.Fatalf("stable output should transition to waiting, got %s", got)
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected stable notification, got %#v", notes)
+	}
+	if notes[0].Content != "$ echo hello\nhello\n$" {
+		t.Fatalf("unexpected stable notification content: %q", notes[0].Content)
+	}
+}
+
+func TestNotifyAfterStableDoesNotSendWhenNotificationDisabled(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: false},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	version := rt.stateVersion
+
+	rt.notifyAfterStable(version)
+	if got := rt.Snapshot().Status; got != StatusWaiting {
+		t.Fatalf("stable output should still transition to waiting, got %s", got)
+	}
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("disabled notification should not send, got %d", got)
+	}
+}
+
+func TestVisibleSnapshotSyncDoesNotScheduleNotification(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.lastInputText = "echo hello"
+	rt.visibleSnapshot = "$ echo hello\nhello\n$"
+
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$ ")
+
+	rt.mu.Lock()
+	timer := rt.notifyStableTimer
+	rt.mu.Unlock()
+	if timer != nil {
+		t.Fatal("snapshot-only sync should not schedule a notification timer")
+	}
+	time.Sleep(defaultFastWaitingTransition + 100*time.Millisecond)
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("snapshot-only sync should not send notification, got %d", got)
+	}
+}
+
+func TestRequestFreshSnapshotAsksSubscriberAndWaitsForUpdate(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]struct{}),
+	}
+	ch, cancel := rt.Subscribe()
+	defer cancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(time.Second)
+	}()
+
+	select {
+	case ev := <-ch:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("event type = %q, want snapshot request", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected snapshot request event")
+	}
+	rt.SetVisibleSnapshot("> hello\n• world")
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("request should report a fresh snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
 	}
 }
 
 func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	notifier := &recordingNotifier{}
-	m := NewManager(nil, nil, WithNotifyIdleTimeout(time.Second), WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},

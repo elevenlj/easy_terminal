@@ -35,7 +35,9 @@ async function loadSessions() {
   state.sessions = await api("/api/sessions");
   renderSessions();
   if (!state.active) {
-    const firstLive = state.sessions.find((s) => s.live);
+    const requestedID = new URLSearchParams(location.search).get("session");
+    const requested = requestedID ? state.sessions.find((s) => s.id === requestedID && s.live) : null;
+    const firstLive = requested || state.sessions.find((s) => s.live);
     if (firstLive) selectSession(firstLive.id);
   }
 }
@@ -120,11 +122,6 @@ function initTerminal() {
   setTimeout(() => fitTerminalSafely(), 120);
   state.term.onData((data) => {
     sendWS({ type: "input", data });
-    scheduleSnapshot();
-    if (data.includes("\r") || data.includes("\n")) {
-      setTimeout(() => syncSnapshotNow(), 80);
-      setTimeout(() => syncSnapshotNow(), 260);
-    }
   });
   window.removeEventListener("resize", resizeTerm);
   window.addEventListener("resize", resizeTerm);
@@ -154,9 +151,17 @@ function connectWS(id) {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => resizeTerm();
   ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "snapshot_request") {
+          syncSnapshotNow();
+          return;
+        }
+      } catch {}
+    }
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
     state.term.write(text);
-    requestAnimationFrame(() => scheduleSnapshot());
   };
   ws.onclose = () => setTimeout(loadSessions, 300);
 }
@@ -189,12 +194,6 @@ function fitTerminalSafely() {
       Math.max(state.term.rows || 0, DEFAULT_TERMINAL_ROWS)
     );
   }
-}
-
-let snapshotTimer = null;
-function scheduleSnapshot() {
-  clearTimeout(snapshotTimer);
-  snapshotTimer = setTimeout(() => syncSnapshotNow(), 120);
 }
 
 function syncSnapshotNow() {

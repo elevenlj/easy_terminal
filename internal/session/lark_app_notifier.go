@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -76,7 +77,8 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("lark message API returned %s", resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
 	}
 	defaultLarkMessageRegistry.rememberLatest(note.SessionID)
 	return nil

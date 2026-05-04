@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,13 +20,13 @@ import (
 )
 
 type Config struct {
-	Port                     string `json:"port"`
-	LarkAppID                string `json:"lark_app_id"`
-	LarkAppSecret            string `json:"lark_app_secret"`
-	LarkNotifyReceiveID      string `json:"lark_notify_receive_id"`
-	LarkMentionEnabled       bool   `json:"lark_mention_enabled"`
-	WaitingTransitionSeconds int    `json:"waiting_transition_seconds"`
-	NotifyIdleSeconds        int    `json:"notify_idle_seconds"`
+	Port                            string `json:"port"`
+	LarkAppID                       string `json:"lark_app_id"`
+	LarkAppSecret                   string `json:"lark_app_secret"`
+	LarkNotifyReceiveID             string `json:"lark_notify_receive_id"`
+	LarkMentionEnabled              bool   `json:"lark_mention_enabled"`
+	FastWaitingTransitionMs         int    `json:"fast_waiting_transition_ms"`
+	ConservativeWaitingTransitionMs int    `json:"conservative_waiting_transition_ms"`
 }
 
 func main() {
@@ -41,6 +43,14 @@ func run() error {
 	_ = os.MkdirAll(filepath.Dir(dbPath), 0o755)
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	_ = os.MkdirAll(logDir, 0o755)
+	logFile, err := os.OpenFile(filepath.Join(logDir, "easy_terminal.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("failed to open log file: %v", err)
+	} else {
+		defer logFile.Close()
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		log.Printf("logging to %s", filepath.Join(logDir, "easy_terminal.log"))
+	}
 
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -61,8 +71,10 @@ func run() error {
 		st,
 		session.ShellLauncher{},
 		session.WithNotifier(notifier),
-		session.WithIdleTimeout(time.Duration(cfg.WaitingTransitionSeconds)*time.Second),
-		session.WithNotifyIdleTimeout(time.Duration(cfg.NotifyIdleSeconds)*time.Second),
+		session.WithWaitingTransitionDelays(
+			time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond,
+			time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond,
+		),
 		session.WithBrowserNeeded(headless.Ensure),
 	)
 
@@ -82,7 +94,7 @@ func run() error {
 }
 
 func loadConfig() Config {
-	cfg := Config{Port: "8080", LarkMentionEnabled: true, WaitingTransitionSeconds: 2, NotifyIdleSeconds: 5}
+	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700}
 	if b, err := os.ReadFile(filepath.Join("conf", "config.local.json")); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
@@ -95,11 +107,11 @@ func loadConfig() Config {
 			cfg.LarkMentionEnabled = parsed
 		}
 	}
-	if cfg.WaitingTransitionSeconds <= 0 {
-		cfg.WaitingTransitionSeconds = 2
+	if cfg.FastWaitingTransitionMs <= 0 {
+		cfg.FastWaitingTransitionMs = 300
 	}
-	if cfg.NotifyIdleSeconds <= 0 {
-		cfg.NotifyIdleSeconds = 5
+	if cfg.ConservativeWaitingTransitionMs <= 0 {
+		cfg.ConservativeWaitingTransitionMs = 700
 	}
 	return cfg
 }
@@ -112,48 +124,77 @@ func env(key, fallback string) string {
 }
 
 type headlessBrowserManager struct {
-	port string
-	once sync.Once
+	port     string
+	mu       sync.Mutex
+	sessions map[string]*headlessBrowserSession
+}
+
+type headlessBrowserSession struct {
+	cmd     *exec.Cmd
+	profile string
+	started time.Time
 }
 
 func newHeadlessBrowserManager(port string) *headlessBrowserManager {
-	return &headlessBrowserManager{port: port}
+	return &headlessBrowserManager{port: port, sessions: make(map[string]*headlessBrowserSession)}
 }
 
 func (m *headlessBrowserManager) Ensure(sessionID string) {
-	m.once.Do(func() {
-		chrome := findChrome()
-		if chrome == "" {
-			log.Printf("headless browser unavailable: Chrome/Chromium not found")
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	if sess := m.sessions[sessionID]; sess != nil && sess.cmd != nil && sess.cmd.ProcessState == nil {
+		if time.Since(sess.started) < 15*time.Second {
+			m.mu.Unlock()
 			return
 		}
-		profile, err := os.MkdirTemp("", "easy-terminal-headless-*")
-		if err != nil {
-			log.Printf("headless browser profile setup failed: %v", err)
-			return
+		log.Printf("headless browser appears stale; restarting for terminal snapshots (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
+		_ = sess.cmd.Process.Kill()
+		delete(m.sessions, sessionID)
+	}
+	m.mu.Unlock()
+
+	chrome := findChrome()
+	if chrome == "" {
+		log.Printf("headless browser unavailable: Chrome/Chromium not found")
+		return
+	}
+	profile, err := os.MkdirTemp("", "easy-terminal-headless-*")
+	if err != nil {
+		log.Printf("headless browser profile setup failed: %v", err)
+		return
+	}
+	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID)
+	cmd := exec.Command(chrome,
+		"--headless=new",
+		"--disable-gpu",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-dev-shm-usage",
+		"--user-data-dir="+profile,
+		pageURL,
+	)
+	if err := cmd.Start(); err != nil {
+		_ = os.RemoveAll(profile)
+		log.Printf("headless browser start failed: %v", err)
+		return
+	}
+	m.mu.Lock()
+	m.sessions[sessionID] = &headlessBrowserSession{cmd: cmd, profile: profile, started: time.Now()}
+	m.mu.Unlock()
+	log.Printf("headless browser started for terminal snapshots (pid=%d, session=%s)", cmd.Process.Pid, sessionID)
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Printf("headless browser exited: %v", err)
 		}
-		url := "http://localhost:" + m.port + "/"
-		cmd := exec.Command(chrome,
-			"--headless=new",
-			"--disable-gpu",
-			"--no-first-run",
-			"--no-default-browser-check",
-			"--disable-dev-shm-usage",
-			"--user-data-dir="+profile,
-			url,
-		)
-		if err := cmd.Start(); err != nil {
-			log.Printf("headless browser start failed: %v", err)
-			return
+		m.mu.Lock()
+		if sess := m.sessions[sessionID]; sess != nil && sess.cmd == cmd {
+			delete(m.sessions, sessionID)
 		}
-		log.Printf("headless browser started for terminal snapshots (pid=%d, session=%s)", cmd.Process.Pid, sessionID)
-		go func() {
-			if err := cmd.Wait(); err != nil {
-				log.Printf("headless browser exited: %v", err)
-			}
-			_ = os.RemoveAll(profile)
-		}()
-	})
+		m.mu.Unlock()
+		_ = os.RemoveAll(profile)
+	}()
 }
 
 func findChrome() string {

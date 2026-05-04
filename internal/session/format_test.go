@@ -6,7 +6,7 @@ import (
 )
 
 func TestPickNotifyContentPrefersVisibleSnapshot(t *testing.T) {
-	got := PickNotifyContent("cmd\nrendered output", "", []byte("raw"), "cmd")
+	got := PickNotifyContent("cmd\nrendered output", "", []byte("raw"), "")
 	if got != "cmd\nrendered output" {
 		t.Fatalf("unexpected content: %q", got)
 	}
@@ -55,9 +55,197 @@ func TestPickNotifyContentAnchorsOnLastInputWhenSnapshotPrefixChanged(t *testing
 	}
 }
 
+func TestPickNotifyContentAnchorsInsideCodexScrollbackWhenReplyIsReady(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"Tip: New Use /fast to enable our fastest inference.",
+		"> 今天天气怎么样",
+		"• 你想查哪个城市的天气？给我城市名就行，比如“上海”或“纽约”。",
+		"> 成都",
+		"• Searching the web",
+		"• Searched weather: China, Sichuan, Chengdu",
+		"• 成都今天（5月4日）天气晴朗，目前约 28°C。",
+		"> Use /skills to list available skills",
+	}, "\n")
+	got := PickNotifyContent(visible, "stale prefix", nil, "成都")
+	want := strings.Join([]string{
+		"> 成都",
+		"• Searching the web",
+		"• Searched weather: China, Sichuan, Chengdu",
+		"• 成都今天（5月4日）天气晴朗，目前约 28°C。",
+		"> Use /skills to list available skills",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected anchored content:\n%q\nwant:\n%q", got, want)
+	}
+	if strings.Contains(got, "今天天气怎么样") || strings.Contains(got, "OpenAI Codex") {
+		t.Fatalf("previous round leaked into notification: %q", got)
+	}
+}
+
+func TestPickNotifyContentKeepsFullCodexTUIScreen(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"Tip: New Use /fast to enable our fastest inference.",
+		"> Implement {feature}",
+		"gpt-5.5 medium · ~",
+	}, "\n")
+	got := PickNotifyContent(visible, "stale prefix with codex", nil, "Implement {feature}")
+	if got != "> Implement {feature}" {
+		t.Fatalf("input anchor should win over full-screen TUI fallback, got %q", got)
+	}
+}
+
+func TestPickNotifyContentKeepsCodexTUIScreenAfterCodexShellLaunch(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"Tip: Try the Codex App.",
+		"› Run /review on my current changes",
+		"gpt-5.5 medium · ~",
+	}, "\n")
+	if NotifyContentNeedsMoreSnapshot(visible, "", nil, "codex") {
+		t.Fatalf("codex launch TUI should be ready to notify")
+	}
+	got := PickNotifyContent(visible, "", nil, "codex")
+	if !strings.Contains(got, "OpenAI Codex") || !strings.Contains(got, "model: gpt-5.5 medium") || strings.Contains(got, "Run /review") {
+		t.Fatalf("unexpected codex launch TUI notification: %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"> previous",
+		"• old answer",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, "missing long wrapped input")
+	if got != visible {
+		t.Fatalf("missing input anchor should fall back to visible snapshot:\n%q\nwant:\n%q", got, visible)
+	}
+}
+
+func TestPickNotifyContentKeepsCodexTrustScreenAfterSingleCharInput(t *testing.T) {
+	visible := strings.Join([]string{
+		">_ You are in /Users/eleven/project/temp",
+		"Do you trust the contents of this directory?",
+		"Working with untrusted contents comes with higher risk of prompt injection.",
+		"› 1. Yes, continue",
+		"  2. No, quit",
+		"Press enter to continue",
+	}, "\n")
+	got := PickNotifyContent(visible, "Continue anyway? [y/N]:", nil, "y")
+	if !strings.Contains(got, "Do you trust the contents of this directory?") || !strings.Contains(got, "1. Yes, continue") {
+		t.Fatalf("trust screen should be preserved after y input, got %q", got)
+	}
+}
+
+func TestPickNotifyContentDoesNotAnchorSingleCharInputInsideWords(t *testing.T) {
+	visible := strings.Join([]string{
+		"directory:",
+		"› 1. Yes, continue",
+		"Press enter to continue",
+	}, "\n")
+	got := visibleTextFromLastInput(visible, "y")
+	if got != "" {
+		t.Fatalf("single-char input should not anchor inside unrelated words, got %q", got)
+	}
+}
+
+func TestPickNotifyContentAnchorsOnShellPromptSuffix(t *testing.T) {
+	visible := strings.Join([]string{
+		"eleven@elevendeMacBook-Pro ~ % pwd",
+		"/Users/eleven",
+		"eleven@elevendeMacBook-Pro ~ %",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, "pwd")
+	want := strings.Join([]string{
+		"eleven@elevendeMacBook-Pro ~ % pwd",
+		"/Users/eleven",
+		"eleven@elevendeMacBook-Pro ~ %",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected shell anchored content:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentAnchorsOnBrowserShellPromptSuffix(t *testing.T) {
+	visible := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, "pwd")
+	want := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected browser shell anchored content:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentFallsBackToBrowserShellPromptWhenInputRecordIsDirty(t *testing.T) {
+	visible := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+	}, "\n")
+	if NotifyContentNeedsMoreSnapshot(visible, "", nil, "p w dpwdpwd") {
+		t.Fatalf("dirty recorded input should not block a ready shell snapshot")
+	}
+	got := PickNotifyContent(visible, "", nil, "p w dpwdpwd")
+	want := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+	}, "\n")
+	if got != want {
+		t.Fatalf("unexpected dirty-input fallback content:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestNotifyContentStillWaitsWhenDirtyInputFallbackHasNoOutput(t *testing.T) {
+	visible := strings.Join([]string{
+		"eleven ~ > pwd",
+		"eleven ~ >",
+	}, "\n")
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "p w dpwdpwd") {
+		t.Fatalf("dirty recorded input fallback should still wait when the shell command has no output")
+	}
+}
+
+func TestPickNotifyContentDoesNotTreatPlainOutputAsInputAnchor(t *testing.T) {
+	visible := strings.Join([]string{
+		"> first",
+		"repeat",
+		"• repeat",
+	}, "\n")
+	got := visibleTextFromLastInput(visible, "repeat")
+	if got != "" {
+		t.Fatalf("plain output should not become an input anchor: %q", got)
+	}
+}
+
 func TestPickNotifyContentDoesNotUseRoundReplyWhenVisibleSnapshotExists(t *testing.T) {
 	got := PickNotifyContent("old visible history", "stale snapshot", []byte("current answer only"), "missing input")
-	if got != "missing input" {
+	if got != "old visible history" {
 		t.Fatalf("unexpected content: %q", got)
 	}
 }
@@ -72,7 +260,7 @@ func TestPickNotifyContentDoesNotUseRoundReplyWithoutVisibleSnapshot(t *testing.
 func TestPickNotifyContentSuppressesDirtyRoundReplyWhenVisibleSnapshotExists(t *testing.T) {
 	dirty := []byte("[O\r\n•RneReececctcotionin2nnngneg.ec..ct..ti.")
 	got := PickNotifyContent("OpenAI Codex old screen", "stale snapshot", dirty, "Implement {feature}")
-	if got != "Implement {feature}" {
+	if got != "OpenAI Codex old screen" {
 		t.Fatalf("dirty round reply should not be used when visible snapshot exists: %q", got)
 	}
 }
@@ -102,12 +290,32 @@ func TestNotifyContentNeedsMoreSnapshotForTransientOnlyRound(t *testing.T) {
 		"> Find and fix a bug in @filename",
 		"gpt-5.5 medium · ~",
 	}, "\n")
-	if !NotifyContentNeedsMoreSnapshot(visible, "", "今天天气怎么样") {
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "今天天气怎么样") {
 		t.Fatalf("transient-only content should wait for a newer frontend snapshot")
 	}
 	complete := visible + "\n• 你想查哪个城市的天气？\n比如：上海、北京、纽约。"
-	if NotifyContentNeedsMoreSnapshot(complete, "", "今天天气怎么样") {
+	if NotifyContentNeedsMoreSnapshot(complete, "", nil, "今天天气怎么样") {
 		t.Fatalf("completed content should be ready to notify")
+	}
+}
+
+func TestNotifyContentUsesVisibleSnapshotWhenSnapshotAnchorIsMissing(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"> old",
+		"• old answer",
+	}, "\n")
+	round := []byte("> wrapped long input\n• current answer")
+	if NotifyContentNeedsMoreSnapshot(visible, "", round, "wrapped long input") {
+		t.Fatalf("visible snapshot should be enough when snapshot cannot anchor the input")
+	}
+	got := PickNotifyContent(visible, "", round, "wrapped long input")
+	if got != visible {
+		t.Fatalf("unexpected visible snapshot fallback:\n%q\nwant:\n%q", got, visible)
 	}
 }
 
@@ -149,7 +357,7 @@ func TestPickNotifyContentDropsPromptStatusAndCodexSuggestions(t *testing.T) {
 	}
 }
 
-func TestPickNotifyContentRemovesExtraBlankLinesAndHorizontalRules(t *testing.T) {
+func TestPickNotifyContentRemovesExtraBlankLinesButKeepsHorizontalRules(t *testing.T) {
 	visible := strings.Join([]string{
 		"Searching the web",
 		"",
@@ -165,12 +373,11 @@ func TestPickNotifyContentRemovesExtraBlankLinesAndHorizontalRules(t *testing.T)
 	if strings.Contains(got, "\n\n") {
 		t.Fatalf("expected blank lines to be collapsed, got %q", got)
 	}
-	if strings.Contains(got, "────") || strings.Contains(got, "____") {
-		t.Fatalf("expected horizontal rule lines to be removed, got %q", got)
-	}
 	want := strings.Join([]string{
 		"Searching the web",
 		"Searched weather: Chengdu, Sichuan, China",
+		"────────────────────────────────────────",
+		"________________________",
 		"成都今天预计晴转多云，18~29°C。",
 		"Use /skills to list available skills",
 	}, "\n")

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -33,7 +34,13 @@ func TestExtractLarkMessageText(t *testing.T) {
 func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
-	manager := NewManager(nil, launcher)
+	var browserMu sync.Mutex
+	var browserRequests []string
+	manager := NewManager(nil, launcher, WithBrowserNeeded(func(sessionID string) {
+		browserMu.Lock()
+		defer browserMu.Unlock()
+		browserRequests = append(browserRequests, sessionID)
+	}))
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
 
 	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start", "", "", "text", `{"text":"开始 飞书会话"}`))
@@ -53,6 +60,7 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	if !sessions[0].NotifyOnWaiting {
 		t.Fatalf("lark-created session should enable notifications by default: %#v", sessions[0])
 	}
+	waitForBrowserRequest(t, &browserMu, &browserRequests, "sess-1")
 
 	err = bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow", "m-start", "", "text", `{"text":"echo from lark"}`))
 	if err != nil {
@@ -61,6 +69,100 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	got := launcher.terminals[0].writes()
 	if !strings.Contains(got, "echo from lark\r") {
 		t.Fatalf("terminal did not receive followup input: %q", got)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 2 || parts[len(parts)-2] != "echo from lark" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("lark followup should submit text and enter separately, got %#v", parts)
+	}
+	waitForBrowserRequest(t, &browserMu, &browserRequests, "sess-1")
+}
+
+func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-pipe", "", "", "text", `{"text":"开始 Pipe会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-pipeline", "m-start-pipe", "", "text", `{"text":"pwd | cd /tmp | pwd"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 2 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("first pipeline command should be submitted immediately, got %#v", parts)
+	}
+	if strings.Contains(launcher.terminals[0].writes(), "cd /tmp") {
+		t.Fatalf("later pipeline commands should wait for notification, writes: %q", launcher.terminals[0].writes())
+	}
+
+	bridge.OnNotificationSent("sess-1")
+	parts = launcher.terminals[0].writeParts()
+	if len(parts) < 4 || parts[len(parts)-2] != "cd /tmp" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("second pipeline command should run after notification, got %#v", parts)
+	}
+	if strings.Contains(launcher.terminals[0].writes(), "pwdpwd") {
+		t.Fatalf("pipeline commands should be submitted as separate turns, writes: %q", launcher.terminals[0].writes())
+	}
+
+	bridge.OnNotificationSent("sess-1")
+	parts = launcher.terminals[0].writeParts()
+	if len(parts) < 6 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("third pipeline command should run after next notification, got %#v", parts)
+	}
+}
+
+func TestSplitLarkPipelineSupportsEscapedPipe(t *testing.T) {
+	got := splitLarkPipeline(`echo a \| b | pwd`)
+	want := []string{"echo a | b", "pwd"}
+	if len(got) != len(want) {
+		t.Fatalf("split length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("part %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSplitLarkPipelineSupportsFullWidthPipe(t *testing.T) {
+	got := splitLarkPipeline("开始 测试 ｜ pwd")
+	want := []string{"开始 测试", "pwd"}
+	if len(got) != len(want) {
+		t.Fatalf("split length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("part %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLarkReplyBridgeStartPipelineWithFullWidthPipe(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-wide-pipe", "", "", "text", `{"text":"开始 测试 ｜ pwd"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "测试" {
+		t.Fatalf("start pipeline should use only first segment as session name, got %#v", sessions)
+	}
+	if got := launcher.terminals[0].writes(); strings.Contains(got, "pwd") {
+		t.Fatalf("queued command should wait for first notification, writes: %q", got)
+	}
+
+	bridge.OnNotificationSent("sess-1")
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 2 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("queued start pipeline command should run after notification, got %#v", parts)
 	}
 }
 
@@ -177,6 +279,24 @@ func resetLarkRegistryForTest() {
 	defaultLarkMessageRegistry.latestSessionID = ""
 }
 
+func waitForBrowserRequest(t *testing.T, mu *sync.Mutex, requests *[]string, sessionID string) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		mu.Lock()
+		for _, got := range *requests {
+			if got == sessionID {
+				mu.Unlock()
+				return
+			}
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Fatalf("expected browser request for %s, got %#v", sessionID, *requests)
+}
+
 func p2Message(messageID, parentID, rootID, messageType, content string) *larkim.P2MessageReceiveV1 {
 	return &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
@@ -221,6 +341,7 @@ func (h recordingHandle) Process() Waiter    { return blockingWaiter{} }
 type recordingTerminal struct {
 	mu     sync.Mutex
 	buf    strings.Builder
+	parts  []string
 	readCh chan []byte
 	closed bool
 }
@@ -236,6 +357,7 @@ func (t *recordingTerminal) Read(p []byte) (int, error) {
 func (t *recordingTerminal) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.parts = append(t.parts, string(p))
 	return t.buf.Write(p)
 }
 
@@ -255,6 +377,14 @@ func (t *recordingTerminal) writes() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.buf.String()
+}
+
+func (t *recordingTerminal) writeParts() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cp := make([]string, len(t.parts))
+	copy(cp, t.parts)
+	return cp
 }
 
 type blockingWaiter struct{}

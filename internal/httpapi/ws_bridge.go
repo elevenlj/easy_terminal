@@ -35,9 +35,17 @@ func serveWS(w http.ResponseWriter, r *http.Request, rt *session.RuntimeSession)
 	defer cancel()
 	defer conn.Close()
 	go b.readClient()
-	for out := range ch {
-		if err := conn.WriteMessage(websocket.BinaryMessage, out); err != nil {
-			return
+	for ev := range ch {
+		switch ev.Type {
+		case session.RuntimeEventSnapshotRequest:
+			msg, _ := json.Marshal(map[string]string{"type": "snapshot_request"})
+			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		default:
+			if err := conn.WriteMessage(websocket.BinaryMessage, ev.Data); err != nil {
+				return
+			}
 		}
 	}
 }

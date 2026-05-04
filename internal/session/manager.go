@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,8 +17,11 @@ import (
 )
 
 const (
-	maxOutputBytes = 512 * 1024
-	maxRoundBytes  = 64 * 1024
+	maxOutputBytes                       = 512 * 1024
+	maxRoundBytes                        = 64 * 1024
+	defaultFastWaitingTransition         = 300 * time.Millisecond
+	defaultConservativeWaitingTransition = 700 * time.Millisecond
+	defaultNotifyRetryDelay              = time.Second
 )
 
 type Store interface {
@@ -35,26 +39,27 @@ type Store interface {
 }
 
 type Manager struct {
-	mu                sync.RWMutex
-	store             Store
-	launcher          Launcher
-	notifier          WaitingNotifier
-	idCounter         atomic.Int64
-	idleTimeout       time.Duration
-	notifyIdleTimeout time.Duration
-	sessions          map[string]*RuntimeSession
-	onBrowserNeeded   func(string)
+	mu                  sync.RWMutex
+	store               Store
+	launcher            Launcher
+	notifier            WaitingNotifier
+	idCounter           atomic.Int64
+	fastWaiting         time.Duration
+	conservativeWaiting time.Duration
+	sessions            map[string]*RuntimeSession
+	onBrowserNeeded     func(string)
+	onNotificationSent  func(string)
 }
 
 type ManagerOption func(*Manager)
 
 func NewManager(store Store, launcher Launcher, opts ...ManagerOption) *Manager {
 	m := &Manager{
-		store:             store,
-		launcher:          launcher,
-		idleTimeout:       2 * time.Second,
-		notifyIdleTimeout: 5 * time.Second,
-		sessions:          make(map[string]*RuntimeSession),
+		store:               store,
+		launcher:            launcher,
+		fastWaiting:         defaultFastWaitingTransition,
+		conservativeWaiting: defaultConservativeWaitingTransition,
+		sessions:            make(map[string]*RuntimeSession),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -69,24 +74,41 @@ func WithNotifier(n WaitingNotifier) ManagerOption {
 	return func(m *Manager) { m.notifier = n }
 }
 
-func WithIdleTimeout(d time.Duration) ManagerOption {
+func WithWaitingTransitionDelays(fast, conservative time.Duration) ManagerOption {
 	return func(m *Manager) {
-		if d > 0 {
-			m.idleTimeout = d
+		if fast > 0 {
+			m.fastWaiting = fast
 		}
-	}
-}
-
-func WithNotifyIdleTimeout(d time.Duration) ManagerOption {
-	return func(m *Manager) {
-		if d > 0 {
-			m.notifyIdleTimeout = d
+		if conservative > 0 {
+			m.conservativeWaiting = conservative
 		}
 	}
 }
 
 func WithBrowserNeeded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onBrowserNeeded = fn }
+}
+
+func (m *Manager) EnsureBrowser(sessionID string) {
+	if m.onBrowserNeeded == nil || sessionID == "" {
+		return
+	}
+	go m.onBrowserNeeded(sessionID)
+}
+
+func (m *Manager) SetNotificationSentHook(fn func(string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onNotificationSent = fn
+}
+
+func (m *Manager) notificationSent(sessionID string) {
+	m.mu.RLock()
+	fn := m.onNotificationSent
+	m.mu.RUnlock()
+	if fn != nil && sessionID != "" {
+		go fn(sessionID)
+	}
 }
 
 func (m *Manager) CreateSession(ctx context.Context, name string) (Session, error) {
@@ -116,7 +138,7 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 		session:     sess,
 		terminal:    handle.Terminal(),
 		process:     handle.Process(),
-		subscribers: make(map[chan []byte]struct{}),
+		subscribers: make(map[chan RuntimeEvent]struct{}),
 	}
 	if m.store != nil {
 		if err := m.store.CreateSession(ctx, sess); err != nil {
@@ -127,7 +149,6 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 	m.mu.Lock()
 	m.sessions[id] = rt
 	m.mu.Unlock()
-	rt.resetIdleTimerLocked()
 	go rt.streamOutput()
 	go rt.waitForExit()
 	sess.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
@@ -280,27 +301,37 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 }
 
 type RuntimeSession struct {
-	mu                    sync.Mutex
-	manager               *Manager
-	session               Session
-	terminal              Terminal
-	process               Waiter
-	output                []byte
-	roundReply            []byte
-	visibleSnapshot       string
-	snapshotAtRoundStart  string
-	lastInputText         string
-	inputLineBuffer       string
-	awaitingReply         bool
-	awaitingReplySince    time.Time
-	lastNotifiedRoundHash string
-	subscribers           map[chan []byte]struct{}
-	nextSeq               int64
-	stateVersion          int64
-	notifyVersion         int64
-	idleTimer             *time.Timer
-	notifyIdleTimer       *time.Timer
+	mu                     sync.Mutex
+	manager                *Manager
+	session                Session
+	terminal               Terminal
+	process                Waiter
+	output                 []byte
+	roundReply             []byte
+	visibleSnapshot        string
+	visibleSnapshotVersion int64
+	snapshotAtRoundStart   string
+	lastInputText          string
+	inputLineBuffer        string
+	lastNotifiedRoundHash  string
+	subscribers            map[chan RuntimeEvent]struct{}
+	snapshotWaiters        []chan struct{}
+	nextSeq                int64
+	stateVersion           int64
+	notifyVersion          int64
+	notifyRetryTimer       *time.Timer
+	notifyStableTimer      *time.Timer
 }
+
+type RuntimeEvent struct {
+	Type string
+	Data []byte
+}
+
+const (
+	RuntimeEventOutput          = "output"
+	RuntimeEventSnapshotRequest = "snapshot_request"
+)
 
 func (rt *RuntimeSession) Snapshot() Session {
 	rt.mu.Lock()
@@ -316,8 +347,8 @@ func (rt *RuntimeSession) OutputSnapshot() []byte {
 	return cp
 }
 
-func (rt *RuntimeSession) Subscribe() (chan []byte, func()) {
-	ch := make(chan []byte, 64)
+func (rt *RuntimeSession) Subscribe() (chan RuntimeEvent, func()) {
+	ch := make(chan RuntimeEvent, 64)
 	rt.mu.Lock()
 	rt.subscribers[ch] = struct{}{}
 	rt.mu.Unlock()
@@ -353,13 +384,62 @@ func (rt *RuntimeSession) Resize(cols, rows uint16) error {
 func (rt *RuntimeSession) SetVisibleSnapshot(data string) {
 	rt.mu.Lock()
 	rt.visibleSnapshot = data
+	rt.visibleSnapshotVersion++
+	waiters := rt.snapshotWaiters
+	rt.snapshotWaiters = nil
 	rt.mu.Unlock()
+	for _, ch := range waiters {
+		close(ch)
+	}
 }
 
 func (rt *RuntimeSession) CurrentRoundContent() string {
+	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+}
+
+func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
+	if timeout <= 0 {
+		return false
+	}
+	rt.mu.Lock()
+	if !rt.session.Live {
+		rt.mu.Unlock()
+		return false
+	}
+	before := rt.visibleSnapshotVersion
+	sessionID := rt.session.ID
+	needsBrowser := len(rt.subscribers) == 0 && rt.manager.onBrowserNeeded != nil
+	if len(rt.subscribers) == 0 && !needsBrowser {
+		rt.mu.Unlock()
+		return false
+	}
+	waiter := make(chan struct{})
+	rt.snapshotWaiters = append(rt.snapshotWaiters, waiter)
+	for ch := range rt.subscribers {
+		select {
+		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
+		default:
+		}
+	}
+	rt.mu.Unlock()
+	if needsBrowser {
+		rt.manager.EnsureBrowser(sessionID)
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-waiter:
+	case <-timer.C:
+	}
+	rt.mu.Lock()
+	fresh := rt.visibleSnapshotVersion > before
+	subscriberCount := len(rt.subscribers)
+	rt.mu.Unlock()
+	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d needed_browser=%v timeout=%s", sessionID, fresh, subscriberCount, needsBrowser, timeout)
+	return fresh
 }
 
 func (rt *RuntimeSession) MarkInputActivity(data string) {
@@ -367,8 +447,6 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	submitted := rt.recordInputLocked(data)
 	if submitted {
 		rt.snapshotAtRoundStart = rt.visibleSnapshot
-		rt.awaitingReply = true
-		rt.awaitingReplySince = time.Now()
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
 	}
@@ -377,7 +455,7 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.stateVersion++
 	rt.notifyVersion++
 	rt.stopNotifyTimerLocked()
-	rt.resetIdleTimerLocked()
+	rt.stopNotifyStableTimerLocked()
 	s := rt.session
 	rt.mu.Unlock()
 	_ = rt.manager.persist(context.Background(), s)
@@ -486,13 +564,12 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	rt.session.HistorySize += int64(len(cp))
 	rt.session.UpdatedAt = time.Now().UTC()
 	if renderable {
-		rt.awaitingReply = false
 		rt.session.Status = StatusRunning
-		rt.resetIdleTimerLocked()
+		rt.resetNotifyStableTimerLocked()
 	}
 	for ch := range rt.subscribers {
 		select {
-		case ch <- cp:
+		case ch <- RuntimeEvent{Type: RuntimeEventOutput, Data: cp}:
 		default:
 		}
 	}
@@ -508,8 +585,8 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 
 func (rt *RuntimeSession) Close() {
 	rt.mu.Lock()
-	rt.stopIdleTimerLocked()
 	rt.stopNotifyTimerLocked()
+	rt.stopNotifyStableTimerLocked()
 	for ch := range rt.subscribers {
 		close(ch)
 		delete(rt.subscribers, ch)
@@ -551,8 +628,8 @@ func (rt *RuntimeSession) waitForExit() {
 
 func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.mu.Lock()
-	rt.stopIdleTimerLocked()
 	rt.stopNotifyTimerLocked()
+	rt.stopNotifyStableTimerLocked()
 	rt.session.Status = status
 	rt.session.Live = false
 	rt.session.ExitCode = &code
@@ -570,88 +647,61 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 	_ = rt.terminal.Close()
 }
 
-func (rt *RuntimeSession) resetIdleTimerLocked() {
-	rt.stopIdleTimerLocked()
+func (rt *RuntimeSession) notifyStableDelayLocked() time.Duration {
+	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
+		return rt.manager.conservativeWaiting
+	}
+	return rt.manager.fastWaiting
+}
+
+func (rt *RuntimeSession) resetNotifyStableTimerLocked() {
+	rt.stopNotifyStableTimerLocked()
+	if !rt.session.Live {
+		return
+	}
 	version := rt.stateVersion
-	rt.idleTimer = time.AfterFunc(rt.manager.idleTimeout, func() {
-		rt.markWaitingIfActive(version)
+	delay := rt.notifyStableDelayLocked()
+	rt.notifyStableTimer = time.AfterFunc(delay, func() {
+		rt.notifyAfterStable(version)
 	})
 }
 
-func (rt *RuntimeSession) markWaitingIfActive(version int64) {
+func (rt *RuntimeSession) notifyAfterStable(version int64) {
 	rt.mu.Lock()
-	if rt.session.Status != StatusRunning || !rt.session.Live || rt.stateVersion != version {
+	if !rt.session.Live || rt.stateVersion != version || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
 		rt.mu.Unlock()
 		return
 	}
-	if rt.awaitingReply {
-		if time.Since(rt.awaitingReplySince) < rt.awaitingReplyGrace() {
-			rt.resetIdleTimerLocked()
-			rt.mu.Unlock()
-			return
-		}
-		rt.awaitingReply = false
+	if rt.session.Status == StatusRunning {
+		rt.session.Status = StatusWaiting
+		rt.session.UpdatedAt = time.Now().UTC()
+		rt.notifyVersion++
+		s := rt.session
+		notifyVersion := rt.notifyVersion
+		rt.mu.Unlock()
+		_ = rt.manager.persist(context.Background(), s)
+		rt.notifyIfStillWaiting(notifyVersion)
+		return
 	}
-	rt.session.Status = StatusWaiting
-	rt.session.UpdatedAt = time.Now().UTC()
-	rt.notifyVersion++
 	notifyVersion := rt.notifyVersion
-	s := rt.session
-	if rt.session.NotifyOnWaiting {
-		rt.stopNotifyTimerLocked()
-		delay := rt.notifyDelayLocked()
-		rt.notifyIdleTimer = time.AfterFunc(delay, func() {
-			rt.notifyIfStillWaiting(notifyVersion)
-		})
-	}
 	rt.mu.Unlock()
-	_ = rt.manager.persist(context.Background(), s)
-}
-
-func (rt *RuntimeSession) awaitingReplyGrace() time.Duration {
-	grace := 3 * rt.manager.idleTimeout
-	if grace < 5*time.Second {
-		return 5 * time.Second
-	}
-	return grace
-}
-
-func (rt *RuntimeSession) notifyDelayLocked() time.Duration {
-	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
-		return rt.manager.notifyIdleTimeout
-	}
-	return 0
+	rt.notifyIfStillWaiting(notifyVersion)
 }
 
 func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
-	time.Sleep(350 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	rt.mu.Lock()
-	if rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
+	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
 		rt.mu.Unlock()
 		return
 	}
-	sessionID := rt.session.ID
-	needsBrowser := (len(rt.subscribers) == 0 || strings.TrimSpace(rt.visibleSnapshot) == "") && rt.manager.onBrowserNeeded != nil
-	if needsBrowser {
-		go rt.manager.onBrowserNeeded(sessionID)
-	}
 	rt.mu.Unlock()
+	rt.RequestFreshSnapshot(4 * time.Second)
 	deadline := time.Now().Add(8 * time.Second)
-	if needsBrowser {
-		for time.Now().Before(deadline) {
-			time.Sleep(100 * time.Millisecond)
-			rt.mu.Lock()
-			ready := strings.TrimSpace(rt.visibleSnapshot) != "" || rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version
-			rt.mu.Unlock()
-			if ready {
-				break
-			}
-		}
-	}
 	for time.Now().Before(deadline) {
 		rt.mu.Lock()
-		needsMoreSnapshot := NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText)
-		done := rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version
+		needsMoreSnapshot := NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+		done := rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version
 		rt.mu.Unlock()
 		if done {
 			return
@@ -662,42 +712,57 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	rt.mu.Lock()
-	if rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version {
+	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version {
 		rt.mu.Unlock()
 		return
 	}
 	n, contentHash, ok := rt.waitingNotificationLocked()
 	if !ok {
-		rt.rescheduleNotifyRetryLocked(version)
+		_, _, _, reason := rt.waitingNotificationCandidateLocked()
+		log.Printf("waiting notification not ready session=%s version=%d reason=%s status=%s live=%v notify_version=%d last_input=%q visible_len=%d round_len=%d",
+			rt.session.ID, version, reason, rt.session.Status, rt.session.Live, rt.notifyVersion, rt.lastInputText, len(rt.visibleSnapshot), len(rt.roundReply))
+		if reason != "duplicate_hash" {
+			rt.rescheduleNotifyRetryLocked(version)
+		}
 		rt.mu.Unlock()
 		return
 	}
 	rt.mu.Unlock()
+	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
+		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
 	if err := rt.manager.notifier.NotifyWaiting(n); err != nil {
+		log.Printf("waiting notification send failed session=%s version=%d hash=%s: %v", n.SessionID, version, shortNotifyHash(contentHash), err)
 		return
 	}
+	log.Printf("waiting notification sent session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
 	rt.mu.Lock()
-	if rt.session.Status == StatusWaiting && rt.session.Live && rt.notifyVersion == version {
+	if rt.session.Status == StatusWaiting && rt.session.Live && rt.session.NotifyOnWaiting && rt.notifyVersion == version {
 		rt.lastNotifiedRoundHash = contentHash
 	}
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
+	rt.manager.notificationSent(n.SessionID)
 }
 
 func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, string, bool) {
-	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
-		return WaitingNotification{}, "", false
+	n, contentHash, ok, _ := rt.waitingNotificationCandidateLocked()
+	return n, contentHash, ok
+}
+
+func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
+	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText) {
+		return WaitingNotification{}, "", false, "needs_more_snapshot"
 	}
 	content := PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return WaitingNotification{}, "", false
+		return WaitingNotification{}, "", false, "empty_content"
 	}
 	contentHash := notifyContentHash(content)
 	if contentHash == rt.lastNotifiedRoundHash {
-		return WaitingNotification{}, "", false
+		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content}, contentHash, true
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) rescheduleNotifyRetryLocked(version int64) {
@@ -705,24 +770,9 @@ func (rt *RuntimeSession) rescheduleNotifyRetryLocked(version int64) {
 		return
 	}
 	rt.stopNotifyTimerLocked()
-	delay := rt.notifyRetryDelayLocked()
-	rt.notifyIdleTimer = time.AfterFunc(delay, func() {
+	rt.notifyRetryTimer = time.AfterFunc(defaultNotifyRetryDelay, func() {
 		rt.notifyIfStillWaiting(version)
 	})
-}
-
-func (rt *RuntimeSession) notifyRetryDelayLocked() time.Duration {
-	if rt.manager.notifyIdleTimeout <= 0 {
-		return time.Second
-	}
-	delay := rt.manager.notifyIdleTimeout / 5
-	if delay < 200*time.Millisecond {
-		return 200 * time.Millisecond
-	}
-	if delay > time.Second {
-		return time.Second
-	}
-	return delay
 }
 
 func notifyContentHash(content string) string {
@@ -730,16 +780,34 @@ func notifyContentHash(content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (rt *RuntimeSession) stopIdleTimerLocked() {
-	if rt.idleTimer != nil {
-		rt.idleTimer.Stop()
-		rt.idleTimer = nil
+func shortNotifyHash(hash string) string {
+	if len(hash) <= 12 {
+		return hash
 	}
+	return hash[:12]
+}
+
+func previewLogText(text string, max int) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max]) + "..."
 }
 
 func (rt *RuntimeSession) stopNotifyTimerLocked() {
-	if rt.notifyIdleTimer != nil {
-		rt.notifyIdleTimer.Stop()
-		rt.notifyIdleTimer = nil
+	if rt.notifyRetryTimer != nil {
+		rt.notifyRetryTimer.Stop()
+		rt.notifyRetryTimer = nil
+	}
+}
+
+func (rt *RuntimeSession) stopNotifyStableTimerLocked() {
+	if rt.notifyStableTimer != nil {
+		rt.notifyStableTimer.Stop()
+		rt.notifyStableTimer = nil
 	}
 }

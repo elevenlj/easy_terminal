@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -38,7 +40,8 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return errors.New(resp.Status)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("%s: %s", resp.Status, string(body))
 	}
 	defaultLarkMessageRegistry.rememberLatest(note.SessionID)
 	return nil
