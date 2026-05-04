@@ -3,8 +3,11 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,24 +20,25 @@ import (
 )
 
 type LarkReplyBridge struct {
-	appID         string
-	appSecret     string
-	manager       *Manager
-	apiClient     *lark.Client
-	wsClient      *larkws.Client
-	agent         *CommandAgent
-	uploadsDir    string
-	mu            sync.Mutex
-	seenMessages  map[string]time.Time
-	pendingImages map[string][]string
-	pipelines     map[string][]string
-	replyText     func(context.Context, string, string) error
+	appID        string
+	appSecret    string
+	manager      *Manager
+	apiClient    *lark.Client
+	wsClient     *larkws.Client
+	agent        *CommandAgent
+	uploadsDir   string
+	mu           sync.Mutex
+	seenMessages map[string]time.Time
+	pendingFiles map[string][]pendingLarkAttachment
+	pipelines    map[string][]string
+	replyText    func(context.Context, string, string) error
+	downloadFile func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
 	b := &LarkReplyBridge{
 		appID: appID, appSecret: appSecret, manager: manager, agent: NewCommandAgent(agentCfg), uploadsDir: uploadsDir,
-		seenMessages: make(map[string]time.Time), pendingImages: make(map[string][]string), pipelines: make(map[string][]string),
+		seenMessages: make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]string),
 	}
 	if manager != nil {
 		manager.SetNotificationSentHook(b.OnNotificationSent)
@@ -43,6 +47,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *Com
 		b.apiClient = lark.NewClient(appID, appSecret)
 	}
 	b.replyText = b.replyTextToMessage
+	b.downloadFile = b.downloadLarkAttachment
 	return b
 }
 
@@ -60,6 +65,12 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		}).
 		OnP1MessageReceiveV1(func(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
 			return b.HandleP1MessageReceive(ctx, event)
+		}).
+		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
+			return nil
+		}).
+		OnP1MessageReadV1(func(ctx context.Context, event *larkim.P1MessageReadV1) error {
+			return nil
 		})
 	b.wsClient = larkws.NewClient(b.appID, b.appSecret, larkws.WithEventHandler(handler))
 	log.Printf("lark reply bridge listening for incoming messages")
@@ -71,11 +82,11 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	msg := event.Event.Message
-	text := extractLarkMessageText(valueOf(msg.Content), valueOf(msg.MessageType))
-	if text == "" {
+	incoming := extractLarkIncomingMessage(valueOf(msg.Content), valueOf(msg.MessageType))
+	if incoming.Text == "" && len(incoming.Attachments) == 0 {
 		return nil
 	}
-	sessionID, err := b.RouteText(ctx, valueOf(msg.MessageId), valueOf(msg.ParentId), valueOf(msg.RootId), text)
+	sessionID, err := b.RouteIncoming(ctx, valueOf(msg.MessageId), valueOf(msg.ParentId), valueOf(msg.RootId), incoming)
 	if err != nil {
 		log.Printf("lark reply bridge failed to route message %s: %v", valueOf(msg.MessageId), err)
 		return err
@@ -106,15 +117,39 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 }
 
 func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, rootID, text string) (string, error) {
+	return b.RouteIncoming(ctx, messageID, parentID, rootID, larkIncomingMessage{Text: text})
+}
+
+func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID, rootID string, incoming larkIncomingMessage) (string, error) {
 	if b.duplicate(messageID) {
 		return "", nil
 	}
-	text = cleanLarkText(text)
+	text := cleanLarkText(incoming.Text)
 	parts := splitLarkPipeline(text)
+	if len(incoming.Attachments) > 0 {
+		return b.routeAttachments(ctx, messageID, parentID, rootID, text, parts, incoming.Attachments)
+	}
 	if len(parts) == 0 {
 		return "", nil
 	}
 	text = parts[0]
+	if sessionID := b.resolveSessionID(text, parentID, rootID); sessionID != "" && b.hasPendingFiles(sessionID) {
+		rt, ok := b.manager.GetRuntime(sessionID)
+		if !ok {
+			if err := b.replyLarkText(ctx, messageID, "会话不在线"); err != nil {
+				return sessionID, err
+			}
+			return sessionID, nil
+		}
+		b.manager.EnsureBrowser(sessionID)
+		b.enqueuePipeline(sessionID, parts[1:])
+		if err := SubmitStructuredInput(rt, text); err != nil {
+			return sessionID, err
+		}
+		b.clearPendingFiles(sessionID)
+		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		return sessionID, nil
+	}
 	if strings.HasPrefix(text, "/new ") || strings.HasPrefix(text, "新会话 ") || strings.HasPrefix(text, "开始 ") {
 		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(text, "/new "), "新会话 "), "开始 "))
 		s, err := b.createLarkSession(ctx, name)
@@ -181,6 +216,74 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 	return sessionID, nil
 }
 
+func (b *LarkReplyBridge) routeAttachments(ctx context.Context, messageID, parentID, rootID, text string, parts []string, refs []larkAttachmentRef) (string, error) {
+	if len(parts) > 0 {
+		text = parts[0]
+	}
+	sessionID := b.resolveSessionID(text, parentID, rootID)
+	if sessionID == "" {
+		s, err := b.createLarkSession(ctx, "lark-session")
+		if err != nil {
+			return "", err
+		}
+		sessionID = s.ID
+	}
+	rt, ok := b.manager.GetRuntime(sessionID)
+	if !ok {
+		s, err := b.createLarkSession(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		sessionID = s.ID
+		rt, _ = b.manager.GetRuntime(sessionID)
+	}
+
+	files := make([]pendingLarkAttachment, 0, len(refs))
+	for _, ref := range refs {
+		file, err := b.downloadFile(ctx, messageID, sessionID, ref)
+		if err != nil {
+			kind := larkAttachmentKindLabel(ref.Kind)
+			if replyErr := b.replyLarkText(ctx, messageID, kind+"上传失败："+err.Error()); replyErr != nil {
+				return sessionID, replyErr
+			}
+			return sessionID, err
+		}
+		files = append(files, file)
+	}
+	if len(files) == 0 {
+		return sessionID, nil
+	}
+
+	b.manager.EnsureBrowser(sessionID)
+	input := formatLarkAttachmentInput(files)
+	if strings.TrimSpace(text) == "" {
+		if err := rt.WriteInput(input + " "); err != nil {
+			return sessionID, err
+		}
+		b.appendPendingFiles(sessionID, files)
+		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		defaultLarkMessageRegistry.rememberLatest(sessionID)
+		if err := b.replyLarkText(ctx, messageID, larkAttachmentUploadSuccessMessage(files)); err != nil {
+			return sessionID, err
+		}
+		return sessionID, nil
+	}
+
+	if b.hasPendingFiles(sessionID) {
+		if err := rt.WriteInput("\x15"); err != nil {
+			return sessionID, err
+		}
+		b.clearPendingFiles(sessionID)
+	}
+	b.enqueuePipeline(sessionID, parts[1:])
+	if err := SubmitStructuredInput(rt, input+" "+text); err != nil {
+		return sessionID, err
+	}
+	b.clearPendingFiles(sessionID)
+	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+	return sessionID, nil
+}
+
 func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (Session, error) {
 	s, err := b.manager.CreateSession(ctx, name)
 	if err != nil {
@@ -241,6 +344,33 @@ func (b *LarkReplyBridge) popPipeline(sessionID string) string {
 		b.pipelines[sessionID] = queue[1:]
 	}
 	return next
+}
+
+func (b *LarkReplyBridge) appendPendingFiles(sessionID string, files []pendingLarkAttachment) {
+	if sessionID == "" || len(files) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pendingFiles[sessionID] = append(b.pendingFiles[sessionID], files...)
+}
+
+func (b *LarkReplyBridge) hasPendingFiles(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.pendingFiles[sessionID]) > 0
+}
+
+func (b *LarkReplyBridge) clearPendingFiles(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.pendingFiles, sessionID)
 }
 
 func isCurrentRoundCommand(text string) bool {
@@ -370,37 +500,68 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	return rt.WriteInput("\r")
 }
 
+type larkIncomingMessage struct {
+	Text        string
+	Attachments []larkAttachmentRef
+}
+
+type larkAttachmentRef struct {
+	Kind string
+	Key  string
+	Name string
+}
+
+type pendingLarkAttachment struct {
+	Kind string
+	Path string
+}
+
 func extractLarkMessageText(content string, messageType string) string {
+	return extractLarkIncomingMessage(content, messageType).Text
+}
+
+func extractLarkIncomingMessage(content string, messageType string) larkIncomingMessage {
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return ""
+		return larkIncomingMessage{}
 	}
 	var raw any
 	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		return content
+		return larkIncomingMessage{Text: content}
 	}
+	var incoming larkIncomingMessage
 	switch messageType {
 	case "text":
 		if m, ok := raw.(map[string]any); ok {
-			return strings.TrimSpace(stringFromAny(m["text"]))
+			incoming.Text = strings.TrimSpace(stringFromAny(m["text"]))
 		}
 	case "post":
 		var parts []string
 		collectPostText(raw, &parts)
-		return strings.TrimSpace(strings.Join(parts, ""))
+		incoming.Text = strings.TrimSpace(strings.Join(parts, ""))
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+	case "image":
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+	case "file":
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
 	default:
 		if m, ok := raw.(map[string]any); ok {
 			if text := strings.TrimSpace(stringFromAny(m["text"])); text != "" {
-				return text
+				incoming.Text = text
 			}
 		}
 		var parts []string
 		collectPostText(raw, &parts)
-		if len(parts) > 0 {
-			return strings.TrimSpace(strings.Join(parts, ""))
+		if incoming.Text == "" && len(parts) > 0 {
+			incoming.Text = strings.TrimSpace(strings.Join(parts, ""))
 		}
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
 	}
-	return ""
+	if messageType == "image" || messageType == "file" {
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+	}
+	incoming.Attachments = dedupeLarkAttachmentRefs(incoming.Attachments)
+	return incoming
 }
 
 func collectPostText(v any, parts *[]string) {
@@ -430,6 +591,157 @@ func stringFromAny(v any) string {
 		return s
 	}
 	return ""
+}
+
+func collectLarkAttachmentRefs(v any, refs *[]larkAttachmentRef) {
+	switch x := v.(type) {
+	case []any:
+		for _, item := range x {
+			collectLarkAttachmentRefs(item, refs)
+		}
+	case map[string]any:
+		if key := stringFromAny(x["image_key"]); key != "" {
+			*refs = append(*refs, larkAttachmentRef{Kind: "image", Key: key, Name: stringFromAny(x["file_name"])})
+		}
+		if key := stringFromAny(x["file_key"]); key != "" {
+			*refs = append(*refs, larkAttachmentRef{Kind: "file", Key: key, Name: stringFromAny(x["file_name"])})
+		}
+		for _, child := range x {
+			collectLarkAttachmentRefs(child, refs)
+		}
+	}
+}
+
+func dedupeLarkAttachmentRefs(refs []larkAttachmentRef) []larkAttachmentRef {
+	if len(refs) < 2 {
+		return refs
+	}
+	seen := make(map[string]bool, len(refs))
+	out := refs[:0]
+	for _, ref := range refs {
+		id := ref.Kind + ":" + ref.Key
+		if ref.Key == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, ref)
+	}
+	return out
+}
+
+func formatLarkAttachmentInput(files []pendingLarkAttachment) string {
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if file.Path != "" {
+			paths = append(paths, quoteLarkInputPath(file.Path))
+		}
+	}
+	return strings.Join(paths, " ")
+}
+
+func quoteLarkInputPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if !strings.ContainsAny(path, " \t\n\r\"'\\") {
+		return path
+	}
+	return strconvQuote(path)
+}
+
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func larkAttachmentUploadSuccessMessage(files []pendingLarkAttachment) string {
+	images, regularFiles := 0, 0
+	for _, file := range files {
+		if file.Kind == "image" {
+			images++
+		} else {
+			regularFiles++
+		}
+	}
+	switch {
+	case images > 0 && regularFiles > 0:
+		return fmt.Sprintf("%d 张图片、%d 个文件已上传成功，等待你的说明后执行。", images, regularFiles)
+	case images > 1:
+		return fmt.Sprintf("%d 张图片已上传成功，等待你的说明后执行。", images)
+	case images == 1:
+		return "图片已上传成功，等待你的说明后执行。"
+	case regularFiles > 1:
+		return fmt.Sprintf("%d 个文件已上传成功，等待你的说明后执行。", regularFiles)
+	default:
+		return "文件已上传成功，等待你的说明后执行。"
+	}
+}
+
+func larkAttachmentKindLabel(kind string) string {
+	if kind == "image" {
+		return "图片"
+	}
+	return "文件"
+}
+
+func (b *LarkReplyBridge) downloadLarkAttachment(ctx context.Context, messageID, sessionID string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+	if b.apiClient == nil {
+		return pendingLarkAttachment{}, errors.New("lark client is not configured")
+	}
+	resourceType := ref.Kind
+	if resourceType == "" {
+		resourceType = "file"
+	}
+	req := larkim.NewGetMessageResourceReqBuilder().
+		MessageId(messageID).
+		FileKey(ref.Key).
+		Type(resourceType).
+		Build()
+	resp, err := b.apiClient.Im.V1.MessageResource.Get(ctx, req)
+	if err != nil {
+		return pendingLarkAttachment{}, err
+	}
+	if !resp.Success() {
+		return pendingLarkAttachment{}, fmt.Errorf("飞书资源接口返回 code %d: %s", resp.Code, resp.Msg)
+	}
+	dir := filepath.Join(b.uploadsDir, sessionID, "lark")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return pendingLarkAttachment{}, err
+	}
+	filename := safeLarkAttachmentFilename(ref, resp.FileName)
+	path := filepath.Join(dir, time.Now().Format("20060102150405.000000000")+"_"+filename)
+	if err := resp.WriteFile(path); err != nil {
+		return pendingLarkAttachment{}, err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	return pendingLarkAttachment{Kind: resourceType, Path: abs}, nil
+}
+
+func safeLarkAttachmentFilename(ref larkAttachmentRef, responseName string) string {
+	name := ref.Name
+	if name == "" {
+		name = responseName
+	}
+	if name == "" {
+		if ref.Kind == "image" {
+			name = "image"
+		} else {
+			name = "file"
+		}
+	}
+	name = filepath.Base(name)
+	name = regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(name, "_")
+	name = strings.Trim(name, "._-")
+	if name == "" {
+		name = "file"
+	}
+	if filepath.Ext(name) == "" && ref.Kind == "image" {
+		name += ".png"
+	}
+	return name
 }
 
 func valueOf(p *string) string {

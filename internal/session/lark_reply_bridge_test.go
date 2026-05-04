@@ -31,6 +31,144 @@ func TestExtractLarkMessageText(t *testing.T) {
 	}
 }
 
+func TestExtractLarkIncomingMessageWithPostAttachments(t *testing.T) {
+	got := extractLarkIncomingMessage(`{"content":[[{"tag":"img","image_key":"img_a"},{"tag":"text","text":"请分析"},{"tag":"file","file_key":"file_a","file_name":"报告.pdf"}]]}`, "post")
+	if got.Text != "请分析" {
+		t.Fatalf("text = %q, want 请分析", got.Text)
+	}
+	if len(got.Attachments) != 2 {
+		t.Fatalf("attachments length = %d, want 2: %#v", len(got.Attachments), got.Attachments)
+	}
+	if got.Attachments[0].Kind != "image" || got.Attachments[0].Key != "img_a" {
+		t.Fatalf("first attachment = %#v, want image img_a", got.Attachments[0])
+	}
+	if got.Attachments[1].Kind != "file" || got.Attachments[1].Key != "file_a" || got.Attachments[1].Name != "报告.pdf" {
+		t.Fatalf("second attachment = %#v, want file file_a", got.Attachments[1])
+	}
+}
+
+func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/lark-image.png"}, nil
+	}
+	var replies []string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		replies = append(replies, text)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-image", "", "", "image", `{"image_key":"img_a"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("expected one terminal, got %d", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); got != "/tmp/lark-image.png " {
+		t.Fatalf("image-only message should write path without enter, got %q", got)
+	}
+	if len(replies) != 1 || replies[0] != "图片已上传成功，等待你的说明后执行。" {
+		t.Fatalf("unexpected replies: %#v", replies)
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-image-text", "", "", "text", `{"text":"请分析这张图"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 3 || parts[len(parts)-2] != "请分析这张图" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("followup text should append text and enter, got %#v", parts)
+	}
+	if got := launcher.terminals[0].writes(); strings.Count(got, "/tmp/lark-image.png") != 1 {
+		t.Fatalf("pending image path should not be duplicated, writes: %q", got)
+	}
+}
+
+func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	paths := map[string]string{"img_a": "/tmp/a.png", "img_b": "/tmp/b.png"}
+	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+		return pendingLarkAttachment{Kind: ref.Kind, Path: paths[ref.Key]}, nil
+	}
+	var replies []string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		replies = append(replies, text)
+		return nil
+	}
+
+	content := `{"content":[[{"tag":"img","image_key":"img_a"},{"tag":"img","image_key":"img_b"},{"tag":"text","text":"对比这两张图"}]]}`
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-images-text", "", "", "post", content)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 2 || parts[len(parts)-2] != "/tmp/a.png /tmp/b.png 对比这两张图" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("image+text should submit immediately, got %#v", parts)
+	}
+	if len(replies) != 0 {
+		t.Fatalf("image+text should not send upload-success reply, got %#v", replies)
+	}
+}
+
+func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	paths := map[string]string{"old_img": "/tmp/old.png", "new_img": "/tmp/new.png"}
+	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+		return pendingLarkAttachment{Kind: ref.Kind, Path: paths[ref.Key]}, nil
+	}
+	bridge.replyText = func(_ context.Context, _ string, _ string) error { return nil }
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-old-image", "", "", "image", `{"image_key":"old_img"}`)); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"content":[[{"tag":"img","image_key":"new_img"},{"tag":"text","text":"分析新的"}]]}`
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-new-image-text", "", "", "post", content)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 4 {
+		t.Fatalf("expected pending input, clear, new input, enter; got %#v", parts)
+	}
+	if parts[len(parts)-3] != "\x15" {
+		t.Fatalf("new attachment+text should clear stale pending input before submit, got %#v", parts)
+	}
+	if parts[len(parts)-2] != "/tmp/new.png 分析新的" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("new attachment+text should submit only current attachment and text, got %#v", parts)
+	}
+}
+
+func TestLarkReplyBridgeFileWaitsForTextBeforeEnter(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/report.pdf"}, nil
+	}
+	var replies []string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		replies = append(replies, text)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-file", "", "", "file", `{"file_key":"file_a","file_name":"报告.pdf"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); got != "/tmp/report.pdf " {
+		t.Fatalf("file-only message should write path without enter, got %q", got)
+	}
+	if len(replies) != 1 || replies[0] != "文件已上传成功，等待你的说明后执行。" {
+		t.Fatalf("unexpected replies: %#v", replies)
+	}
+}
+
 func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
