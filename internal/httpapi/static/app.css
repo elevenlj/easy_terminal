@@ -136,6 +136,22 @@ textarea {
   box-shadow: 0 10px 22px rgba(70, 45, 28, 0.08);
 }
 
+.session-running {
+  border-color: #b8d3a5;
+  background: #dfeeda;
+}
+
+.session-waiting {
+  border-color: #d79598;
+  background: #ead6d6;
+}
+
+.session-exited,
+.session-failed {
+  border-color: #d3c8bc;
+  background: #eee7dc;
+}
+
 .session.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(179, 84, 28, 0.16);

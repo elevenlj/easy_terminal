@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 )
 
 const (
@@ -277,22 +280,26 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 }
 
 type RuntimeSession struct {
-	mu              sync.Mutex
-	manager         *Manager
-	session         Session
-	terminal        Terminal
-	process         Waiter
-	output          []byte
-	roundReply      []byte
-	visibleSnapshot string
-	lastInputText   string
-	awaitingReply   bool
-	subscribers     map[chan []byte]struct{}
-	nextSeq         int64
-	stateVersion    int64
-	notifyVersion   int64
-	idleTimer       *time.Timer
-	notifyIdleTimer *time.Timer
+	mu                    sync.Mutex
+	manager               *Manager
+	session               Session
+	terminal              Terminal
+	process               Waiter
+	output                []byte
+	roundReply            []byte
+	visibleSnapshot       string
+	snapshotAtRoundStart  string
+	lastInputText         string
+	inputLineBuffer       string
+	awaitingReply         bool
+	awaitingReplySince    time.Time
+	lastNotifiedRoundHash string
+	subscribers           map[chan []byte]struct{}
+	nextSeq               int64
+	stateVersion          int64
+	notifyVersion         int64
+	idleTimer             *time.Timer
+	notifyIdleTimer       *time.Timer
 }
 
 func (rt *RuntimeSession) Snapshot() Session {
@@ -329,7 +336,9 @@ func (rt *RuntimeSession) WriteInput(data string) error {
 	if data == "" {
 		return nil
 	}
-	rt.MarkInputActivity(data)
+	if inputChangesSessionState(data) {
+		rt.MarkInputActivity(data)
+	}
 	_, err := rt.terminal.Write([]byte(data))
 	return err
 }
@@ -347,13 +356,22 @@ func (rt *RuntimeSession) SetVisibleSnapshot(data string) {
 	rt.mu.Unlock()
 }
 
+func (rt *RuntimeSession) CurrentRoundContent() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+}
+
 func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.mu.Lock()
-	if strings.TrimSpace(data) != "" {
-		rt.lastInputText = strings.TrimSpace(strings.ReplaceAll(data, "\r", "\n"))
+	submitted := rt.recordInputLocked(data)
+	if submitted {
+		rt.snapshotAtRoundStart = rt.visibleSnapshot
+		rt.awaitingReply = true
+		rt.awaitingReplySince = time.Now()
+		rt.roundReply = nil
+		rt.lastNotifiedRoundHash = ""
 	}
-	rt.awaitingReply = true
-	rt.roundReply = nil
 	rt.session.Status = StatusRunning
 	rt.session.UpdatedAt = time.Now().UTC()
 	rt.stateVersion++
@@ -363,6 +381,91 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	s := rt.session
 	rt.mu.Unlock()
 	_ = rt.manager.persist(context.Background(), s)
+}
+
+func (rt *RuntimeSession) recordInputLocked(data string) bool {
+	cleaned := cleanInputForRecord(data)
+	submitted := false
+	for _, r := range cleaned {
+		switch r {
+		case '\r', '\n':
+			submitted = true
+			if text := strings.TrimSpace(rt.inputLineBuffer); text != "" {
+				rt.lastInputText = text
+			}
+			rt.inputLineBuffer = ""
+		case '\b', 0x7f:
+			rs := []rune(rt.inputLineBuffer)
+			if len(rs) > 0 {
+				rt.inputLineBuffer = string(rs[:len(rs)-1])
+			}
+		default:
+			if r >= 0x20 && r != 0x1b {
+				rt.inputLineBuffer += string(r)
+			}
+		}
+	}
+	if !submitted {
+		if text := strings.TrimSpace(rt.inputLineBuffer); text != "" {
+			rt.lastInputText = text
+		}
+	}
+	return submitted
+}
+
+func inputChangesSessionState(data string) bool {
+	for _, r := range cleanInputForRecord(data) {
+		switch r {
+		case '\r', '\n':
+			return true
+		case '\b', 0x7f:
+			continue
+		default:
+			if r >= 0x20 && r != 0x1b && !unicode.IsSpace(r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func cleanInputForRecord(data string) string {
+	runes := []rune(data)
+	var b strings.Builder
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == 0x1b {
+			i = skipInputEscape(runes, i)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func skipInputEscape(runes []rune, i int) int {
+	if i+1 >= len(runes) {
+		return i
+	}
+	switch runes[i+1] {
+	case '[':
+		j := i + 2
+		for j < len(runes) {
+			r := runes[j]
+			if r >= 0x40 && r <= 0x7e {
+				return j
+			}
+			j++
+		}
+		return len(runes) - 1
+	case 'O':
+		if i+2 < len(runes) {
+			return i + 2
+		}
+		return i + 1
+	default:
+		return i + 1
+	}
 }
 
 func (rt *RuntimeSession) HandleOutput(chunk []byte) {
@@ -477,9 +580,17 @@ func (rt *RuntimeSession) resetIdleTimerLocked() {
 
 func (rt *RuntimeSession) markWaitingIfActive(version int64) {
 	rt.mu.Lock()
-	if rt.session.Status != StatusRunning || !rt.session.Live || rt.stateVersion != version || rt.awaitingReply {
+	if rt.session.Status != StatusRunning || !rt.session.Live || rt.stateVersion != version {
 		rt.mu.Unlock()
 		return
+	}
+	if rt.awaitingReply {
+		if time.Since(rt.awaitingReplySince) < rt.awaitingReplyGrace() {
+			rt.resetIdleTimerLocked()
+			rt.mu.Unlock()
+			return
+		}
+		rt.awaitingReply = false
 	}
 	rt.session.Status = StatusWaiting
 	rt.session.UpdatedAt = time.Now().UTC()
@@ -488,7 +599,8 @@ func (rt *RuntimeSession) markWaitingIfActive(version int64) {
 	s := rt.session
 	if rt.session.NotifyOnWaiting {
 		rt.stopNotifyTimerLocked()
-		rt.notifyIdleTimer = time.AfterFunc(rt.manager.notifyIdleTimeout, func() {
+		delay := rt.notifyDelayLocked()
+		rt.notifyIdleTimer = time.AfterFunc(delay, func() {
 			rt.notifyIfStillWaiting(notifyVersion)
 		})
 	}
@@ -496,22 +608,126 @@ func (rt *RuntimeSession) markWaitingIfActive(version int64) {
 	_ = rt.manager.persist(context.Background(), s)
 }
 
+func (rt *RuntimeSession) awaitingReplyGrace() time.Duration {
+	grace := 3 * rt.manager.idleTimeout
+	if grace < 5*time.Second {
+		return 5 * time.Second
+	}
+	return grace
+}
+
+func (rt *RuntimeSession) notifyDelayLocked() time.Duration {
+	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
+		return rt.manager.notifyIdleTimeout
+	}
+	return 0
+}
+
 func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(350 * time.Millisecond)
 	rt.mu.Lock()
 	if rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
 		rt.mu.Unlock()
 		return
 	}
 	sessionID := rt.session.ID
-	if len(rt.subscribers) == 0 && rt.manager.onBrowserNeeded != nil {
+	needsBrowser := (len(rt.subscribers) == 0 || strings.TrimSpace(rt.visibleSnapshot) == "") && rt.manager.onBrowserNeeded != nil
+	if needsBrowser {
 		go rt.manager.onBrowserNeeded(sessionID)
 	}
-	content := PickNotifyContent(rt.visibleSnapshot, rt.roundReply, rt.lastInputText)
-	n := WaitingNotification{SessionID: sessionID, Name: rt.session.Name, Content: content}
 	rt.mu.Unlock()
-	_ = rt.manager.notifier.NotifyWaiting(n)
+	deadline := time.Now().Add(8 * time.Second)
+	if needsBrowser {
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			rt.mu.Lock()
+			ready := strings.TrimSpace(rt.visibleSnapshot) != "" || rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version
+			rt.mu.Unlock()
+			if ready {
+				break
+			}
+		}
+	}
+	for time.Now().Before(deadline) {
+		rt.mu.Lock()
+		needsMoreSnapshot := NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText)
+		done := rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version
+		rt.mu.Unlock()
+		if done {
+			return
+		}
+		if !needsMoreSnapshot {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	rt.mu.Lock()
+	if rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version {
+		rt.mu.Unlock()
+		return
+	}
+	n, contentHash, ok := rt.waitingNotificationLocked()
+	if !ok {
+		rt.rescheduleNotifyRetryLocked(version)
+		rt.mu.Unlock()
+		return
+	}
+	rt.mu.Unlock()
+	if err := rt.manager.notifier.NotifyWaiting(n); err != nil {
+		return
+	}
+	rt.mu.Lock()
+	if rt.session.Status == StatusWaiting && rt.session.Live && rt.notifyVersion == version {
+		rt.lastNotifiedRoundHash = contentHash
+	}
+	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
+}
+
+func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, string, bool) {
+	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
+		return WaitingNotification{}, "", false
+	}
+	content := PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return WaitingNotification{}, "", false
+	}
+	contentHash := notifyContentHash(content)
+	if contentHash == rt.lastNotifiedRoundHash {
+		return WaitingNotification{}, "", false
+	}
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content}, contentHash, true
+}
+
+func (rt *RuntimeSession) rescheduleNotifyRetryLocked(version int64) {
+	if rt.session.Status != StatusWaiting || !rt.session.Live || rt.notifyVersion != version || !rt.session.NotifyOnWaiting {
+		return
+	}
+	rt.stopNotifyTimerLocked()
+	delay := rt.notifyRetryDelayLocked()
+	rt.notifyIdleTimer = time.AfterFunc(delay, func() {
+		rt.notifyIfStillWaiting(version)
+	})
+}
+
+func (rt *RuntimeSession) notifyRetryDelayLocked() time.Duration {
+	if rt.manager.notifyIdleTimeout <= 0 {
+		return time.Second
+	}
+	delay := rt.manager.notifyIdleTimeout / 5
+	if delay < 200*time.Millisecond {
+		return 200 * time.Millisecond
+	}
+	if delay > time.Second {
+		return time.Second
+	}
+	return delay
+}
+
+func notifyContentHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 func (rt *RuntimeSession) stopIdleTimerLocked() {

@@ -95,7 +95,6 @@ const ids = [
   "session-search",
   "show-ended",
   "quick-form",
-  "quick-name",
   "quick-text",
   "quick-dialog",
   "quick-cancel",
@@ -222,6 +221,7 @@ app.state.sessions = [{
 }];
 app.renderSessions();
 const card = elements.sessions.children[0];
+assert.ok(card.className.includes("session-running"), "running session card should have running class");
 const notify = card.querySelector(".notify-input");
 notify.checked = true;
 await notify.onchange({ stopPropagation() {}, target: notify });

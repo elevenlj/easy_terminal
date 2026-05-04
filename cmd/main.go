@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"easy_terminal/internal/httpapi"
@@ -54,12 +56,14 @@ func run() error {
 		return err
 	}
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
+	headless := newHeadlessBrowserManager(cfg.Port)
 	mgr := session.NewManager(
 		st,
 		session.ShellLauncher{},
 		session.WithNotifier(notifier),
 		session.WithIdleTimeout(time.Duration(cfg.WaitingTransitionSeconds)*time.Second),
 		session.WithNotifyIdleTimeout(time.Duration(cfg.NotifyIdleSeconds)*time.Second),
+		session.WithBrowserNeeded(headless.Ensure),
 	)
 
 	bridge := session.NewLarkReplyBridge(cfg.LarkAppID, cfg.LarkAppSecret, mgr, commandCfg, uploadsDir)
@@ -105,4 +109,72 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+type headlessBrowserManager struct {
+	port string
+	once sync.Once
+}
+
+func newHeadlessBrowserManager(port string) *headlessBrowserManager {
+	return &headlessBrowserManager{port: port}
+}
+
+func (m *headlessBrowserManager) Ensure(sessionID string) {
+	m.once.Do(func() {
+		chrome := findChrome()
+		if chrome == "" {
+			log.Printf("headless browser unavailable: Chrome/Chromium not found")
+			return
+		}
+		profile, err := os.MkdirTemp("", "easy-terminal-headless-*")
+		if err != nil {
+			log.Printf("headless browser profile setup failed: %v", err)
+			return
+		}
+		url := "http://localhost:" + m.port + "/"
+		cmd := exec.Command(chrome,
+			"--headless=new",
+			"--disable-gpu",
+			"--no-first-run",
+			"--no-default-browser-check",
+			"--disable-dev-shm-usage",
+			"--user-data-dir="+profile,
+			url,
+		)
+		if err := cmd.Start(); err != nil {
+			log.Printf("headless browser start failed: %v", err)
+			return
+		}
+		log.Printf("headless browser started for terminal snapshots (pid=%d, session=%s)", cmd.Process.Pid, sessionID)
+		go func() {
+			if err := cmd.Wait(); err != nil {
+				log.Printf("headless browser exited: %v", err)
+			}
+			_ = os.RemoveAll(profile)
+		}()
+	})
+}
+
+func findChrome() string {
+	candidates := []string{
+		os.Getenv("CHROME_BIN"),
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Chromium.app/Contents/MacOS/Chromium",
+		"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	for _, name := range []string{"google-chrome", "chromium", "chromium-browser", "chrome"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	return ""
 }

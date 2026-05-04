@@ -54,7 +54,7 @@ function renderSessions() {
   $("sessions").innerHTML = "";
   for (const s of visibleSessions()) {
     const el = document.createElement("article");
-    el.className = `session ${state.active === s.id ? "active" : ""}`;
+    el.className = `session session-${s.status} ${state.active === s.id ? "active" : ""}`;
     const updated = new Date(s.updated_at).toLocaleString();
     el.innerHTML = `
       <div class="session-head">
@@ -118,7 +118,14 @@ function initTerminal() {
   fitTerminalSafely();
   requestAnimationFrame(() => fitTerminalSafely());
   setTimeout(() => fitTerminalSafely(), 120);
-  state.term.onData((data) => sendWS({ type: "input", data }));
+  state.term.onData((data) => {
+    sendWS({ type: "input", data });
+    scheduleSnapshot();
+    if (data.includes("\r") || data.includes("\n")) {
+      setTimeout(() => syncSnapshotNow(), 80);
+      setTimeout(() => syncSnapshotNow(), 260);
+    }
+  });
   window.removeEventListener("resize", resizeTerm);
   window.addEventListener("resize", resizeTerm);
 }
@@ -149,7 +156,7 @@ function connectWS(id) {
   ws.onmessage = (ev) => {
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
     state.term.write(text);
-    scheduleSnapshot();
+    requestAnimationFrame(() => scheduleSnapshot());
   };
   ws.onclose = () => setTimeout(loadSessions, 300);
 }
@@ -187,15 +194,17 @@ function fitTerminalSafely() {
 let snapshotTimer = null;
 function scheduleSnapshot() {
   clearTimeout(snapshotTimer);
-  snapshotTimer = setTimeout(() => {
-    if (!state.term) return;
-    const lines = [];
-    const buffer = state.term.buffer.active;
-    for (let i = 0; i < buffer.length; i++) {
-      lines.push(buffer.getLine(i)?.translateToString(true) || "");
-    }
-    sendWS({ type: "snapshot", data: lines.join("\n") });
-  }, 250);
+  snapshotTimer = setTimeout(() => syncSnapshotNow(), 120);
+}
+
+function syncSnapshotNow() {
+  if (!state.term) return;
+  const lines = [];
+  const buffer = state.term.buffer.active;
+  for (let i = 0; i < buffer.length; i++) {
+    lines.push(buffer.getLine(i)?.translateToString(true) || "");
+  }
+  sendWS({ type: "snapshot", data: lines.join("\n") });
 }
 
 async function loadQuick() {
@@ -210,7 +219,7 @@ function renderQuick() {
     chip.className = "quick-chip";
     chip.title = q.text;
     chip.innerHTML = `<span></span><button class="chip-close" type="button" title="Delete">×</button>`;
-    chip.querySelector("span").textContent = q.name;
+    chip.querySelector("span").textContent = q.text;
     chip.onclick = () => {
       $("composer-input").value = q.text;
       $("composer-input").focus();
@@ -296,11 +305,10 @@ function sendComposer() {
 
 $("quick-form").onsubmit = async (ev) => {
   ev.preventDefault();
-  const name = $("quick-name").value.trim();
-  const text = $("quick-text").value;
-  if (!name || !text.trim()) return;
+  const text = $("quick-text").value.trim();
+  if (!text) return;
+  const name = text.length > 40 ? `${text.slice(0, 37)}...` : text;
   await api("/api/quick-commands", { method: "POST", body: JSON.stringify({ name, text }) });
-  $("quick-name").value = "";
   $("quick-text").value = "";
   $("quick-dialog").close();
   await loadQuick();

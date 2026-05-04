@@ -61,45 +61,182 @@ func SanitizeRoundReply(data []byte) string {
 	return strings.TrimSpace(StripTerminalControls(data))
 }
 
-func PickNotifyContent(visibleSnapshot string, roundReply []byte, lastInputText string) string {
-	body := strings.TrimSpace(visibleSnapshot)
-	if body == "" {
-		body = SanitizeRoundReply(roundReply)
-	}
+func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) string {
 	lastInputText = strings.TrimSpace(lastInputText)
-	if lastInputText != "" && strings.HasPrefix(body, lastInputText) {
+	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+	if body == "" {
+		body = lastInputText
+		fromVisible = true
+	}
+	if !fromVisible && lastInputText != "" && strings.HasPrefix(body, lastInputText) {
 		body = strings.TrimSpace(strings.TrimPrefix(body, lastInputText))
 	}
-	if lastInputText != "" && body != "" {
+	if !fromVisible && lastInputText != "" && body != "" {
 		body = lastInputText + "\n\n" + body
-	} else if lastInputText != "" {
+	} else if !fromVisible && lastInputText != "" {
 		body = lastInputText
 	}
-	body = cleanupLarkNotifyText(body)
+	body = cleanupLarkNotifyText(body, lastInputText)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
-func cleanupLarkNotifyText(text string) string {
+func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) bool {
+	lastInputText = strings.TrimSpace(lastInputText)
+	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+	if !fromVisible || strings.TrimSpace(body) == "" {
+		return true
+	}
+	cleaned := cleanupLarkNotifyText(body, lastInputText)
+	hasReply := hasReplyLine(cleaned, lastInputText)
+	return !hasReply || (containsTransientStatusLine(body) && !hasReply)
+}
+
+func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) bool {
+	lastInputText = strings.TrimSpace(lastInputText)
+	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+	if !fromVisible || strings.TrimSpace(body) == "" {
+		return true
+	}
+	if containsTransientStatusLine(body) {
+		return true
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if isPromptStatusLine(trimmed) {
+			return true
+		}
+		if isCodexSuggestionLine(trimmed) && !isInputEchoLine(trimmed, lastInputText) {
+			return true
+		}
+	}
+	return false
+}
+
+func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) (string, bool) {
+	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
+	snapshotAtRoundStart = strings.TrimSpace(snapshotAtRoundStart)
+	if visibleSnapshot == "" {
+		return "", false
+	}
+	if lastInputText != "" {
+		if current := visibleTextFromLastInput(visibleSnapshot, lastInputText); current != "" {
+			return current, true
+		}
+	}
+	if snapshotAtRoundStart == "" {
+		return visibleSnapshot, true
+	}
+	if strings.HasPrefix(visibleSnapshot, snapshotAtRoundStart) {
+		return strings.TrimSpace(strings.TrimPrefix(visibleSnapshot, snapshotAtRoundStart)), true
+	}
+	if idx := strings.LastIndex(visibleSnapshot, snapshotAtRoundStart); idx >= 0 {
+		return strings.TrimSpace(visibleSnapshot[idx+len(snapshotAtRoundStart):]), true
+	}
+	return "", false
+}
+
+func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) string {
+	idx := strings.LastIndex(visibleSnapshot, lastInputText)
+	if idx < 0 {
+		return ""
+	}
+	lineStart := strings.LastIndex(visibleSnapshot[:idx], "\n")
+	if lineStart < 0 {
+		lineStart = 0
+	} else {
+		lineStart++
+	}
+	return strings.TrimSpace(visibleSnapshot[lineStart:])
+}
+
+func cleanupLarkNotifyText(text string, lastInputText string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	out := make([]string, 0, len(lines))
-	blank := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			blank = true
 			continue
 		}
 		if isPureHorizontalRule(trimmed) {
-			blank = true
 			continue
 		}
-		if blank && len(out) > 0 {
-			out = append(out, "")
+		if isTransientStatusLine(trimmed) {
+			continue
+		}
+		if isPromptStatusLine(trimmed) {
+			continue
+		}
+		if isCodexSuggestionLine(trimmed) && !isInputEchoLine(trimmed, lastInputText) {
+			continue
 		}
 		out = append(out, strings.TrimRight(line, " \t"))
-		blank = false
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func containsTransientStatusLine(text string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if isTransientStatusLine(strings.TrimSpace(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransientStatusLine(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.Contains(lower, "working (") ||
+		strings.Contains(lower, "esc to interrupt") ||
+		strings.Contains(lower, "falling back from websockets") ||
+		strings.Contains(lower, "stream disconnected before completion")
+}
+
+func hasReplyLine(text string, lastInputText string) bool {
+	input := strings.TrimSpace(lastInputText)
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if input != "" && isInputEchoLine(trimmed, input) {
+			continue
+		}
+		if isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
+			continue
+		}
+		return true
+	}
+	return input == ""
+}
+
+func isInputEchoLine(line string, input string) bool {
+	line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
+	return strings.TrimSpace(line) == input
+}
+
+func isPromptStatusLine(line string) bool {
+	lower := strings.ToLower(line)
+	return strings.HasPrefix(lower, "gpt-") && strings.Contains(lower, "medium") && strings.Contains(line, "~")
+}
+
+func isCodexSuggestionLine(line string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(line, ">"))
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "implement {feature}"):
+		return true
+	case strings.HasPrefix(lower, "find and fix a bug in @filename"):
+		return true
+	case strings.HasPrefix(lower, "improve documentation in @filename"):
+		return true
+	case strings.HasPrefix(lower, "run /review on my current changes"):
+		return true
+	default:
+		return false
+	}
 }
 
 func isPureHorizontalRule(line string) bool {

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"regexp"
 	"strings"
@@ -26,6 +27,7 @@ type LarkReplyBridge struct {
 	mu            sync.Mutex
 	seenMessages  map[string]time.Time
 	pendingImages map[string][]string
+	replyText     func(context.Context, string, string) error
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
@@ -36,6 +38,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *Com
 	if appID != "" && appSecret != "" {
 		b.apiClient = lark.NewClient(appID, appSecret)
 	}
+	b.replyText = b.replyTextToMessage
 	return b
 }
 
@@ -105,15 +108,39 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 	text = cleanLarkText(text)
 	if strings.HasPrefix(text, "/new ") || strings.HasPrefix(text, "新会话 ") || strings.HasPrefix(text, "开始 ") {
 		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(text, "/new "), "新会话 "), "开始 "))
-		s, err := b.manager.CreateSession(ctx, name)
+		s, err := b.createLarkSession(ctx, name)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
 		}
 		return s.ID, err
 	}
 	sessionID := b.resolveSessionID(text, parentID, rootID)
+	if isCurrentRoundCommand(text) {
+		if sessionID == "" {
+			if err := b.replyLarkText(ctx, messageID, "未找到会话"); err != nil {
+				return "", err
+			}
+			return "", nil
+		}
+		rt, ok := b.manager.GetRuntime(sessionID)
+		if !ok {
+			if err := b.replyLarkText(ctx, messageID, "会话不在线"); err != nil {
+				return sessionID, err
+			}
+			return sessionID, nil
+		}
+		content := rt.CurrentRoundContent()
+		if strings.TrimSpace(content) == "" {
+			content = "当前轮暂无内容"
+		}
+		if err := b.replyLarkText(ctx, messageID, content); err != nil {
+			return sessionID, err
+		}
+		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		return sessionID, nil
+	}
 	if sessionID == "" {
-		s, err := b.manager.CreateSession(ctx, "lark-session")
+		s, err := b.createLarkSession(ctx, "lark-session")
 		if err != nil {
 			return "", err
 		}
@@ -121,7 +148,7 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 	}
 	rt, ok := b.manager.GetRuntime(sessionID)
 	if !ok {
-		s, err := b.manager.CreateSession(ctx, sessionID)
+		s, err := b.createLarkSession(ctx, sessionID)
 		if err != nil {
 			return "", err
 		}
@@ -140,6 +167,53 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 	}
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 	return sessionID, nil
+}
+
+func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (Session, error) {
+	s, err := b.manager.CreateSession(ctx, name)
+	if err != nil {
+		return s, err
+	}
+	updated, ok, err := b.manager.UpdateNotifyOnWaiting(ctx, s.ID, true)
+	if err != nil || !ok {
+		return s, err
+	}
+	return updated, nil
+}
+
+func isCurrentRoundCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	return text == "/c" || text == "／c"
+}
+
+func (b *LarkReplyBridge) replyLarkText(ctx context.Context, messageID string, text string) error {
+	if b.replyText == nil || messageID == "" {
+		return nil
+	}
+	return b.replyText(ctx, messageID, truncateForLark(sanitizeForLarkAudit(text)))
+}
+
+func (b *LarkReplyBridge) replyTextToMessage(ctx context.Context, messageID string, text string) error {
+	if b.apiClient == nil {
+		return nil
+	}
+	content, _ := json.Marshal(map[string]string{"text": text})
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType("text").
+			Content(string(content)).
+			ReplyInThread(false).
+			Build()).
+		Build()
+	resp, err := b.apiClient.Im.V1.Message.Reply(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success() {
+		return fmt.Errorf("lark reply API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 func (b *LarkReplyBridge) duplicate(messageID string) bool {

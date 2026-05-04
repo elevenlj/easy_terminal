@@ -31,6 +31,7 @@ func TestExtractLarkMessageText(t *testing.T) {
 }
 
 func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
+	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
@@ -49,6 +50,9 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	if len(sessions) != 1 || sessions[0].Name != "飞书会话" {
 		t.Fatalf("unexpected sessions: %#v", sessions)
 	}
+	if !sessions[0].NotifyOnWaiting {
+		t.Fatalf("lark-created session should enable notifications by default: %#v", sessions[0])
+	}
 
 	err = bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow", "m-start", "", "text", `{"text":"echo from lark"}`))
 	if err != nil {
@@ -61,6 +65,7 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 }
 
 func TestLarkReplyBridgeRoutesP1Start(t *testing.T) {
+	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
@@ -81,6 +86,95 @@ func TestLarkReplyBridgeRoutesP1Start(t *testing.T) {
 	if len(sessions) != 1 || sessions[0].Name != "P1会话" {
 		t.Fatalf("unexpected sessions: %#v", sessions)
 	}
+	if !sessions[0].NotifyOnWaiting {
+		t.Fatalf("P1 lark-created session should enable notifications by default: %#v", sessions[0])
+	}
+}
+
+func TestLarkReplyBridgeFallbackSessionEnablesNotifications(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-fallback", "", "", "text", `{"text":"echo no explicit session"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || !sessions[0].NotifyOnWaiting {
+		t.Fatalf("fallback lark session should enable notifications by default: %#v", sessions)
+	}
+}
+
+func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var replies []string
+	bridge.replyText = func(_ context.Context, messageID string, text string) error {
+		replies = append(replies, messageID+":"+text)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-c", "", "", "text", `{"text":"开始 C会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime("sess-1")
+	if !ok {
+		t.Fatal("expected sess-1 runtime")
+	}
+	rt.MarkInputActivity("今天天气怎么样\r")
+	rt.SetVisibleSnapshot(strings.Join([]string{
+		"> 今天天气怎么样",
+		"• 你想查哪个城市的天气？",
+		"比如：上海、北京、纽约。",
+	}, "\n"))
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-current", "m-start-c", "", "text", `{"text":"/c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); strings.Contains(got, "/c") {
+		t.Fatalf("/c should not be sent to terminal, writes: %q", got)
+	}
+	if len(replies) != 1 {
+		t.Fatalf("expected one lark reply, got %#v", replies)
+	}
+	if !strings.Contains(replies[0], "> 今天天气怎么样") || !strings.Contains(replies[0], "你想查哪个城市") {
+		t.Fatalf("reply did not include current round content: %#v", replies)
+	}
+}
+
+func TestLarkReplyBridgeCurrentRoundCommandWithoutSessionDoesNotCreateTerminal(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-current-missing", "", "", "text", `{"text":"/c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("/c without a session should not create a terminal, got %d", len(launcher.terminals))
+	}
+	if reply != "未找到会话" {
+		t.Fatalf("reply = %q, want 未找到会话", reply)
+	}
+}
+
+func resetLarkRegistryForTest() {
+	defaultLarkMessageRegistry.mu.Lock()
+	defer defaultLarkMessageRegistry.mu.Unlock()
+	defaultLarkMessageRegistry.messageToSession = make(map[string]string)
+	defaultLarkMessageRegistry.latestSessionID = ""
 }
 
 func p2Message(messageID, parentID, rootID, messageType, content string) *larkim.P2MessageReceiveV1 {

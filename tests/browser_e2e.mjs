@@ -58,8 +58,11 @@ try {
 
   await createSession("browser-e2e");
   await waitFor(() => evalExpr("document.querySelectorAll('.session').length === 1"));
+  await waitFor(() => evalExpr("document.querySelector('.session').className.includes('session-running')"));
   await waitFor(() => evalExpr("window.easyTerminalApp.state.active && window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
   await waitFor(() => evalExpr("window.easyTerminalApp.state.term.cols >= 80 && window.easyTerminalApp.state.term.rows >= 20"));
+  await waitFor(() => fetchJSON(`http://localhost:${port}/api/sessions`).then((sessions) => sessions[0]?.status === "waiting"), 7000);
+  await waitFor(() => evalExpr("document.querySelector('.session').className.includes('session-waiting')"), 7000);
 
   await clickNotify();
   const notifyResponse = await fetchJSON(`http://localhost:${port}/api/sessions`);
@@ -77,8 +80,9 @@ try {
   await keydownComposer({ key: "Enter", metaKey: true, ctrlKey: false });
   await waitForOutput("BROWSER_CMD_ENTER_E2E");
 
-  await openQuickDialogAndAdd("pwd", "pwd");
+  await openQuickDialogAndAdd("pwd");
   assert.equal(await evalExpr("document.querySelectorAll('.quick-chip').length"), 1, "quick command chip should be added");
+  assert.equal(await evalExpr("document.querySelector('.quick-chip span').textContent"), "pwd", "quick command chip should display command text");
 
   await deleteActiveSession();
   assert.deepEqual(await fetchJSON(`http://localhost:${port}/api/sessions`), [], "test session should be cleaned up");
@@ -126,11 +130,10 @@ async function waitForOutput(text) {
   }), 8000);
 }
 
-async function openQuickDialogAndAdd(name, text) {
+async function openQuickDialogAndAdd(text) {
   await click("document.querySelector('.add-quick').click()");
   await waitFor(() => evalExpr("document.querySelector('#quick-dialog').open === true"));
   await evalExpr(`
-    document.querySelector('#quick-name').value = ${JSON.stringify(name)};
     document.querySelector('#quick-text').value = ${JSON.stringify(text)};
     document.querySelector('#quick-form').requestSubmit();
     true
