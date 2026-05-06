@@ -169,6 +169,36 @@ func TestLarkReplyBridgeFileWaitsForTextBeforeEnter(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeIgnoresInteractiveCards(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-card", "", "", "interactive", `{"title":"测试","elements":[{"tag":"div"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("interactive card should not create or write a terminal, got %d", len(launcher.terminals))
+	}
+}
+
+func TestLarkReplyBridgeIgnoresNonUserSender(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithSender("m-app", "", "", "text", `{"text":"开始 测试"}`, "app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("app sender should not create or write a terminal, got %d", len(launcher.terminals))
+	}
+}
+
 func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -436,8 +466,17 @@ func waitForBrowserRequest(t *testing.T, mu *sync.Mutex, requests *[]string, ses
 }
 
 func p2Message(messageID, parentID, rootID, messageType, content string) *larkim.P2MessageReceiveV1 {
+	return p2MessageWithSender(messageID, parentID, rootID, messageType, content, "")
+}
+
+func p2MessageWithSender(messageID, parentID, rootID, messageType, content, senderType string) *larkim.P2MessageReceiveV1 {
+	var sender *larkim.EventSender
+	if senderType != "" {
+		sender = &larkim.EventSender{SenderType: strPtr(senderType)}
+	}
 	return &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: sender,
 			Message: &larkim.EventMessage{
 				MessageId:   strPtr(messageID),
 				ParentId:    strPtr(parentID),

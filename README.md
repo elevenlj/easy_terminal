@@ -26,6 +26,8 @@ Environment variables override `conf/config.local.json`:
 - `LARK_NOTIFY_RECEIVE_ID`
 - `LARK_MENTION_ENABLED`
 
+`lark_notify_max_lines` in `conf/config.local.json` controls how many trailing lines are kept in long Feishu notifications.
+
 ## Build
 
 ```sh

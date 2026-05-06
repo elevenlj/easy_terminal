@@ -3,21 +3,59 @@ package session
 import (
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"unicode"
 )
 
 var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+
+const (
+	defaultMaxLarkTextLines = 300
+	maxLarkTextRunes        = 12000
+	larkTruncatedPrefix     = "[truncated]\n"
+)
+
+var larkNotifyMaxLines atomic.Int64
+
+func init() {
+	larkNotifyMaxLines.Store(defaultMaxLarkTextLines)
+}
+
+func SetLarkNotifyMaxLines(lines int) {
+	if lines <= 0 {
+		lines = defaultMaxLarkTextLines
+	}
+	larkNotifyMaxLines.Store(int64(lines))
+}
 
 func sanitizeForLarkAudit(text string) string {
 	return emailRE.ReplaceAllString(text, "[email]")
 }
 
 func truncateForLark(text string) string {
+	text = truncateLinesFromTail(text, int(larkNotifyMaxLines.Load()), larkTruncatedPrefix)
+	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
+}
+
+func truncateLinesFromTail(text string, maxLines int, prefix string) string {
 	lines := strings.Split(text, "\n")
-	if len(lines) <= 300 {
+	if len(lines) <= maxLines {
 		return text
 	}
-	return "[truncated]\n" + strings.Join(lines[len(lines)-300:], "\n")
+	return prefix + strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
+func truncateRunesFromTail(text string, maxRunes int, prefix string) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	prefixRunes := []rune(prefix)
+	keep := maxRunes - len(prefixRunes)
+	if keep < 1 {
+		return string(runes[len(runes)-maxRunes:])
+	}
+	return prefix + string(runes[len(runes)-keep:])
 }
 
 func StripTerminalControls(data []byte) string {
@@ -169,8 +207,47 @@ func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) stri
 		if isInputEchoLine(lines[i], lastInputText) {
 			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 		}
+		if isWrappedInputEchoAt(lines, i, lastInputText) {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
 	}
 	return ""
+}
+
+func isWrappedInputEchoAt(lines []string, i int, lastInputText string) bool {
+	text, ok := inputEchoText(lines[i])
+	if !ok {
+		return false
+	}
+	target := compactAnchorText(lastInputText)
+	current := compactAnchorText(text)
+	if target == "" || current == "" || !strings.HasPrefix(target, current) {
+		return false
+	}
+	for j := i + 1; j < len(lines) && j <= i+6; j++ {
+		trimmed := strings.TrimSpace(lines[j])
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := inputEchoText(trimmed); ok {
+			return false
+		}
+		if strings.HasPrefix(trimmed, "• ") || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
+			return false
+		}
+		current += compactAnchorText(trimmed)
+		if current == target || strings.HasPrefix(current, target) {
+			return true
+		}
+		if !strings.HasPrefix(target, current) {
+			return false
+		}
+	}
+	return false
+}
+
+func compactAnchorText(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), "")
 }
 
 func visibleTextFromLastShellInput(visibleSnapshot string) string {
@@ -316,18 +393,27 @@ func isTransientStatusLine(line string) bool {
 
 func hasReplyLine(text string, lastInputText string) bool {
 	input := strings.TrimSpace(lastInputText)
+	sawInput := false
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
 		if input != "" && isInputEchoLine(trimmed, input) {
+			sawInput = true
 			continue
 		}
 		if _, ok := inputEchoText(trimmed); ok {
 			continue
 		}
-		if _, ok := shellInputEchoText(trimmed); ok {
+		if shellText, ok := shellInputEchoText(trimmed); ok {
+			if input != "" && strings.TrimSpace(shellText) == input {
+				sawInput = true
+				continue
+			}
+			if sawInput && strings.TrimSpace(shellText) == "" {
+				return true
+			}
 			continue
 		}
 		if isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {

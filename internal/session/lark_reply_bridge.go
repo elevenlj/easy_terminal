@@ -82,6 +82,9 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	msg := event.Event.Message
+	if shouldIgnoreLarkP2Message(event.Event.Sender, valueOf(msg.MessageType)) {
+		return nil
+	}
 	incoming := extractLarkIncomingMessage(valueOf(msg.Content), valueOf(msg.MessageType))
 	if incoming.Text == "" && len(incoming.Attachments) == 0 {
 		return nil
@@ -93,6 +96,16 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 	}
 	log.Printf("lark reply bridge routed message %s to %s", valueOf(msg.MessageId), sessionID)
 	return nil
+}
+
+func shouldIgnoreLarkP2Message(sender *larkim.EventSender, messageType string) bool {
+	if messageType == "interactive" {
+		return true
+	}
+	if sender == nil || sender.SenderType == nil {
+		return false
+	}
+	return *sender.SenderType != "" && *sender.SenderType != "user"
 }
 
 func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *larkim.P1MessageReceiveV1) error {

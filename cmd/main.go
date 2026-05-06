@@ -27,6 +27,7 @@ type Config struct {
 	LarkMentionEnabled              bool   `json:"lark_mention_enabled"`
 	FastWaitingTransitionMs         int    `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int    `json:"conservative_waiting_transition_ms"`
+	LarkNotifyMaxLines              int    `json:"lark_notify_max_lines"`
 }
 
 func main() {
@@ -94,7 +95,7 @@ func run() error {
 }
 
 func loadConfig() Config {
-	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700}
+	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700, LarkNotifyMaxLines: 300}
 	if b, err := os.ReadFile(filepath.Join("conf", "config.local.json")); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
@@ -113,6 +114,10 @@ func loadConfig() Config {
 	if cfg.ConservativeWaitingTransitionMs <= 0 {
 		cfg.ConservativeWaitingTransitionMs = 700
 	}
+	if cfg.LarkNotifyMaxLines <= 0 {
+		cfg.LarkNotifyMaxLines = 300
+	}
+	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
 	return cfg
 }
 

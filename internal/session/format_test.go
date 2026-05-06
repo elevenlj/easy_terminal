@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -140,6 +141,31 @@ func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T
 	}
 }
 
+func TestPickNotifyContentAnchorsOnWrappedCodexInput(t *testing.T) {
+	visible := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"> 之前的问题",
+		"• 旧回复不应该出现。",
+		"› 它应该有默认音色吧？无论哪一种 TTS，不一定都需要上传。参考音频吧。现在给我生成一",
+		"段测试",
+		"• Explored",
+		"  └ Read model_worker.py",
+		"• 这是当前轮回复。",
+	}, "\n")
+	input := "它应该有默认音色吧？无论哪一种 TTS，不一定都需要上传。参考音频吧。现在给我生成一段测试"
+	got := PickNotifyContent(visible, "", nil, input)
+	if strings.Contains(got, "旧回复") || strings.Contains(got, "OpenAI Codex") {
+		t.Fatalf("wrapped input anchor did not trim previous codex history: %q", got)
+	}
+	if !strings.Contains(got, "› 它应该有默认音色吧") || !strings.Contains(got, "段测试") || !strings.Contains(got, "这是当前轮回复") {
+		t.Fatalf("wrapped input anchored content missing expected current round: %q", got)
+	}
+}
+
 func TestPickNotifyContentKeepsCodexTrustScreenAfterSingleCharInput(t *testing.T) {
 	visible := strings.Join([]string{
 		">_ You are in /Users/eleven/project/temp",
@@ -198,6 +224,27 @@ func TestPickNotifyContentAnchorsOnBrowserShellPromptSuffix(t *testing.T) {
 	}, "\n")
 	if got != want {
 		t.Fatalf("unexpected browser shell anchored content:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestNotifyContentReadyForNoOutputShellCommand(t *testing.T) {
+	visible := strings.Join([]string{
+		"eleven ~ > cd develop/model",
+		"eleven ~/develop/model >",
+	}, "\n")
+	if NotifyContentNeedsMoreSnapshot(visible, "", nil, "cd develop/model") {
+		t.Fatalf("shell command with only a completed prompt should be ready to notify")
+	}
+	got := PickNotifyContent(visible, "", nil, "cd develop/model")
+	if got != visible {
+		t.Fatalf("unexpected prompt-only shell content:\n%q\nwant:\n%q", got, visible)
+	}
+}
+
+func TestNotifyContentWaitsForNoOutputShellCommandBeforePromptReturns(t *testing.T) {
+	visible := "eleven ~ > cd develop/model"
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "cd develop/model") {
+		t.Fatalf("shell command should wait until the prompt returns")
 	}
 }
 
@@ -390,6 +437,53 @@ func TestPickNotifyContentSanitizesEmail(t *testing.T) {
 	got := PickNotifyContent("contact me@example.com", "", nil, "")
 	if strings.Contains(got, "me@example.com") || !strings.Contains(got, "[email]") {
 		t.Fatalf("email was not sanitized: %q", got)
+	}
+}
+
+func TestTruncateForLarkKeepsTailForLongText(t *testing.T) {
+	SetLarkNotifyMaxLines(defaultMaxLarkTextLines)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+	lines := make([]string, 0, defaultMaxLarkTextLines+20)
+	for i := 0; i < defaultMaxLarkTextLines+20; i++ {
+		lines = append(lines, "line-"+strconv.Itoa(i))
+	}
+	got := truncateForLark(strings.Join(lines, "\n"))
+	if !strings.HasPrefix(got, larkTruncatedPrefix) {
+		t.Fatalf("expected truncated prefix, got %q", got)
+	}
+	if strings.Contains(got, "line-0\n") {
+		t.Fatalf("expected head lines to be dropped")
+	}
+	if !strings.Contains(got, "line-319") {
+		t.Fatalf("expected tail line to be kept")
+	}
+}
+
+func TestTruncateForLarkUsesConfiguredMaxLines(t *testing.T) {
+	SetLarkNotifyMaxLines(3)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+	got := truncateForLark("one\ntwo\nthree\nfour\nfive")
+	want := "[truncated]\nthree\nfour\nfive"
+	if got != want {
+		t.Fatalf("truncateForLark() = %q, want %q", got, want)
+	}
+}
+
+func TestTruncateForLarkKeepsTailForLongRunes(t *testing.T) {
+	SetLarkNotifyMaxLines(defaultMaxLarkTextLines)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+	got := truncateForLark("开头不能保留" + strings.Repeat("头", maxLarkTextRunes) + "最后这一段必须保留")
+	if !strings.HasPrefix(got, larkTruncatedPrefix) {
+		t.Fatalf("expected truncated prefix")
+	}
+	if strings.Contains(got, "开头不能保留") {
+		t.Fatalf("expected original head to be dropped")
+	}
+	if !strings.HasSuffix(got, "最后这一段必须保留") {
+		t.Fatalf("expected final content to be kept, got %q", got)
+	}
+	if len([]rune(got)) > maxLarkTextRunes {
+		t.Fatalf("truncated text has %d runes, want <= %d", len([]rune(got)), maxLarkTextRunes)
 	}
 }
 
