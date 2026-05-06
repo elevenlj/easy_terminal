@@ -20,14 +20,17 @@ import (
 )
 
 type Config struct {
-	Port                            string `json:"port"`
-	LarkAppID                       string `json:"lark_app_id"`
-	LarkAppSecret                   string `json:"lark_app_secret"`
-	LarkNotifyReceiveID             string `json:"lark_notify_receive_id"`
-	LarkMentionEnabled              bool   `json:"lark_mention_enabled"`
-	FastWaitingTransitionMs         int    `json:"fast_waiting_transition_ms"`
-	ConservativeWaitingTransitionMs int    `json:"conservative_waiting_transition_ms"`
-	LarkNotifyMaxLines              int    `json:"lark_notify_max_lines"`
+	Port                            string                                `json:"port"`
+	LarkAppID                       string                                `json:"lark_app_id"`
+	LarkAppSecret                   string                                `json:"lark_app_secret"`
+	LarkNotifyReceiveID             string                                `json:"lark_notify_receive_id"`
+	LarkMentionEnabled              bool                                  `json:"lark_mention_enabled"`
+	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
+	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
+	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
+	CodexNoAnchorFallbackLines      int                                   `json:"codex_no_anchor_fallback_lines"`
+	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
+	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
 }
 
 func main() {
@@ -77,9 +80,11 @@ func run() error {
 			time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond,
 		),
 		session.WithBrowserNeeded(headless.Ensure),
+		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 	)
 
 	bridge := session.NewLarkReplyBridge(cfg.LarkAppID, cfg.LarkAppSecret, mgr, commandCfg, uploadsDir)
+	bridge.SetStartPresets(cfg.SessionStartPresets)
 	if bridge.Available() {
 		go func() {
 			if err := bridge.Start(context.Background()); err != nil {
@@ -95,7 +100,7 @@ func run() error {
 }
 
 func loadConfig() Config {
-	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700, LarkNotifyMaxLines: 300}
+	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700, LarkNotifyMaxLines: 300, CodexNoAnchorFallbackLines: 80}
 	if b, err := os.ReadFile(filepath.Join("conf", "config.local.json")); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
@@ -103,6 +108,7 @@ func loadConfig() Config {
 	cfg.LarkAppID = env("LARK_APP_ID", cfg.LarkAppID)
 	cfg.LarkAppSecret = env("LARK_APP_SECRET", cfg.LarkAppSecret)
 	cfg.LarkNotifyReceiveID = env("LARK_NOTIFY_RECEIVE_ID", cfg.LarkNotifyReceiveID)
+	cfg.SessionPreStartCommand = env("SESSION_PRE_START_COMMAND", cfg.SessionPreStartCommand)
 	if v := os.Getenv("LARK_MENTION_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
 			cfg.LarkMentionEnabled = parsed
@@ -117,7 +123,11 @@ func loadConfig() Config {
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = 300
 	}
+	if cfg.CodexNoAnchorFallbackLines <= 0 {
+		cfg.CodexNoAnchorFallbackLines = 80
+	}
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	session.SetCodexNoAnchorFallbackLines(cfg.CodexNoAnchorFallbackLines)
 	return cfg
 }
 

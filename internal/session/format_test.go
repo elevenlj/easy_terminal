@@ -125,7 +125,60 @@ func TestPickNotifyContentKeepsCodexTUIScreenAfterCodexShellLaunch(t *testing.T)
 	}
 }
 
+func TestPickNotifyContentDoesNotUsePreviousShellInputForCodexLaunch(t *testing.T) {
+	before := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+	}, "\n")
+	visible := strings.Join([]string{
+		"eleven ~ > pwd",
+		"/Users/eleven",
+		"eleven ~ >",
+		"eleven ~ > ll",
+		"total 23104",
+		"drwx------@ 7 eleven staff 224 May 6 10:34 Desktop",
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"Tip: Try the Codex App.",
+	}, "\n")
+	got := PickNotifyContent(visible, before, nil, "codex")
+	if strings.Contains(got, "eleven ~ > ll") || strings.Contains(got, "total 23104") || strings.Contains(got, "eleven ~ > pwd") {
+		t.Fatalf("codex launch should not anchor on previous shell input: %q", got)
+	}
+	if !strings.Contains(got, "OpenAI Codex") || !strings.Contains(got, "model: gpt-5.5 medium") {
+		t.Fatalf("codex launch fallback missing TUI content: %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesCodexExitTailWhenSnapshotContainsHistory(t *testing.T) {
+	before := strings.Join([]string{
+		"Tip: Try the Codex App.",
+		"› 成都今天天气如何",
+		"• 成都今天（2026年5月6日）市区天气：多云为主。",
+		"› 执行吧",
+		"• 已经执行并查询了。成都今天市区：多云为主。",
+	}, "\n")
+	visible := before + "\n" + strings.Join([]string{
+		"Token usage: total=14,750 input=13,872 (+ 48,256 cached) output=878 (reasoning 524)",
+		"To continue this session, run codex resume 019dfb54-dfd7-7801-ba7e-f9d5de0eb53f",
+		"eleven ~ >",
+	}, "\n")
+	got := PickNotifyContent(visible, "stale snapshot that no longer matches", nil, "/exit")
+	if strings.Contains(got, "成都今天天气如何") || strings.Contains(got, "已经执行并查询了") {
+		t.Fatalf("codex exit notification should not include prior TUI history: %q", got)
+	}
+	if !strings.Contains(got, "Token usage:") || !strings.Contains(got, "codex resume") || !strings.Contains(got, "eleven ~ >") {
+		t.Fatalf("codex exit notification missing exit tail: %q", got)
+	}
+}
+
 func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T) {
+	SetCodexNoAnchorFallbackLines(3)
+	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
 		"╭────────────────────────────╮",
 		"│ >_ OpenAI Codex (v0.128.0) │",
@@ -134,10 +187,51 @@ func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T
 		"╰────────────────────────────╯",
 		"> previous",
 		"• old answer",
+		"• latest tail",
 	}, "\n")
 	got := PickNotifyContent(visible, "", nil, "missing long wrapped input")
+	want := strings.Join([]string{
+		"[missing input anchor; showing tail]",
+		"> previous",
+		"• old answer",
+		"• latest tail",
+	}, "\n")
+	if got != want {
+		t.Fatalf("missing input anchor should fall back to codex tail:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesFullVisibleSnapshotForNonCodexMissingAnchor(t *testing.T) {
+	visible := "plain history\nold answer"
+	got := PickNotifyContent(visible, "", nil, "missing input")
 	if got != visible {
-		t.Fatalf("missing input anchor should fall back to visible snapshot:\n%q\nwant:\n%q", got, visible)
+		t.Fatalf("non-codex missing input anchor should keep visible snapshot:\n%q\nwant:\n%q", got, visible)
+	}
+}
+
+func TestPickNotifyContentSubtractsRoundStartWhenCodexInputAnchorMissing(t *testing.T) {
+	before := strings.Join([]string{
+		"eleven ~ > ll",
+		"total 23104",
+		"drwx------@ 7 eleven staff 224 May 6 10:34 Desktop",
+		"drwx------+ 5 eleven staff 160 May 3 23:14 Documents",
+	}, "\n")
+	after := before + "\n" + strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.128.0) │",
+		"│ model: gpt-5.5 medium      │",
+		"│ directory: ~               │",
+		"╰────────────────────────────╯",
+		"Tip: Try the Codex App.",
+		"› 帮我看一下当前系统的 TTS 有哪几种？",
+		"• 我会先查本机配置。",
+	}, "\n")
+	got := PickNotifyContent(after, before, nil, "codex")
+	if strings.Contains(got, "total 23104") || strings.Contains(got, "Desktop") {
+		t.Fatalf("previous round was not subtracted: %q", got)
+	}
+	if !strings.Contains(got, "OpenAI Codex") || !strings.Contains(got, "我会先查本机配置") {
+		t.Fatalf("codex delta missing expected content: %q", got)
 	}
 }
 
@@ -347,6 +441,8 @@ func TestNotifyContentNeedsMoreSnapshotForTransientOnlyRound(t *testing.T) {
 }
 
 func TestNotifyContentUsesVisibleSnapshotWhenSnapshotAnchorIsMissing(t *testing.T) {
+	SetCodexNoAnchorFallbackLines(2)
+	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
 		"╭────────────────────────────╮",
 		"│ >_ OpenAI Codex (v0.128.0) │",
@@ -361,8 +457,9 @@ func TestNotifyContentUsesVisibleSnapshotWhenSnapshotAnchorIsMissing(t *testing.
 		t.Fatalf("visible snapshot should be enough when snapshot cannot anchor the input")
 	}
 	got := PickNotifyContent(visible, "", round, "wrapped long input")
-	if got != visible {
-		t.Fatalf("unexpected visible snapshot fallback:\n%q\nwant:\n%q", got, visible)
+	want := "[missing input anchor; showing tail]\n> old\n• old answer"
+	if got != want {
+		t.Fatalf("unexpected codex tail fallback:\n%q\nwant:\n%q", got, want)
 	}
 }
 
@@ -466,6 +563,14 @@ func TestTruncateForLarkUsesConfiguredMaxLines(t *testing.T) {
 	want := "[truncated]\nthree\nfour\nfive"
 	if got != want {
 		t.Fatalf("truncateForLark() = %q, want %q", got, want)
+	}
+}
+
+func TestSetCodexNoAnchorFallbackLinesUsesDefaultForInvalidValue(t *testing.T) {
+	SetCodexNoAnchorFallbackLines(-1)
+	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
+	if got := codexNoAnchorFallbackLines.Load(); got != defaultCodexNoAnchorFallbackLines {
+		t.Fatalf("fallback lines = %d, want %d", got, defaultCodexNoAnchorFallbackLines)
 	}
 }
 

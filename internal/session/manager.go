@@ -46,6 +46,7 @@ type Manager struct {
 	idCounter           atomic.Int64
 	fastWaiting         time.Duration
 	conservativeWaiting time.Duration
+	preStartCommand     string
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
 	onNotificationSent  func(string)
@@ -87,6 +88,10 @@ func WithWaitingTransitionDelays(fast, conservative time.Duration) ManagerOption
 
 func WithBrowserNeeded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onBrowserNeeded = fn }
+}
+
+func WithPreStartCommand(command string) ManagerOption {
+	return func(m *Manager) { m.preStartCommand = strings.TrimSpace(command) }
 }
 
 func (m *Manager) EnsureBrowser(sessionID string) {
@@ -151,6 +156,7 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 	m.mu.Unlock()
 	go rt.streamOutput()
 	go rt.waitForExit()
+	rt.runPreStartCommand()
 	sess.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
 	return sess, nil
 }
@@ -311,6 +317,7 @@ type RuntimeSession struct {
 	visibleSnapshot        string
 	visibleSnapshotVersion int64
 	snapshotAtRoundStart   string
+	snapshotAtRoundVersion int64
 	lastInputText          string
 	inputLineBuffer        string
 	lastNotifiedRoundHash  string
@@ -372,6 +379,19 @@ func (rt *RuntimeSession) WriteInput(data string) error {
 	}
 	_, err := rt.terminal.Write([]byte(data))
 	return err
+}
+
+func (rt *RuntimeSession) runPreStartCommand() {
+	command := strings.TrimSpace(rt.manager.preStartCommand)
+	if command == "" {
+		return
+	}
+	if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
+		command += "\r"
+	}
+	if _, err := rt.terminal.Write([]byte(command)); err != nil {
+		log.Printf("pre-start command failed session=%s: %v", rt.session.ID, err)
+	}
 }
 
 func (rt *RuntimeSession) Resize(cols, rows uint16) error {
@@ -447,6 +467,7 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	submitted := rt.recordInputLocked(data)
 	if submitted {
 		rt.snapshotAtRoundStart = rt.visibleSnapshot
+		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
 	}
@@ -700,7 +721,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		rt.mu.Lock()
-		needsMoreSnapshot := NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+		needsMoreSnapshot := rt.notifyContentNeedsMoreSnapshotLocked()
 		done := rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version
 		rt.mu.Unlock()
 		if done {
@@ -750,6 +771,9 @@ func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, stri
 }
 
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
+	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
+		return WaitingNotification{}, "", false, "stale_visible_snapshot"
+	}
 	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText) {
 		return WaitingNotification{}, "", false, "needs_more_snapshot"
 	}
@@ -763,6 +787,23 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
 	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content}, contentHash, true, "ready"
+}
+
+func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
+	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
+		return true
+	}
+	return NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+}
+
+func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {
+	if strings.TrimSpace(rt.lastInputText) == "" || strings.TrimSpace(rt.visibleSnapshot) == "" {
+		return false
+	}
+	if rt.visibleSnapshotVersion <= rt.snapshotAtRoundVersion {
+		return true
+	}
+	return normalizeSnapshotText(rt.visibleSnapshot) == normalizeSnapshotText(rt.snapshotAtRoundStart)
 }
 
 func (rt *RuntimeSession) rescheduleNotifyRetryLocked(version int64) {

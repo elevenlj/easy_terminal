@@ -245,6 +245,94 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	waitForBrowserRequest(t, &browserMu, &browserRequests, "sess-1")
 }
 
+func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"12": {Commands: []string{"mkdir -p {{session_name}}", "cd {{session_name}}", "codex"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-presets", "", "", "text", `{"text":"开始 测试 12"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "测试" {
+		t.Fatalf("preset suffix should not be part of session name, got %#v", sessions)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{"mkdir -p '测试'\r", "cd '测试'\r", "codex\r"}
+	if len(parts) != len(want) {
+		t.Fatalf("preset writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
+func TestLarkReplyBridgeStartRunsHyphenSeparatedPresetCodes(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"1":   {Commands: []string{"one"}},
+		"23":  {Commands: []string{"twenty-three"}},
+		"223": {Commands: []string{"two-two-three"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-hyphen-presets", "", "", "text", `{"text":"开始 测试 1-23-223"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "测试" {
+		t.Fatalf("hyphen preset suffix should not be part of session name, got %#v", sessions)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{"one\r", "twenty-three\r", "two-two-three\r"}
+	if len(parts) != len(want) {
+		t.Fatalf("preset writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
+func TestLarkReplyBridgeStartPresetQuotesVariables(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"1": {Commands: []string{"mkdir -p {{session_name}}", "echo {{session_name_raw}}"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-quoted", "", "", "text", `{"text":"开始 项目 O'Brien 1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) != 2 {
+		t.Fatalf("preset writes = %#v", parts)
+	}
+	if parts[0] != "mkdir -p '项目 O'\\''Brien'\r" {
+		t.Fatalf("quoted session name write = %q", parts[0])
+	}
+	if parts[1] != "echo 项目 O'Brien\r" {
+		t.Fatalf("raw session name write = %q", parts[1])
+	}
+}
+
 func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -415,6 +503,46 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	}
 	if !strings.Contains(replies[0], "> 今天天气怎么样") || !strings.Contains(replies[0], "你想查哪个城市") {
 		t.Fatalf("reply did not include current round content: %#v", replies)
+	}
+}
+
+func TestLarkReplyBridgeCurrentRoundCommandUsesRepliedNotificationSession(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-a", "", "", "text", `{"text":"开始 A会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-b", "", "", "text", `{"text":"开始 B会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rtA, ok := manager.GetRuntime("sess-1")
+	if !ok {
+		t.Fatal("expected sess-1 runtime")
+	}
+	rtA.MarkInputActivity("echo A\r")
+	rtA.SetVisibleSnapshot("eleven ~ > echo A\nA content\neleven ~ >")
+	rtB, ok := manager.GetRuntime("sess-2")
+	if !ok {
+		t.Fatal("expected sess-2 runtime")
+	}
+	rtB.MarkInputActivity("echo B\r")
+	rtB.SetVisibleSnapshot("eleven ~ > echo B\nB content\neleven ~ >")
+	defaultLarkMessageRegistry.remember("sess-1", "bot-notify-a")
+	defaultLarkMessageRegistry.rememberLatest("sess-2")
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-current-a", "bot-notify-a", "", "text", `{"text":"/c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "A content") || strings.Contains(reply, "B content") {
+		t.Fatalf("/c should use replied notification session, reply=%q", reply)
 	}
 }
 

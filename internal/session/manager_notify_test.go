@@ -63,6 +63,48 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 	}
 }
 
+func TestWaitingNotificationWaitsForSnapshotAfterCurrentInput(t *testing.T) {
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil),
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+	}
+	rt.SetVisibleSnapshot("eleven ~ > ll\ntotal 8\n-rw-r--r-- file.txt\neleven ~ >")
+	rt.MarkInputActivity("cdx\r")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	_, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("stale snapshot from the previous round should not be ready")
+	}
+	if reason != "stale_visible_snapshot" {
+		t.Fatalf("reason = %q, want stale_visible_snapshot", reason)
+	}
+
+	rt.SetVisibleSnapshot("eleven ~ > ll\ntotal 8\n-rw-r--r-- file.txt\neleven ~ >")
+	rt.mu.Lock()
+	_, _, ok, reason = rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("fresh snapshot event with unchanged previous-round content should not be ready")
+	}
+	if reason != "stale_visible_snapshot" {
+		t.Fatalf("reason after unchanged snapshot = %q, want stale_visible_snapshot", reason)
+	}
+
+	rt.SetVisibleSnapshot("eleven ~ > cdx\nzsh: command not found: cdx\neleven ~ >")
+	rt.mu.Lock()
+	n, _, ok := rt.waitingNotificationLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatal("expected notification after a fresh snapshot for the current input")
+	}
+	want := "eleven ~ > cdx\nzsh: command not found: cdx\neleven ~ >"
+	if n.Content != want {
+		t.Fatalf("content = %q, want %q", n.Content, want)
+	}
+}
+
 func TestNotifyStableDelayFastForPlainOutputAndConservativeForCodex(t *testing.T) {
 	m := NewManager(nil, nil, WithWaitingTransitionDelays(120*time.Millisecond, 450*time.Millisecond))
 	rt := &RuntimeSession{
@@ -198,11 +240,11 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	}
 	rt.notifyVersion = 1
 	rt.MarkInputActivity("今天天气怎么样\r")
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• Working (8s • esc to interrupt)")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	rt.notifyVersion = 2
 	version := rt.notifyVersion
-	rt.visibleSnapshot = "> 今天天气怎么样\n• Working (8s • esc to interrupt)"
 	rt.mu.Unlock()
 
 	go rt.notifyIfStillWaiting(version)

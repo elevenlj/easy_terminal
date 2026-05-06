@@ -80,7 +80,19 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
 	}
-	defaultLarkMessageRegistry.rememberLatest(note.SessionID)
+	var createResp struct {
+		Code int `json:"code"`
+		Data struct {
+			MessageID string `json:"message_id"`
+			RootID    string `json:"root_id"`
+			ParentID  string `json:"parent_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err == nil && createResp.Code == 0 {
+		defaultLarkMessageRegistry.remember(note.SessionID, createResp.Data.MessageID, createResp.Data.RootID, createResp.Data.ParentID)
+	} else {
+		defaultLarkMessageRegistry.rememberLatest(note.SessionID)
+	}
 	return nil
 }
 

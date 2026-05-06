@@ -10,15 +10,19 @@ import (
 var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
 const (
-	defaultMaxLarkTextLines = 300
-	maxLarkTextRunes        = 12000
-	larkTruncatedPrefix     = "[truncated]\n"
+	defaultMaxLarkTextLines           = 300
+	defaultCodexNoAnchorFallbackLines = 80
+	maxLarkTextRunes                  = 12000
+	larkTruncatedPrefix               = "[truncated]\n"
+	codexNoAnchorFallbackPrefix       = "[missing input anchor; showing tail]\n"
 )
 
 var larkNotifyMaxLines atomic.Int64
+var codexNoAnchorFallbackLines atomic.Int64
 
 func init() {
 	larkNotifyMaxLines.Store(defaultMaxLarkTextLines)
+	codexNoAnchorFallbackLines.Store(defaultCodexNoAnchorFallbackLines)
 }
 
 func SetLarkNotifyMaxLines(lines int) {
@@ -26,6 +30,13 @@ func SetLarkNotifyMaxLines(lines int) {
 		lines = defaultMaxLarkTextLines
 	}
 	larkNotifyMaxLines.Store(int64(lines))
+}
+
+func SetCodexNoAnchorFallbackLines(lines int) {
+	if lines <= 0 {
+		lines = defaultCodexNoAnchorFallbackLines
+	}
+	codexNoAnchorFallbackLines.Store(int64(lines))
 }
 
 func sanitizeForLarkAudit(text string) string {
@@ -176,6 +187,21 @@ func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string
 		if current := visibleTextFromLastInput(visibleSnapshot, lastInputText); current != "" {
 			return current, true
 		}
+		if current := visibleTextAfterRoundStart(visibleSnapshot, snapshotAtRoundStart); current != "" {
+			if exit := codexExitSegment(current); exit != "" {
+				return exit, true
+			}
+			if isFullScreenTUIScreen(current) {
+				return codexNoAnchorFallbackText(current), true
+			}
+			return current, true
+		}
+		if exit := codexExitSegment(visibleSnapshot); exit != "" {
+			return exit, true
+		}
+		if isFullScreenTUIScreen(visibleSnapshot) {
+			return codexNoAnchorFallbackText(visibleSnapshot), true
+		}
 		if current := visibleTextFromLastShellInput(visibleSnapshot); current != "" {
 			return current, true
 		}
@@ -186,7 +212,67 @@ func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string
 	if lastInputText == "" {
 		return visibleSnapshot, true
 	}
+	if isFullScreenTUIScreen(visibleSnapshot) {
+		return codexNoAnchorFallbackText(visibleSnapshot), true
+	}
 	return visibleSnapshot, true
+}
+
+func codexNoAnchorFallbackText(text string) string {
+	text = codexTUISegment(text)
+	return truncateLinesFromTail(strings.TrimSpace(text), int(codexNoAnchorFallbackLines.Load()), codexNoAnchorFallbackPrefix)
+}
+
+func codexExitSegment(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "Token usage:") || strings.Contains(line, "run codex resume") {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+	}
+	return ""
+}
+
+func codexTUISegment(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, "OpenAI Codex") {
+			continue
+		}
+		start := i
+		if i > 0 && looksLikeBoxBorder(lines[i-1]) {
+			start = i - 1
+		}
+		return strings.TrimSpace(strings.Join(lines[start:], "\n"))
+	}
+	return text
+}
+
+func looksLikeBoxBorder(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.Contains(trimmed, "─") &&
+		(strings.Contains(trimmed, "╭") || strings.Contains(trimmed, "┌") || strings.Contains(trimmed, "+"))
+}
+
+func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart string) string {
+	visibleSnapshot = normalizeSnapshotText(visibleSnapshot)
+	snapshotAtRoundStart = normalizeSnapshotText(snapshotAtRoundStart)
+	if visibleSnapshot == "" || snapshotAtRoundStart == "" {
+		return ""
+	}
+	if visibleSnapshot == snapshotAtRoundStart {
+		return ""
+	}
+	if strings.HasPrefix(visibleSnapshot, snapshotAtRoundStart) {
+		return strings.TrimSpace(strings.TrimPrefix(visibleSnapshot, snapshotAtRoundStart))
+	}
+	return ""
+}
+
+func normalizeSnapshotText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.TrimSpace(text)
 }
 
 func isFullScreenTUIScreen(text string) bool {

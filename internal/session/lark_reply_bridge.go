@@ -27,12 +27,17 @@ type LarkReplyBridge struct {
 	wsClient     *larkws.Client
 	agent        *CommandAgent
 	uploadsDir   string
+	startPresets map[string]SessionStartPreset
 	mu           sync.Mutex
 	seenMessages map[string]time.Time
 	pendingFiles map[string][]pendingLarkAttachment
 	pipelines    map[string][]string
 	replyText    func(context.Context, string, string) error
 	downloadFile func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
+}
+
+type SessionStartPreset struct {
+	Commands []string `json:"commands"`
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
@@ -49,6 +54,12 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *Com
 	b.replyText = b.replyTextToMessage
 	b.downloadFile = b.downloadLarkAttachment
 	return b
+}
+
+func (b *LarkReplyBridge) SetStartPresets(presets map[string]SessionStartPreset) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.startPresets = copySessionStartPresets(presets)
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -163,11 +174,13 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 		return sessionID, nil
 	}
-	if strings.HasPrefix(text, "/new ") || strings.HasPrefix(text, "新会话 ") || strings.HasPrefix(text, "开始 ") {
-		name := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(text, "/new "), "新会话 "), "开始 "))
+	if name, presetCodes, ok := parseLarkStartCommand(text); ok {
 		s, err := b.createLarkSession(ctx, name)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
+			if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
+				log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
+			}
 			b.enqueuePipeline(s.ID, parts[1:])
 		}
 		return s.ID, err
@@ -308,6 +321,178 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 	}
 	b.manager.EnsureBrowser(updated.ID)
 	return updated, nil
+}
+
+func parseLarkStartCommand(text string) (string, string, bool) {
+	text = strings.TrimSpace(text)
+	prefixes := []string{"/new ", "新会话 ", "开始 "}
+	for _, prefix := range prefixes {
+		if !strings.HasPrefix(text, prefix) {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+		name, codes := splitSessionNameAndPresetCodes(body)
+		return name, codes, true
+	}
+	return "", "", false
+}
+
+func splitSessionNameAndPresetCodes(body string) (string, string) {
+	fields := strings.Fields(strings.TrimSpace(body))
+	if len(fields) <= 1 {
+		return strings.TrimSpace(body), ""
+	}
+	last := fields[len(fields)-1]
+	if !isPresetCodeSuffix(last) {
+		return strings.TrimSpace(body), ""
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body), last))
+	return name, last
+}
+
+func isPresetCodeSuffix(text string) bool {
+	if text == "" {
+		return false
+	}
+	hasDigit := false
+	prevDash := false
+	for i, r := range text {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			prevDash = false
+			continue
+		}
+		if r == '-' {
+			if i == 0 || prevDash {
+				return false
+			}
+			prevDash = true
+			continue
+		}
+		return false
+	}
+	return hasDigit && !prevDash
+}
+
+func splitPresetCodes(codes string) []string {
+	codes = strings.TrimSpace(codes)
+	if codes == "" {
+		return nil
+	}
+	parts := strings.Split(codes, "-")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return nil
+			}
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) error {
+	if strings.TrimSpace(codes) == "" {
+		return nil
+	}
+	rt, ok := b.manager.GetRuntime(sess.ID)
+	if !ok {
+		return fmt.Errorf("runtime not found")
+	}
+	b.mu.Lock()
+	presets := copySessionStartPresets(b.startPresets)
+	b.mu.Unlock()
+	vars := sessionStartPresetVars(sess, codes)
+	for _, code := range splitPresetCodes(codes) {
+		preset, ok := presets[code]
+		if !ok {
+			log.Printf("lark start preset not configured session=%s code=%q", sess.ID, code)
+			continue
+		}
+		for _, template := range preset.Commands {
+			command := renderSessionStartPresetCommand(template, vars)
+			if strings.TrimSpace(command) == "" {
+				continue
+			}
+			if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
+				command += "\r"
+			}
+			if _, err := rt.terminal.Write([]byte(command)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func copySessionStartPresets(in map[string]SessionStartPreset) map[string]SessionStartPreset {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]SessionStartPreset, len(in))
+	for key, preset := range in {
+		cp := make([]string, len(preset.Commands))
+		copy(cp, preset.Commands)
+		out[key] = SessionStartPreset{Commands: cp}
+	}
+	return out
+}
+
+func sessionStartPresetVars(sess Session, codes string) map[string]string {
+	timestamp := time.Now().Format(time.RFC3339)
+	return map[string]string{
+		"session_name":          shellQuote(sess.Name),
+		"session_name_raw":      sess.Name,
+		"session_id":            shellQuote(sess.ID),
+		"session_id_raw":        sess.ID,
+		"preset_codes":          shellQuote(codes),
+		"preset_codes_raw":      codes,
+		"timestamp":             shellQuote(timestamp),
+		"timestamp_raw":         timestamp,
+		"session_name_slug":     shellQuote(slugForShellPath(sess.Name)),
+		"session_name_slug_raw": slugForShellPath(sess.Name),
+	}
+}
+
+func renderSessionStartPresetCommand(template string, vars map[string]string) string {
+	out := template
+	for key, value := range vars {
+		out = strings.ReplaceAll(out, "{{"+key+"}}", value)
+	}
+	return out
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func slugForShellPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "session"
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r > 127 {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
