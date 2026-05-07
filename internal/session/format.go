@@ -452,12 +452,34 @@ func cleanupLarkNotifyText(text string, lastInputText string) string {
 		if isPromptStatusLine(trimmed) {
 			continue
 		}
+		if isPureHorizontalRuleLine(trimmed) {
+			continue
+		}
 		if isCodexSuggestionLine(trimmed) && !isInputEchoLine(trimmed, lastInputText) {
 			continue
 		}
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isPureHorizontalRuleLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if len([]rune(line)) < 3 {
+		return false
+	}
+	for _, r := range line {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		switch r {
+		case '-', '_', '=', '─', '━', '—', '―', '═', '╌', '╍', '┄', '┅', '┈', '┉':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func containsTransientStatusLine(text string) bool {

@@ -501,13 +501,14 @@ func TestPickNotifyContentDropsPromptStatusAndCodexSuggestions(t *testing.T) {
 	}
 }
 
-func TestPickNotifyContentRemovesExtraBlankLinesButKeepsHorizontalRules(t *testing.T) {
+func TestPickNotifyContentRemovesExtraBlankLinesAndHorizontalRules(t *testing.T) {
 	visible := strings.Join([]string{
 		"Searching the web",
 		"",
 		"Searched weather: Chengdu, Sichuan, China",
 		"────────────────────────────────────────",
 		"________________________",
+		"• ━━━━━━━━━━━━━━━━━━━",
 		"成都今天预计晴转多云，18~29°C。",
 		"",
 		"",
@@ -520,8 +521,7 @@ func TestPickNotifyContentRemovesExtraBlankLinesButKeepsHorizontalRules(t *testi
 	want := strings.Join([]string{
 		"Searching the web",
 		"Searched weather: Chengdu, Sichuan, China",
-		"────────────────────────────────────────",
-		"________________________",
+		"• ━━━━━━━━━━━━━━━━━━━",
 		"成都今天预计晴转多云，18~29°C。",
 		"Use /skills to list available skills",
 	}, "\n")
