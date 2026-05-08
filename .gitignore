@@ -5,3 +5,5 @@ log/
 easy_terminal
 easy_terminal.db
 *.db
+*.db-wal
+*.db-shm
