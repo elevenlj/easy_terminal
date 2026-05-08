@@ -785,8 +785,10 @@ func extractLarkIncomingMessage(content string, messageType string) larkIncoming
 		collectLarkAttachmentRefs(raw, &incoming.Attachments)
 	case "image":
 		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+		incoming.Text = strings.TrimSpace(collectLarkPlainTextFields(raw))
 	case "file":
 		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+		incoming.Text = strings.TrimSpace(collectLarkPlainTextFields(raw))
 	default:
 		if m, ok := raw.(map[string]any); ok {
 			if text := strings.TrimSpace(stringFromAny(m["text"])); text != "" {
@@ -805,6 +807,32 @@ func extractLarkIncomingMessage(content string, messageType string) larkIncoming
 	}
 	incoming.Attachments = dedupeLarkAttachmentRefs(incoming.Attachments)
 	return incoming
+}
+
+func collectLarkPlainTextFields(v any) string {
+	var parts []string
+	collectLarkPlainTextFieldParts(v, &parts)
+	return strings.Join(parts, "")
+}
+
+func collectLarkPlainTextFieldParts(v any, parts *[]string) {
+	switch x := v.(type) {
+	case []any:
+		for _, item := range x {
+			collectLarkPlainTextFieldParts(item, parts)
+		}
+	case map[string]any:
+		for _, key := range []string{"text", "caption"} {
+			if text := stringFromAny(x[key]); strings.TrimSpace(text) != "" {
+				*parts = append(*parts, text)
+			}
+		}
+		for _, key := range []string{"content", "elements"} {
+			if child, ok := x[key]; ok {
+				collectLarkPlainTextFieldParts(child, parts)
+			}
+		}
+	}
 }
 
 func collectPostText(v any, parts *[]string) {

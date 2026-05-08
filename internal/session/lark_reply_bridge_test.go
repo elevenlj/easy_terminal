@@ -114,6 +114,32 @@ func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeImageMessageWithTextSubmitsImmediately(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
+		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/a.png"}, nil
+	}
+	var replies []string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		replies = append(replies, text)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-image-caption", "", "", "image", `{"image_key":"img_a","text":"请分析这张图"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) < 2 || parts[len(parts)-2] != "/tmp/a.png 请分析这张图" || parts[len(parts)-1] != "\r" {
+		t.Fatalf("image message with text should submit immediately, got %#v", parts)
+	}
+	if len(replies) != 0 {
+		t.Fatalf("image message with text should not send upload-success reply, got %#v", replies)
+	}
+}
+
 func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
