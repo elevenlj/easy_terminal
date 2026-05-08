@@ -22,6 +22,7 @@ const (
 	defaultFastWaitingTransition         = 300 * time.Millisecond
 	defaultConservativeWaitingTransition = 700 * time.Millisecond
 	defaultNotifyRetryDelay              = time.Second
+	defaultStartupPresetSettleDelay      = 2 * time.Second
 )
 
 type startupNotifyMode int
@@ -29,6 +30,7 @@ type startupNotifyMode int
 const (
 	startupNotifyNormal startupNotifyMode = iota
 	startupNotifySuppress
+	startupNotifySettling
 	startupNotifyFinal
 )
 
@@ -337,6 +339,7 @@ type RuntimeSession struct {
 	notifyVersion          int64
 	notifyRetryTimer       *time.Timer
 	notifyStableTimer      *time.Timer
+	startupNotifyTimer     *time.Timer
 }
 
 type RuntimeEvent struct {
@@ -397,9 +400,14 @@ func (rt *RuntimeSession) SuppressStartupNotifications() {
 }
 
 func (rt *RuntimeSession) FinishStartupNotifications() {
+	rt.finishStartupNotificationsAfter(defaultStartupPresetSettleDelay)
+}
+
+func (rt *RuntimeSession) finishStartupNotificationsAfter(delay time.Duration) {
 	rt.mu.Lock()
 	if rt.startupNotifyMode == startupNotifySuppress {
-		rt.startupNotifyMode = startupNotifyFinal
+		rt.startupNotifyMode = startupNotifySettling
+		rt.scheduleStartupNotifyFinalLocked(delay)
 	}
 	rt.mu.Unlock()
 }
@@ -501,6 +509,7 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.notifyVersion++
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
+	rt.stopStartupNotifyTimerLocked()
 	s := rt.session
 	rt.mu.Unlock()
 	_ = rt.manager.persist(context.Background(), s)
@@ -610,6 +619,9 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	rt.session.UpdatedAt = time.Now().UTC()
 	if renderable {
 		rt.session.Status = StatusRunning
+		if rt.startupNotifyMode == startupNotifySettling {
+			rt.scheduleStartupNotifyFinalLocked(defaultStartupPresetSettleDelay)
+		}
 		rt.resetNotifyStableTimerLocked()
 	}
 	for ch := range rt.subscribers {
@@ -632,6 +644,7 @@ func (rt *RuntimeSession) Close() {
 	rt.mu.Lock()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
+	rt.stopStartupNotifyTimerLocked()
 	for ch := range rt.subscribers {
 		close(ch)
 		delete(rt.subscribers, ch)
@@ -675,6 +688,7 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.mu.Lock()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
+	rt.stopStartupNotifyTimerLocked()
 	rt.session.Status = status
 	rt.session.Live = false
 	rt.session.ExitCode = &code
@@ -772,12 +786,10 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		rt.mu.Unlock()
 		return
 	}
-	if rt.startupNotifyMode == startupNotifySuppress {
-		rt.lastNotifiedRoundHash = contentHash
+	if rt.startupNotifyMode == startupNotifySuppress || rt.startupNotifyMode == startupNotifySettling {
+		mode := rt.startupNotifyMode
 		rt.mu.Unlock()
-		log.Printf("waiting notification suppressed during startup presets session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
-		defaultLarkMessageRegistry.rememberLatest(n.SessionID)
-		rt.manager.notificationSent(n.SessionID)
+		log.Printf("waiting notification suppressed during startup presets session=%s version=%d mode=%d hash=%s", n.SessionID, version, mode, shortNotifyHash(contentHash))
 		return
 	}
 	if rt.startupNotifyMode == startupNotifyFinal {
@@ -886,4 +898,32 @@ func (rt *RuntimeSession) stopNotifyStableTimerLocked() {
 		rt.notifyStableTimer.Stop()
 		rt.notifyStableTimer = nil
 	}
+}
+
+func (rt *RuntimeSession) stopStartupNotifyTimerLocked() {
+	if rt.startupNotifyTimer != nil {
+		rt.startupNotifyTimer.Stop()
+		rt.startupNotifyTimer = nil
+	}
+}
+
+func (rt *RuntimeSession) scheduleStartupNotifyFinalLocked(delay time.Duration) {
+	if delay <= 0 {
+		delay = defaultStartupPresetSettleDelay
+	}
+	rt.stopStartupNotifyTimerLocked()
+	rt.startupNotifyTimer = time.AfterFunc(delay, func() {
+		rt.mu.Lock()
+		if rt.startupNotifyMode != startupNotifySettling || !rt.session.Live {
+			rt.mu.Unlock()
+			return
+		}
+		rt.startupNotifyMode = startupNotifyFinal
+		version := rt.notifyVersion
+		waiting := rt.session.Status == StatusWaiting
+		rt.mu.Unlock()
+		if waiting {
+			rt.notifyIfStillWaiting(version)
+		}
+	})
 }

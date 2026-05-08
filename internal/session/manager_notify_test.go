@@ -270,7 +270,7 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	}
 }
 
-func TestStartupPresetNotificationSuppressionSkipsExternalNotifyButRunsHook(t *testing.T) {
+func TestStartupPresetNotificationSuppressionSkipsExternalNotifyAndHook(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier))
 	hookCh := make(chan string, 1)
@@ -295,11 +295,8 @@ func TestStartupPresetNotificationSuppressionSkipsExternalNotifyButRunsHook(t *t
 	}
 	select {
 	case got := <-hookCh:
-		if got != "sess-1" {
-			t.Fatalf("hook session = %q, want sess-1", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("suppressed startup notification should still run notification hook")
+		t.Fatalf("suppressed startup notification should not run hook, got %q", got)
+	default:
 	}
 
 	rt.MarkInputActivity("echo real\r")
@@ -321,16 +318,26 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 	rt.MarkInputActivity("echo setup\r")
 	rt.SetVisibleSnapshot("$ echo setup\nsetup done\n$")
 	rt.SuppressStartupNotifications()
-	rt.FinishStartupNotifications()
+	rt.finishStartupNotificationsAfter(250 * time.Millisecond)
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	version := rt.notifyVersion
 	rt.mu.Unlock()
 
 	rt.notifyIfStillWaiting(version)
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("startup notification should stay suppressed during settle window, got %d", got)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if notifier.count() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	notes := notifier.notes()
 	if len(notes) != 1 {
-		t.Fatalf("final startup preset notification should send once, got %#v", notes)
+		t.Fatalf("final startup preset notification should send once after settle, got %#v", notes)
 	}
 	if notes[0].Content != "$ echo setup\nsetup done\n$" {
 		t.Fatalf("final startup notification content = %q", notes[0].Content)
