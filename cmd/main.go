@@ -31,6 +31,7 @@ type Config struct {
 	CodexNoAnchorFallbackLines      int                                   `json:"codex_no_anchor_fallback_lines"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
+	SessionNamePresets              map[string]session.SessionStartPreset `json:"session_name_presets"`
 }
 
 func main() {
@@ -85,6 +86,7 @@ func run() error {
 
 	bridge := session.NewLarkReplyBridge(cfg.LarkAppID, cfg.LarkAppSecret, mgr, commandCfg, uploadsDir)
 	bridge.SetStartPresets(cfg.SessionStartPresets)
+	bridge.SetNamePresets(cfg.SessionNamePresets)
 	if bridge.Available() {
 		go func() {
 			if err := bridge.Start(context.Background()); err != nil {

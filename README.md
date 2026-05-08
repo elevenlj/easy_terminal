@@ -79,6 +79,7 @@ cp conf/config.local.example.json conf/config.local.json
   "lark_notify_max_lines": 300,
   "codex_no_anchor_fallback_lines": 80,
   "session_pre_start_command": "",
+  "session_name_presets": {},
   "session_start_presets": {}
 }
 ```
@@ -95,6 +96,7 @@ cp conf/config.local.example.json conf/config.local.json
 - `lark_notify_max_lines`：飞书长通知最多保留的尾部行数。
 - `codex_no_anchor_fallback_lines`：无法用最后输入锚定 Codex TUI 快照时，回退发送的尾部行数。
 - `session_pre_start_command`：每个新终端会话创建后自动执行的一条命令。
+- `session_name_presets`：飞书创建会话时，按会话名精确匹配触发的启动预设。
 - `session_start_presets`：飞书创建会话时可按数字后缀触发的启动预设。
 
 ## 环境变量
@@ -190,12 +192,26 @@ pwd | ls -la | git status
 
 ## 飞书启动预设
 
-`session_start_presets` 可把飞书创建会话命令末尾的数字后缀映射成自动执行命令。
+启动预设支持两种方式：
+
+- `session_name_presets`：按会话名精确匹配。
+- `session_start_presets`：按飞书创建会话命令末尾的数字后缀匹配。
+
+如果两种方式同时命中，执行顺序为：名称预设先执行，数字后缀预设后执行。
 
 配置示例：
 
 ```json
 {
+  "session_name_presets": {
+    "绘画 A": {
+      "commands": [
+        "cd project/drawing-a",
+        "source .venv/bin/activate",
+        "echo ready for {{session_name_raw}}"
+      ]
+    }
+  },
   "session_start_presets": {
     "1": {
       "commands": [
@@ -217,11 +233,13 @@ pwd | ls -la | git status
 飞书输入：
 
 ```text
+开始 绘画 A
 开始 测试项目 1-2
 ```
 
 执行逻辑：
 
+- `开始 绘画 A` 会精确命中 `session_name_presets` 中的 `绘画 A`，自动执行对应命令。
 - 创建名为 `测试项目` 的会话。
 - 依次执行预设 `1` 和预设 `2` 中的命令。
 - 预设码只按 `-` 分隔：`12` 表示预设 `12`，`1-2` 表示预设 `1` 后接预设 `2`。

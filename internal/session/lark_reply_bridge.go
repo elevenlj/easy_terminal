@@ -28,6 +28,7 @@ type LarkReplyBridge struct {
 	agent        *CommandAgent
 	uploadsDir   string
 	startPresets map[string]SessionStartPreset
+	namePresets  map[string]SessionStartPreset
 	mu           sync.Mutex
 	seenMessages map[string]time.Time
 	pendingFiles map[string][]pendingLarkAttachment
@@ -60,6 +61,12 @@ func (b *LarkReplyBridge) SetStartPresets(presets map[string]SessionStartPreset)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.startPresets = copySessionStartPresets(presets)
+}
+
+func (b *LarkReplyBridge) SetNamePresets(presets map[string]SessionStartPreset) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.namePresets = copySessionStartPresets(presets)
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -178,6 +185,9 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		s, err := b.createLarkSession(ctx, name)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
+			if presetErr := b.runSessionNamePreset(s, presetCodes); presetErr != nil {
+				log.Printf("lark name preset failed session=%s name=%q: %v", s.ID, s.Name, presetErr)
+			}
 			if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
 				log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
 			}
@@ -414,17 +424,40 @@ func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) err
 			log.Printf("lark start preset not configured session=%s code=%q", sess.ID, code)
 			continue
 		}
-		for _, template := range preset.Commands {
-			command := renderSessionStartPresetCommand(template, vars)
-			if strings.TrimSpace(command) == "" {
-				continue
-			}
-			if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
-				command += "\r"
-			}
-			if _, err := rt.terminal.Write([]byte(command)); err != nil {
-				return err
-			}
+		if err := runSessionPresetCommands(rt, preset, vars); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *LarkReplyBridge) runSessionNamePreset(sess Session, codes string) error {
+	rt, ok := b.manager.GetRuntime(sess.ID)
+	if !ok {
+		return fmt.Errorf("runtime not found")
+	}
+	b.mu.Lock()
+	presets := copySessionStartPresets(b.namePresets)
+	b.mu.Unlock()
+	preset, ok := presets[sess.Name]
+	if !ok {
+		return nil
+	}
+	vars := sessionStartPresetVars(sess, codes)
+	return runSessionPresetCommands(rt, preset, vars)
+}
+
+func runSessionPresetCommands(rt *RuntimeSession, preset SessionStartPreset, vars map[string]string) error {
+	for _, template := range preset.Commands {
+		command := renderSessionStartPresetCommand(template, vars)
+		if strings.TrimSpace(command) == "" {
+			continue
+		}
+		if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
+			command += "\r"
+		}
+		if _, err := rt.terminal.Write([]byte(command)); err != nil {
+			return err
 		}
 	}
 	return nil
