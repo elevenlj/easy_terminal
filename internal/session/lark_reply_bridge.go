@@ -432,6 +432,9 @@ func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) err
 			return err
 		}
 	}
+	if len(presetCodes) > 0 {
+		rt.FinishStartupNotifications()
+	}
 	return nil
 }
 
@@ -449,7 +452,11 @@ func (b *LarkReplyBridge) runSessionNamePreset(sess Session, codes string) error
 	}
 	rt.SuppressStartupNotifications()
 	vars := sessionStartPresetVars(sess, codes)
-	return runSessionPresetCommands(rt, preset, vars)
+	if err := runSessionPresetCommands(rt, preset, vars); err != nil {
+		return err
+	}
+	rt.FinishStartupNotifications()
+	return nil
 }
 
 func runSessionPresetCommands(rt *RuntimeSession, preset SessionStartPreset, vars map[string]string) error {

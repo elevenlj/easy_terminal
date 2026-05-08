@@ -304,10 +304,42 @@ func TestStartupPresetNotificationSuppressionSkipsExternalNotifyButRunsHook(t *t
 
 	rt.MarkInputActivity("echo real\r")
 	rt.mu.Lock()
-	suppressed := rt.suppressStartupNotify
+	mode := rt.startupNotifyMode
 	rt.mu.Unlock()
-	if suppressed {
+	if mode != startupNotifyNormal {
 		t.Fatal("real input should clear startup notification suppression")
+	}
+}
+
+func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo setup\r")
+	rt.SetVisibleSnapshot("$ echo setup\nsetup done\n$")
+	rt.SuppressStartupNotifications()
+	rt.FinishStartupNotifications()
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("final startup preset notification should send once, got %#v", notes)
+	}
+	if notes[0].Content != "$ echo setup\nsetup done\n$" {
+		t.Fatalf("final startup notification content = %q", notes[0].Content)
+	}
+	rt.mu.Lock()
+	mode := rt.startupNotifyMode
+	rt.mu.Unlock()
+	if mode != startupNotifyNormal {
+		t.Fatalf("startup notification mode = %v, want normal", mode)
 	}
 }
 

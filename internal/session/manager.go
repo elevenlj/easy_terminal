@@ -24,6 +24,14 @@ const (
 	defaultNotifyRetryDelay              = time.Second
 )
 
+type startupNotifyMode int
+
+const (
+	startupNotifyNormal startupNotifyMode = iota
+	startupNotifySuppress
+	startupNotifyFinal
+)
+
 type Store interface {
 	CreateSession(context.Context, Session) error
 	UpdateSession(context.Context, Session) error
@@ -321,7 +329,7 @@ type RuntimeSession struct {
 	lastInputText          string
 	inputLineBuffer        string
 	lastNotifiedRoundHash  string
-	suppressStartupNotify  bool
+	startupNotifyMode      startupNotifyMode
 	subscribers            map[chan RuntimeEvent]struct{}
 	snapshotWaiters        []chan struct{}
 	nextSeq                int64
@@ -384,7 +392,15 @@ func (rt *RuntimeSession) WriteInput(data string) error {
 
 func (rt *RuntimeSession) SuppressStartupNotifications() {
 	rt.mu.Lock()
-	rt.suppressStartupNotify = true
+	rt.startupNotifyMode = startupNotifySuppress
+	rt.mu.Unlock()
+}
+
+func (rt *RuntimeSession) FinishStartupNotifications() {
+	rt.mu.Lock()
+	if rt.startupNotifyMode == startupNotifySuppress {
+		rt.startupNotifyMode = startupNotifyFinal
+	}
 	rt.mu.Unlock()
 }
 
@@ -479,7 +495,7 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 		rt.lastNotifiedRoundHash = ""
 	}
 	rt.session.Status = StatusRunning
-	rt.suppressStartupNotify = false
+	rt.startupNotifyMode = startupNotifyNormal
 	rt.session.UpdatedAt = time.Now().UTC()
 	rt.stateVersion++
 	rt.notifyVersion++
@@ -756,13 +772,16 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		rt.mu.Unlock()
 		return
 	}
-	if rt.suppressStartupNotify {
+	if rt.startupNotifyMode == startupNotifySuppress {
 		rt.lastNotifiedRoundHash = contentHash
 		rt.mu.Unlock()
 		log.Printf("waiting notification suppressed during startup presets session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
 		defaultLarkMessageRegistry.rememberLatest(n.SessionID)
 		rt.manager.notificationSent(n.SessionID)
 		return
+	}
+	if rt.startupNotifyMode == startupNotifyFinal {
+		rt.startupNotifyMode = startupNotifyNormal
 	}
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
