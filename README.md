@@ -1,183 +1,52 @@
 # easy_terminal
 
-`easy_terminal` 是一个基于 Go 的 Web 远程终端管理工具。它通过浏览器提供 PTY 终端、WebSocket 实时输入输出、SQLite 会话持久化、快速命令、图片粘贴上传、飞书等待通知和飞书消息回写，并支持可选的自然语言命令转换 agent。
+`easy_terminal` 是一个 Go 实现的 Web 终端和飞书远程会话控制工具。它把本机 PTY 终端暴露到浏览器，同时通过飞书机器人创建会话、发送输入、接收等待通知、上传附件，并支持按会话名/后缀自动执行启动预设。
 
-## 功能概览
+## 当前能力
 
-- Web 终端：使用 xterm.js 在浏览器中连接后端 PTY 会话。
-- 多会话管理：创建、搜索、切换、结束、删除终端会话。
-- 会话持久化：会话信息、历史输出和快速命令保存在 SQLite。
-- 等待态通知：会话进入 `waiting` 状态后，可向飞书用户发送卡片通知。
-- 飞书回复桥：可在飞书中创建会话、回复会话、发送附件、查询当前轮内容。
-- 快速命令：在 Web 界面保存常用输入，一键填入发送框。
-- 图片上传：在 Web 页面粘贴图片后，自动上传并把本地路径写入发送框。
-- Command Agent：飞书消息以 `$` 开头时，可调用外部 CLI 把自然语言转换为 shell 命令。
+### Web 终端
 
-## 运行环境
+- 在浏览器中使用 xterm.js 操作后端 PTY 会话。
+- 支持多会话创建、搜索、切换、结束和删除。
+- 支持直接键盘输入，也支持底部发送框批量输入；`Command+Enter` / `Ctrl+Enter` 可直接发送。
+- 支持粘贴图片上传，上传成功后把本地绝对路径追加到发送框。
+- 支持快速命令，常用命令会持久化到 SQLite。
+- 已结束会话可查看历史输出，在线会话通过 WebSocket 实时同步。
 
-- Go 1.25 或兼容版本
-- Node.js，用于运行浏览器端 E2E 测试
-- Chrome、Chromium 或 Microsoft Edge，用于 headless 快照和 `make test-browser`
-- macOS/Linux shell 环境；默认终端 shell 为 `/bin/zsh -i`
+### 会话与持久化
 
-## 快速开始
+- 每个会话有 `running`、`waiting`、`exited`、`failed` 状态。
+- 会话元信息、历史输出和快速命令存储在 SQLite。
+- 服务启动时会把上次未正常结束的非终态会话标记为已退出，避免重启后出现不可连接的悬挂会话。
+- 默认运行时文件：
+  - `easy_terminal.db`
+  - `data/uploads/`
+  - `log/easy_terminal.log`
 
-```sh
-cp conf/config.local.example.json conf/config.local.json
-cp conf/command_agent.example.json conf/command_agent.json
-make run
-```
+### 飞书通知
 
-默认服务监听 `8080` 端口。浏览器打开：
+- 当会话进入 `waiting` 状态且开启通知时，向配置的飞书用户发送卡片通知。
+- 通知内容优先来自浏览器终端可见快照，用于更准确截取 Codex/TUI 当前轮回复。
+- 如果没有浏览器页面在线，服务会启动 headless Chrome/Chromium/Edge 打开对应会话来同步可见快照。
+- 同一轮任务不会不断新发多条主通知：
+  - 当前轮第一次通知会创建一条飞书卡片。
+  - 当前轮后续有新内容时，会更新同一条飞书卡片。
+  - 卡片内会显示 `已更新-N`。
+  - 每次更新后，会回复/引用原卡片发送一条极简提示卡片，只包含 `已更新-N`。
+- 用户提交新一轮输入后，会重新创建新的飞书主通知。
 
-```text
-http://localhost:8080
-```
+### 飞书回复桥
 
-首次运行会在项目根目录生成或使用以下运行时文件：
-
-- `easy_terminal.db`：SQLite 数据库。
-- `data/uploads/`：Web 粘贴图片和飞书附件保存目录。
-- `log/easy_terminal.log`：服务日志。
-
-## 常用命令
-
-```sh
-make run          # go run ./cmd
-make build        # 构建 easy_terminal 二进制
-make test         # 运行 Go 单元测试
-make test-browser # 构建后运行浏览器 E2E 测试
-make test-all     # 运行 Go 测试和浏览器 E2E 测试
-make tidy         # go mod tidy
-```
-
-构建完成后也可以直接运行：
-
-```sh
-./easy_terminal
-```
-
-## 配置文件
-
-主配置文件为 `conf/config.local.json`。建议从示例文件复制后再修改：
-
-```sh
-cp conf/config.local.example.json conf/config.local.json
-```
-
-示例结构：
-
-```json
-{
-  "port": "8080",
-  "lark_app_id": "",
-  "lark_app_secret": "",
-  "lark_notify_receive_id": "",
-  "lark_mention_enabled": true,
-  "fast_waiting_transition_ms": 300,
-  "conservative_waiting_transition_ms": 700,
-  "lark_notify_max_lines": 300,
-  "codex_no_anchor_fallback_lines": 80,
-  "session_pre_start_command": "",
-  "session_name_presets": {},
-  "session_start_presets": {}
-}
-```
-
-字段说明：
-
-- `port`：HTTP 服务监听端口，默认 `8080`。
-- `lark_app_id`：飞书应用 App ID。
-- `lark_app_secret`：飞书应用 App Secret。
-- `lark_notify_receive_id`：飞书通知接收人的 `open_id`。
-- `lark_mention_enabled`：通知卡片里是否 `@` 接收人。
-- `fast_waiting_transition_ms`：检测到快速等待态时，延迟多少毫秒后确认进入 `waiting`。
-- `conservative_waiting_transition_ms`：普通等待态确认延迟。
-- `lark_notify_max_lines`：飞书长通知最多保留的尾部行数。
-- `codex_no_anchor_fallback_lines`：无法用最后输入锚定 Codex TUI 快照时，回退发送的尾部行数。
-- `session_pre_start_command`：每个新终端会话创建后自动执行的一条命令。
-- `session_name_presets`：飞书创建会话时，按会话名精确匹配触发的启动预设。
-- `session_start_presets`：飞书创建会话时可按数字后缀触发的启动预设。
-
-## 环境变量
-
-环境变量会覆盖 `conf/config.local.json` 中的同名用途配置：
-
-- `PORT`：覆盖监听端口。
-- `TERMINAL_WORKING_DIR`：新终端默认工作目录；未设置时使用当前用户 home。
-- `AGENT_MONITOR_DB`：SQLite 数据库路径，默认 `./easy_terminal.db`。
-- `AGENT_MONITOR_UPLOADS_DIR`：上传目录，默认 `./data/uploads`。
-- `AGENT_MONITOR_LOG_DIR`：日志目录，默认 `./log`。
-- `LARK_APP_ID`：覆盖飞书应用 App ID。
-- `LARK_APP_SECRET`：覆盖飞书应用 App Secret。
-- `LARK_NOTIFY_RECEIVE_ID`：覆盖飞书通知接收人 `open_id`。
-- `LARK_MENTION_ENABLED`：覆盖飞书通知是否 `@` 接收人，可用 `true` 或 `false`。
-- `SESSION_PRE_START_COMMAND`：覆盖新会话预启动命令。
-- `CHROME_BIN`：指定 headless Chrome/Chromium/Edge 可执行文件路径。
-
-示例：
-
-```sh
-PORT=9090 TERMINAL_WORKING_DIR=/Users/eleven/project make run
-```
-
-## Web 界面使用
-
-1. 在左侧输入会话名称，点击创建新会话。
-2. 点击会话列表中的任一会话即可切换终端。
-3. 终端区域支持直接键盘输入，输入会通过 WebSocket 写入后端 PTY。
-4. 底部发送框可输入整段文本，点击 Send 或按 `Command+Enter` / `Ctrl+Enter` 发送并回车。
-5. 会话卡片上的 `Finish` 会把在线会话标记为结束，`Delete` 会删除会话和对应上传目录。
-6. 左侧搜索框可按会话名、ID、状态过滤；勾选显示已结束会话后可以查看历史会话。
-7. 会话的“通知”开关控制该会话进入等待态时是否发送飞书通知。
-
-已结束或失败的会话不能再连接 WebSocket，但仍可在页面中查看持久化输出。
-
-## 快速命令
-
-Web 页面底部的快速命令区域用于保存常用输入：
-
-1. 点击 `+` 打开快速命令弹窗。
-2. 输入命令或提示词并保存。
-3. 点击快速命令 chip，会把文本填入发送框。
-4. 点击 chip 上的关闭按钮会删除该快速命令。
-
-快速命令存储在 SQLite 中，重启服务后仍会保留。
-
-## 图片粘贴上传
-
-在 Web 页面中选中任意会话后，可以直接粘贴剪贴板图片：
-
-1. 浏览器检测到图片文件后会上传到 `/api/sessions/{id}/uploads`。
-2. 服务端只接受 `image/*` MIME 类型，单次请求最大 10 MiB。
-3. 上传成功后，图片的绝对路径会追加到发送框。
-4. 用户仍需点击 Send 或按快捷键把路径发送进终端。
-
-## 飞书通知
-
-配置 `lark_app_id`、`lark_app_secret`、`lark_notify_receive_id` 后，飞书通知能力才可用。通知发送接口使用 `receive_id_type=open_id`，因此 `lark_notify_receive_id` 应填写接收用户的 `open_id`。
-
-当会话满足以下条件时，会发送等待通知：
-
-- 会话仍在线。
-- 会话状态进入 `waiting`。
-- 该会话开启了“通知”。
-- 飞书应用配置完整且可用。
-
-通知内容会优先使用浏览器终端可见快照，以便更准确地截取当前轮回复。若当前没有浏览器订阅，服务会尝试启动 headless 浏览器访问 `/?session={session_id}` 来同步快照。
-
-## 飞书回复桥
-
-只要配置了 `lark_app_id` 和 `lark_app_secret`，服务启动时会开启飞书 WebSocket 事件监听。飞书消息会按以下规则路由：
+服务配置飞书应用后，会通过飞书 WebSocket 事件接收用户消息：
 
 - `开始 会话名`、`新会话 会话名`、`/new 会话名`：创建新终端会话。
 - 回复某条通知消息：输入会路由到对应会话。
-- 文本中包含 `sess-数字`：输入会路由到指定会话。
-- 无法解析目标会话时：自动创建名为 `lark-session` 的会话。
+- 消息中包含 `sess-数字`：输入会路由到指定会话。
+- 无法解析目标会话时：自动创建 `lark-session`。
 - `/c` 或 `／c`：不写入终端，直接回复当前轮内容。
-- 以 `$` 开头：调用 Command Agent 将自然语言转换成 shell 命令后再写入终端。
-- 使用 `|`、`｜`、`︱`、`￨` 分隔：按流水线方式分成多轮输入，后一段会在上一轮等待通知发出后继续执行。
-- 需要输入字面量 `|` 时，用 `\|` 转义。
+- `$自然语言`：调用 Command Agent 转成 shell 命令后写入终端。
+- `|`、`｜`、`︱`、`￨`：把一条飞书消息拆成多轮 pipeline，后一段会在上一轮通知后继续执行。
+- `\|`：输入字面量竖线。
 
 示例：
 
@@ -190,45 +59,160 @@ pwd | ls -la | git status
 /c
 ```
 
-## 飞书启动预设
+### 飞书附件
 
-启动预设支持两种方式：
+- 支持飞书图片和文件附件。
+- 附件会下载到 `AGENT_MONITOR_UPLOADS_DIR/{session_id}/lark/`。
+- 只发附件不带文字：先把附件路径写入终端输入行，等待下一条说明。
+- 附件和文字在同一条消息里：把路径和文字合成一条输入并立即回车执行。
+- 支持飞书 `post` 富文本中的图片/文件，也支持 `image` / `file` 消息里的 `text`、`caption`。
+- 如果新附件+文字到来时终端里还有旧的待说明附件，会先清空旧输入再提交新输入。
+
+### 启动预设
+
+飞书创建会话时支持两类启动预设：
 
 - `session_name_presets`：按会话名精确匹配。
-- `session_start_presets`：按飞书创建会话命令末尾的数字后缀匹配。
+- `session_start_presets`：按创建命令末尾数字后缀匹配。
 
-如果两种方式同时命中，执行顺序为：名称预设先执行，数字后缀预设后执行。
+执行顺序：
 
-配置示例：
+1. 新会话创建。
+2. `session_pre_start_command`，如果配置了。
+3. 名称预设。
+4. 数字后缀预设。
+5. pipeline 后续输入。
+
+预设执行期间不会刷屏推送多条飞书通知。预设写入完成后，会进入一个短暂安静期；安静期内如果还有输出会重新计时，稳定后只发送一次最终通知。
+
+### Command Agent
+
+飞书消息以 `$` 开头时，会把 `$` 后的自然语言发送给外部命令行 agent，由 agent 输出一条 shell 命令。服务会执行基本安全检查，拒绝空输出和明显危险命令，例如 `rm -rf /`、`mkfs`、`shutdown`、`reboot`。
+
+## 快速开始
+
+```sh
+cp conf/config.local.example.json conf/config.local.json
+cp conf/command_agent.example.json conf/command_agent.json
+make run
+```
+
+默认监听：
+
+```text
+http://localhost:8080
+```
+
+常用命令：
+
+```sh
+make run          # go run ./cmd
+make build        # 构建 easy_terminal 二进制
+make test         # Go 单元测试
+make test-browser # 浏览器 E2E 测试
+make test-all     # Go 测试 + 浏览器 E2E
+make tidy         # go mod tidy
+```
+
+运行环境：
+
+- Go 1.25 或兼容版本
+- Node.js，用于 `make test-browser`
+- Chrome、Chromium 或 Microsoft Edge，用于 headless 快照和浏览器测试
+- macOS/Linux shell 环境；默认 shell 为 `/bin/zsh -i`
+
+## 配置
+
+主配置文件是 `conf/config.local.json`，建议从示例复制：
+
+```sh
+cp conf/config.local.example.json conf/config.local.json
+```
+
+示例：
 
 ```json
 {
+  "port": "8080",
+  "lark_app_id": "xxxx",
+  "lark_app_secret": "xxxx",
+  "lark_notify_receive_id": "xxxx",
+  "lark_mention_enabled": true,
+  "fast_waiting_transition_ms": 1000,
+  "conservative_waiting_transition_ms": 3000,
+  "lark_notify_max_lines": 100,
+  "codex_no_anchor_fallback_lines": 80,
   "session_name_presets": {
     "会话 A": {
       "commands": [
-        "cd project/session-a",
-        "source .venv/bin/activate",
-        "echo ready for {{session_name_raw}}"
+        "mkdir -p project/{{session_name_slug_raw}}",
+        "cd project/{{session_name_slug_raw}}",
+        "codex --dangerously-bypass-approvals-and-sandbox"
       ]
     }
   },
   "session_start_presets": {
     "1": {
       "commands": [
-        "cd project/{{session_name_slug}}",
-        "codex"
+        "cd project/{{session_name}}",
+        "codex --dangerously-bypass-approvals-and-sandbox"
       ]
     },
     "2": {
       "commands": [
-        "mkdir -p project/{{session_name_slug}}",
-        "cd project/{{session_name_slug}}",
-        "codex"
+        "mkdir -p project/{{session_name}}",
+        "cd project/{{session_name}}",
+        "codex --dangerously-bypass-approvals-and-sandbox"
       ]
     }
   }
 }
 ```
+
+字段说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `port` | HTTP 监听端口 |
+| `lark_app_id` | 飞书应用 App ID |
+| `lark_app_secret` | 飞书应用 App Secret |
+| `lark_notify_receive_id` | 飞书通知接收用户的 `open_id` |
+| `lark_mention_enabled` | 主通知卡片是否 `@` 接收人 |
+| `fast_waiting_transition_ms` | 普通输出稳定后进入 waiting 的延迟 |
+| `conservative_waiting_transition_ms` | Codex/TUI 等更保守场景的 waiting 延迟 |
+| `lark_notify_max_lines` | 飞书通知最多保留尾部行数 |
+| `codex_no_anchor_fallback_lines` | Codex TUI 无法锚定输入时的尾部回退行数 |
+| `session_pre_start_command` | 每个新终端会话创建后自动执行的一条命令 |
+| `session_name_presets` | 按会话名精确匹配的启动预设 |
+| `session_start_presets` | 按飞书开始命令数字后缀匹配的启动预设 |
+
+环境变量覆盖：
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | 配置文件或 `8080` | HTTP 端口 |
+| `TERMINAL_WORKING_DIR` | 用户 home | 新终端默认工作目录 |
+| `AGENT_MONITOR_DB` | `./easy_terminal.db` | SQLite 数据库路径 |
+| `AGENT_MONITOR_UPLOADS_DIR` | `./data/uploads` | 上传目录 |
+| `AGENT_MONITOR_LOG_DIR` | `./log` | 日志目录 |
+| `LARK_APP_ID` | 配置文件 | 飞书 App ID |
+| `LARK_APP_SECRET` | 配置文件 | 飞书 App Secret |
+| `LARK_NOTIFY_RECEIVE_ID` | 配置文件 | 飞书接收用户 open_id |
+| `LARK_MENTION_ENABLED` | 配置文件 | 是否 @ 接收人 |
+| `SESSION_PRE_START_COMMAND` | 配置文件 | 新会话预启动命令 |
+| `CHROME_BIN` | 自动查找 | headless 浏览器路径 |
+
+## 启动预设模板变量
+
+预设命令支持以下变量：
+
+- `{{session_name}}`：shell quote 后的会话名。
+- `{{session_name_raw}}`：原始会话名。
+- `{{session_name_slug}}`：适合路径使用的 slug，并经过 shell quote。
+- `{{session_name_slug_raw}}`：未 quote 的 slug。
+- `{{session_id}}` / `{{session_id_raw}}`：会话 ID。
+- `{{preset_codes}}` / `{{preset_codes_raw}}`：飞书命令中的数字后缀。
+- `{{timestamp}}` / `{{timestamp_raw}}`：当前 RFC3339 时间。
 
 飞书输入：
 
@@ -237,26 +221,15 @@ pwd | ls -la | git status
 开始 测试项目 1-2
 ```
 
-执行逻辑：
+匹配规则：
 
-- `开始 会话 A` 会精确命中 `session_name_presets` 中的 `会话 A`，自动执行对应命令。
-- 创建名为 `测试项目` 的会话。
-- 依次执行预设 `1` 和预设 `2` 中的命令。
-- 预设码只按 `-` 分隔：`12` 表示预设 `12`，`1-2` 表示预设 `1` 后接预设 `2`。
+- `开始 会话 A` 精确匹配 `session_name_presets["会话 A"]`。
+- `开始 测试项目 1-2` 创建名为 `测试项目` 的会话，并依次运行预设 `1`、`2`。
+- `12` 是预设 `12`，不是 `1` 和 `2`；只有 `1-2` 才会拆成两个预设。
 
-可用模板变量：
+## Command Agent 配置
 
-- `{{session_name}}`：shell quote 后的会话名。
-- `{{session_name_raw}}`：原始会话名。
-- `{{session_name_slug}}`：适合路径使用的 slug，并经过 shell quote。
-- `{{session_name_slug_raw}}`：未 quote 的 slug。
-- `{{session_id}}` / `{{session_id_raw}}`：会话 ID。
-- `{{preset_codes}}` / `{{preset_codes_raw}}`：飞书命令中的预设后缀。
-- `{{timestamp}}` / `{{timestamp_raw}}`：当前 RFC3339 时间。
-
-## Command Agent
-
-Command Agent 配置文件为 `conf/command_agent.json`。从示例复制：
+配置文件是 `conf/command_agent.json`：
 
 ```sh
 cp conf/command_agent.example.json conf/command_agent.json
@@ -275,29 +248,10 @@ cp conf/command_agent.example.json conf/command_agent.json
 字段说明：
 
 - `enabled`：是否启用。
-- `agent`：外部命令名或路径，例如 `gemini`。
-- `prompt`：发送给 agent 的系统提示。
-
-飞书文本以 `$` 开头时才会触发 Command Agent。例如：
-
-```text
-$ 找出当前目录 24 小时内修改过的 Go 文件
-```
-
-服务会把 `$` 后的文本交给 `agent`，读取标准输出作为最终 shell 命令。出于安全考虑，空输出或明显危险的命令会被拒绝，例如 `rm -rf /`、`mkfs`、`shutdown`、`reboot` 等。
-
-## 附件处理
-
-飞书回复桥支持接收图片和文件：
-
-- 附件会下载到 `AGENT_MONITOR_UPLOADS_DIR/{session_id}/lark/`。
-- 若只发送附件不带文本，路径会先写入终端输入行并等待下一条说明。
-- 若附件和文本一起发送，会把附件路径加在文本前一起提交。
-- 路径中包含空格或特殊字符时会自动 quote。
+- `agent`：外部命令名或路径。
+- `prompt`：发送给 agent 的提示词。
 
 ## HTTP API
-
-主要 API：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -308,8 +262,8 @@ $ 找出当前目录 24 小时内修改过的 Go 文件
 | `POST` | `/api/sessions/{id}/finish` | 标记在线会话结束 |
 | `GET` | `/api/sessions/{id}/output` | 获取会话输出历史 |
 | `GET` | `/api/sessions/{id}/ws` | WebSocket 连接在线会话 |
-| `POST` | `/api/sessions/{id}/uploads` | 上传图片，multipart 字段名为 `file` |
-| `GET` | `/api/quick-commands` | 获取快速命令列表 |
+| `POST` | `/api/sessions/{id}/uploads` | 上传图片，multipart 字段名 `file` |
+| `GET` | `/api/quick-commands` | 获取快速命令 |
 | `POST` | `/api/quick-commands` | 创建快速命令 |
 | `DELETE` | `/api/quick-commands/{id}` | 删除快速命令 |
 
@@ -321,59 +275,47 @@ WebSocket 客户端消息：
 {"type":"snapshot","data":"terminal visible text"}
 ```
 
-服务端会在连接建立时发送当前输出快照。普通终端输出以二进制消息发送；需要浏览器同步可见内容时，会发送：
+服务端会发送：
 
-```json
-{"type":"snapshot_request"}
-```
+- 二进制终端输出。
+- `{"type":"snapshot_request"}`：请求浏览器回传当前可见快照。
 
-## 数据和日志
+## 运行数据
 
-默认路径：
+`.gitignore` 已忽略运行时文件：
 
-- 数据库：`./easy_terminal.db`
-- 上传目录：`./data/uploads`
-- 日志文件：`./log/easy_terminal.log`
-
-这些路径都可以通过环境变量覆盖。数据库使用 SQLite，服务启动时会把此前未结束的非终态会话标记为已退出，避免重启后出现不可连接的悬挂会话。
-
-## 测试
-
-运行单元测试：
-
-```sh
-make test
-```
-
-运行浏览器 E2E 测试：
-
-```sh
-make test-browser
-```
-
-`make test-browser` 会先构建二进制，再启动隔离测试服务，并使用真实 Chrome headless 验证会话创建、WebSocket 输入输出、通知开关、快速命令、Send 按钮和快捷键行为。
+- `easy_terminal`
+- `*.db`
+- `*.db-wal`
+- `*.db-shm`
+- `data/`
+- `log/`
+- `conf/config.local.json`
+- `conf/command_agent.json`
 
 ## 常见问题
 
 ### 页面提示通知不可用
 
-检查 `lark_app_id`、`lark_app_secret`、`lark_notify_receive_id` 是否配置完整，并确认 `lark_notify_receive_id` 是用户 `open_id`。
+检查 `lark_app_id`、`lark_app_secret`、`lark_notify_receive_id` 是否完整。`lark_notify_receive_id` 需要是接收用户的 `open_id`。
 
-### 飞书可以通知但回复没有进入会话
+### 飞书能收到通知，但回复没有进入会话
 
-确认飞书应用已启用并订阅消息事件，且应用具备接收消息、读取消息资源、发送消息等权限。服务日志中会输出飞书 reply bridge 的启动和路由错误。
+确认飞书应用启用了机器人能力、消息事件订阅和必要权限。服务日志会输出 reply bridge 的启动和路由错误。
 
-### 等待通知内容不完整
+### 通知内容不完整
 
-如果是 Codex 等 TUI 程序，建议保持对应 Web 会话打开。无人打开页面时服务会尝试启动 headless 浏览器，若本机找不到浏览器，请设置 `CHROME_BIN`。
+Codex/TUI 程序依赖浏览器可见快照。保持 Web 会话打开最稳定；没有打开页面时，服务会尝试启动 headless 浏览器。若找不到浏览器，设置 `CHROME_BIN`。
+
+### headless 快照出现终端噪声
+
+服务会过滤浏览器/xterm 自动回写的终端能力响应，避免污染 TUI。若仍出现异常，优先确认本地 Chrome 版本和 `CHROME_BIN` 指向。
 
 ### 新会话默认目录不对
 
-设置 `TERMINAL_WORKING_DIR`，或在 `session_pre_start_command` / `session_start_presets` 中自动 `cd` 到目标目录。
+设置 `TERMINAL_WORKING_DIR`，或者通过 `session_pre_start_command`、`session_name_presets`、`session_start_presets` 自动 `cd`。
 
 ### 端口冲突
-
-通过配置文件或环境变量修改端口：
 
 ```sh
 PORT=9090 make run
