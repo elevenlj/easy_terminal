@@ -134,8 +134,43 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	if !resp.Success() {
 		return WaitingNotificationResult{}, fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
 	}
+	tipSent := false
+	if note.UpdateNo > 0 {
+		if err := n.sendUpdateTip(note.UpdateNo); err == nil {
+			tipSent = true
+		}
+	}
 	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
-	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true}, nil
+	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true, TipSent: tipSent}, nil
+}
+
+func (n *LarkAppNotifier) sendUpdateTip(updateNo int) error {
+	token, err := n.tenantAccessToken(context.Background())
+	if err != nil {
+		return err
+	}
+	content, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("已更新-%d", updateNo)})
+	payload, _ := json.Marshal(map[string]any{
+		"receive_id": n.receiveID,
+		"msg_type":   "text",
+		"content":    string(content),
+	})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("lark update tip API returned %s: %s", resp.Status, string(body))
+	}
+	return nil
 }
 
 func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error) {
