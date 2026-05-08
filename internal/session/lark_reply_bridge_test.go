@@ -302,6 +302,46 @@ func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeStartUsesConfiguredDefaultName(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.SetDefaultStartSessionName("临时")
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-default", "", "", "text", `{"text":"开始"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "临时" {
+		t.Fatalf("start command should use configured default session name, got %#v", sessions)
+	}
+}
+
+func TestLarkReplyBridgeStartWithoutDefaultKeepsFallbackBehavior(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-no-default", "", "", "text", `{"text":"开始"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "lark-session" {
+		t.Fatalf("start without configured default should keep fallback behavior, got %#v", sessions)
+	}
+	if got := launcher.terminals[0].writes(); got != "开始\r" {
+		t.Fatalf("fallback session should receive original text, got %q", got)
+	}
+}
+
 func TestLarkReplyBridgeStartRunsNamePresetOnExactMatch(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

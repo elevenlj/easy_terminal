@@ -40,6 +40,7 @@
 服务配置飞书应用后，会通过飞书 WebSocket 事件接收用户消息：
 
 - `开始 会话名`、`新会话 会话名`、`/new 会话名`：创建新终端会话。
+- `开始`、`新会话`、`/new`：如果配置了 `lark_default_session_name`，使用该缺省名创建会话。
 - 回复某条通知消息：输入会路由到对应会话。
 - 消息中包含 `sess-数字`：输入会路由到指定会话。
 - 无法解析目标会话时：自动创建 `lark-session`。
@@ -52,6 +53,7 @@
 
 ```text
 开始 demo
+开始
 开始 demo 1-2
 sess-3 pwd
 $ 查看当前目录最大的 10 个文件
@@ -138,6 +140,7 @@ cp conf/config.local.example.json conf/config.local.json
   "lark_app_secret": "xxxx",
   "lark_notify_receive_id": "xxxx",
   "lark_mention_enabled": true,
+  "lark_default_session_name": "临时",
   "fast_waiting_transition_ms": 1000,
   "conservative_waiting_transition_ms": 3000,
   "lark_notify_max_lines": 100,
@@ -178,6 +181,7 @@ cp conf/config.local.example.json conf/config.local.json
 | `lark_app_secret` | 飞书应用 App Secret |
 | `lark_notify_receive_id` | 飞书通知接收用户的 `open_id` |
 | `lark_mention_enabled` | 主通知卡片是否 `@` 接收人 |
+| `lark_default_session_name` | 飞书开始命令未指定名称时使用的会话名 |
 | `fast_waiting_transition_ms` | 普通输出稳定后进入 waiting 的延迟 |
 | `conservative_waiting_transition_ms` | Codex/TUI 等更保守场景的 waiting 延迟 |
 | `lark_notify_max_lines` | 飞书通知最多保留尾部行数 |
@@ -199,6 +203,7 @@ cp conf/config.local.example.json conf/config.local.json
 | `LARK_APP_SECRET` | 配置文件 | 飞书 App Secret |
 | `LARK_NOTIFY_RECEIVE_ID` | 配置文件 | 飞书接收用户 open_id |
 | `LARK_MENTION_ENABLED` | 配置文件 | 是否 @ 接收人 |
+| `LARK_DEFAULT_SESSION_NAME` | 配置文件 | 飞书 `开始` 命令的缺省会话名 |
 | `SESSION_PRE_START_COMMAND` | 配置文件 | 新会话预启动命令 |
 | `CHROME_BIN` | 自动查找 | headless 浏览器路径 |
 

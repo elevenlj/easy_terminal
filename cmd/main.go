@@ -25,6 +25,7 @@ type Config struct {
 	LarkAppSecret                   string                                `json:"lark_app_secret"`
 	LarkNotifyReceiveID             string                                `json:"lark_notify_receive_id"`
 	LarkMentionEnabled              bool                                  `json:"lark_mention_enabled"`
+	LarkDefaultSessionName          string                                `json:"lark_default_session_name"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
@@ -85,6 +86,7 @@ func run() error {
 	)
 
 	bridge := session.NewLarkReplyBridge(cfg.LarkAppID, cfg.LarkAppSecret, mgr, commandCfg, uploadsDir)
+	bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 	bridge.SetStartPresets(cfg.SessionStartPresets)
 	bridge.SetNamePresets(cfg.SessionNamePresets)
 	if bridge.Available() {
@@ -110,6 +112,7 @@ func loadConfig() Config {
 	cfg.LarkAppID = env("LARK_APP_ID", cfg.LarkAppID)
 	cfg.LarkAppSecret = env("LARK_APP_SECRET", cfg.LarkAppSecret)
 	cfg.LarkNotifyReceiveID = env("LARK_NOTIFY_RECEIVE_ID", cfg.LarkNotifyReceiveID)
+	cfg.LarkDefaultSessionName = env("LARK_DEFAULT_SESSION_NAME", cfg.LarkDefaultSessionName)
 	cfg.SessionPreStartCommand = env("SESSION_PRE_START_COMMAND", cfg.SessionPreStartCommand)
 	if v := os.Getenv("LARK_MENTION_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {

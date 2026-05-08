@@ -20,21 +20,22 @@ import (
 )
 
 type LarkReplyBridge struct {
-	appID        string
-	appSecret    string
-	manager      *Manager
-	apiClient    *lark.Client
-	wsClient     *larkws.Client
-	agent        *CommandAgent
-	uploadsDir   string
-	startPresets map[string]SessionStartPreset
-	namePresets  map[string]SessionStartPreset
-	mu           sync.Mutex
-	seenMessages map[string]time.Time
-	pendingFiles map[string][]pendingLarkAttachment
-	pipelines    map[string][]string
-	replyText    func(context.Context, string, string) error
-	downloadFile func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
+	appID                   string
+	appSecret               string
+	manager                 *Manager
+	apiClient               *lark.Client
+	wsClient                *larkws.Client
+	agent                   *CommandAgent
+	uploadsDir              string
+	defaultStartSessionName string
+	startPresets            map[string]SessionStartPreset
+	namePresets             map[string]SessionStartPreset
+	mu                      sync.Mutex
+	seenMessages            map[string]time.Time
+	pendingFiles            map[string][]pendingLarkAttachment
+	pipelines               map[string][]string
+	replyText               func(context.Context, string, string) error
+	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 }
 
 type SessionStartPreset struct {
@@ -67,6 +68,12 @@ func (b *LarkReplyBridge) SetNamePresets(presets map[string]SessionStartPreset) 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.namePresets = copySessionStartPresets(presets)
+}
+
+func (b *LarkReplyBridge) SetDefaultStartSessionName(name string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.defaultStartSessionName = strings.TrimSpace(name)
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -181,7 +188,7 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 		return sessionID, nil
 	}
-	if name, presetCodes, ok := parseLarkStartCommand(text); ok {
+	if name, presetCodes, ok := b.parseLarkStartCommand(text); ok {
 		s, err := b.createLarkSession(ctx, name)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
@@ -333,15 +340,23 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 	return updated, nil
 }
 
-func parseLarkStartCommand(text string) (string, string, bool) {
+func (b *LarkReplyBridge) parseLarkStartCommand(text string) (string, string, bool) {
 	text = strings.TrimSpace(text)
-	prefixes := []string{"/new ", "新会话 ", "开始 "}
+	prefixes := []string{"/new", "新会话", "开始"}
 	for _, prefix := range prefixes {
-		if !strings.HasPrefix(text, prefix) {
+		if text != prefix && !strings.HasPrefix(text, prefix+" ") {
 			continue
 		}
 		body := strings.TrimSpace(strings.TrimPrefix(text, prefix))
 		name, codes := splitSessionNameAndPresetCodes(body)
+		if name == "" {
+			b.mu.Lock()
+			name = b.defaultStartSessionName
+			b.mu.Unlock()
+			if name == "" {
+				return "", "", false
+			}
+		}
 		return name, codes, true
 	}
 	return "", "", false

@@ -4,6 +4,7 @@
   "lark_app_secret": "xxxx",
   "lark_notify_receive_id": "xxxx",
   "lark_mention_enabled": true,
+  "lark_default_session_name": "临时",
   "fast_waiting_transition_ms": 1000,
   "conservative_waiting_transition_ms": 3000,
   "lark_notify_max_lines": 100,
