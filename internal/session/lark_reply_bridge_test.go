@@ -282,14 +282,14 @@ func TestLarkReplyBridgeStartRunsNamePresetOnExactMatch(t *testing.T) {
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
-		"绘画 A": {Commands: []string{"cd drawings/a", "echo {{session_name_raw}}"}},
+		"会话 A": {Commands: []string{"cd sessions/a", "echo {{session_name_raw}}"}},
 	})
 
-	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-preset", "", "", "text", `{"text":"开始 绘画 A"}`)); err != nil {
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-preset", "", "", "text", `{"text":"开始 会话 A"}`)); err != nil {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	want := []string{"cd drawings/a\r", "echo 绘画 A\r"}
+	want := []string{"cd sessions/a\r", "echo 会话 A\r"}
 	if len(parts) != len(want) {
 		t.Fatalf("name preset writes = %#v, want %#v", parts, want)
 	}
@@ -306,10 +306,10 @@ func TestLarkReplyBridgeStartNamePresetRequiresExactMatch(t *testing.T) {
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
-		"绘画 A": {Commands: []string{"cd drawings/a"}},
+		"会话 A": {Commands: []string{"cd sessions/a"}},
 	})
 
-	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-preset-miss", "", "", "text", `{"text":"开始 绘画 A 草稿"}`)); err != nil {
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-preset-miss", "", "", "text", `{"text":"开始 会话 A 草稿"}`)); err != nil {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
@@ -324,20 +324,20 @@ func TestLarkReplyBridgeStartRunsNamePresetBeforeCodePresets(t *testing.T) {
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
-		"绘画 A": {Commands: []string{"name-one", "name-two"}},
+		"会话 A": {Commands: []string{"name-one", "name-two"}},
 	})
 	bridge.SetStartPresets(map[string]SessionStartPreset{
 		"1": {Commands: []string{"code-one"}},
 	})
 
-	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-before-code", "", "", "text", `{"text":"开始 绘画 A 1"}`)); err != nil {
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-before-code", "", "", "text", `{"text":"开始 会话 A 1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	sessions, err := manager.ListSessions(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0].Name != "绘画 A" {
+	if len(sessions) != 1 || sessions[0].Name != "会话 A" {
 		t.Fatalf("preset suffix should not be part of session name, got %#v", sessions)
 	}
 	parts := launcher.terminals[0].writeParts()

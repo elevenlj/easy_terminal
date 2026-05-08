@@ -9,7 +9,7 @@
   "lark_notify_max_lines": 100,
   "codex_no_anchor_fallback_lines": 80,
   "session_name_presets": {
-    "绘画 A": {
+    "会话 A": {
       "commands": [
         "mkdir -p project/{{session_name_slug_raw}}",
         "cd project/{{session_name_slug_raw}}",

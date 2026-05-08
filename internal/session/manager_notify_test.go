@@ -270,6 +270,47 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	}
 }
 
+func TestStartupPresetNotificationSuppressionSkipsExternalNotifyButRunsHook(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	hookCh := make(chan string, 1)
+	m.SetNotificationSentHook(func(sessionID string) {
+		hookCh <- sessionID
+	})
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo setup\r")
+	rt.SetVisibleSnapshot("$ echo setup\nsetup done\n$")
+	rt.SuppressStartupNotifications()
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("startup preset notification should be suppressed, got %d", got)
+	}
+	select {
+	case got := <-hookCh:
+		if got != "sess-1" {
+			t.Fatalf("hook session = %q, want sess-1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("suppressed startup notification should still run notification hook")
+	}
+
+	rt.MarkInputActivity("echo real\r")
+	rt.mu.Lock()
+	suppressed := rt.suppressStartupNotify
+	rt.mu.Unlock()
+	if suppressed {
+		t.Fatal("real input should clear startup notification suppression")
+	}
+}
+
 type recordingNotifier struct {
 	mu    sync.Mutex
 	items []WaitingNotification

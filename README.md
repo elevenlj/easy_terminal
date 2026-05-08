@@ -204,9 +204,9 @@ pwd | ls -la | git status
 ```json
 {
   "session_name_presets": {
-    "绘画 A": {
+    "会话 A": {
       "commands": [
-        "cd project/drawing-a",
+        "cd project/session-a",
         "source .venv/bin/activate",
         "echo ready for {{session_name_raw}}"
       ]
@@ -233,13 +233,13 @@ pwd | ls -la | git status
 飞书输入：
 
 ```text
-开始 绘画 A
+开始 会话 A
 开始 测试项目 1-2
 ```
 
 执行逻辑：
 
-- `开始 绘画 A` 会精确命中 `session_name_presets` 中的 `绘画 A`，自动执行对应命令。
+- `开始 会话 A` 会精确命中 `session_name_presets` 中的 `会话 A`，自动执行对应命令。
 - 创建名为 `测试项目` 的会话。
 - 依次执行预设 `1` 和预设 `2` 中的命令。
 - 预设码只按 `-` 分隔：`12` 表示预设 `12`，`1-2` 表示预设 `1` 后接预设 `2`。

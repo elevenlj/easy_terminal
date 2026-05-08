@@ -321,6 +321,7 @@ type RuntimeSession struct {
 	lastInputText          string
 	inputLineBuffer        string
 	lastNotifiedRoundHash  string
+	suppressStartupNotify  bool
 	subscribers            map[chan RuntimeEvent]struct{}
 	snapshotWaiters        []chan struct{}
 	nextSeq                int64
@@ -379,6 +380,12 @@ func (rt *RuntimeSession) WriteInput(data string) error {
 	}
 	_, err := rt.terminal.Write([]byte(data))
 	return err
+}
+
+func (rt *RuntimeSession) SuppressStartupNotifications() {
+	rt.mu.Lock()
+	rt.suppressStartupNotify = true
+	rt.mu.Unlock()
 }
 
 func (rt *RuntimeSession) runPreStartCommand() {
@@ -472,6 +479,7 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 		rt.lastNotifiedRoundHash = ""
 	}
 	rt.session.Status = StatusRunning
+	rt.suppressStartupNotify = false
 	rt.session.UpdatedAt = time.Now().UTC()
 	rt.stateVersion++
 	rt.notifyVersion++
@@ -746,6 +754,14 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 			rt.rescheduleNotifyRetryLocked(version)
 		}
 		rt.mu.Unlock()
+		return
+	}
+	if rt.suppressStartupNotify {
+		rt.lastNotifiedRoundHash = contentHash
+		rt.mu.Unlock()
+		log.Printf("waiting notification suppressed during startup presets session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
+		defaultLarkMessageRegistry.rememberLatest(n.SessionID)
+		rt.manager.notificationSent(n.SessionID)
 		return
 	}
 	rt.mu.Unlock()

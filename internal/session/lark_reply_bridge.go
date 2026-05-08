@@ -418,7 +418,11 @@ func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) err
 	presets := copySessionStartPresets(b.startPresets)
 	b.mu.Unlock()
 	vars := sessionStartPresetVars(sess, codes)
-	for _, code := range splitPresetCodes(codes) {
+	presetCodes := splitPresetCodes(codes)
+	if len(presetCodes) > 0 {
+		rt.SuppressStartupNotifications()
+	}
+	for _, code := range presetCodes {
 		preset, ok := presets[code]
 		if !ok {
 			log.Printf("lark start preset not configured session=%s code=%q", sess.ID, code)
@@ -443,6 +447,7 @@ func (b *LarkReplyBridge) runSessionNamePreset(sess Session, codes string) error
 	if !ok {
 		return nil
 	}
+	rt.SuppressStartupNotifications()
 	vars := sessionStartPresetVars(sess, codes)
 	return runSessionPresetCommands(rt, preset, vars)
 }
