@@ -37,6 +37,7 @@ type WaitingNotification struct {
 	Content   string
 	MessageID string
 	UpdateNo  int
+	Running   bool
 }
 
 type WaitingNotificationResult struct {
@@ -50,4 +51,8 @@ type WaitingNotificationResult struct {
 type WaitingNotifier interface {
 	Available() bool
 	NotifyWaiting(WaitingNotification) (WaitingNotificationResult, error)
+}
+
+type WaitingRunningNotifier interface {
+	UpdateWaitingRunning(WaitingNotification, bool) error
 }

@@ -188,6 +188,9 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
 		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
 	}
+	if notes[1].Running {
+		t.Fatalf("content update should restore normal title state, got %#v", notes[1])
+	}
 
 	rt.MarkInputActivity("echo next\r")
 	rt.SetVisibleSnapshot("$ echo next\nnext\n$")
@@ -205,6 +208,35 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	}
 }
 
+func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("今天天气怎么样\r")
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	rt.HandleOutput([]byte("more output"))
+
+	running := notifier.runningNotes()
+	if len(running) != 1 {
+		t.Fatalf("expected one running marker update, got %#v", running)
+	}
+	if running[0].MessageID != "msg-1" || !running[0].Running || running[0].Name != "A" {
+		t.Fatalf("unexpected running marker note: %#v", running[0])
+	}
+	if running[0].Content != "> 今天天气怎么样\n• 你想查哪个城市的天气？" {
+		t.Fatalf("running marker should keep last notified content, got %q", running[0].Content)
+	}
+}
+
 func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
@@ -217,6 +249,21 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	}
 	if !strings.Contains(content, "已更新-2") {
 		t.Fatalf("card content should include update marker, got %s", content)
+	}
+}
+
+func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "still working",
+		Running:   true,
+	}, "ou_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "A（Running）") {
+		t.Fatalf("card content should include running title suffix, got %s", content)
 	}
 }
 
@@ -433,9 +480,10 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 }
 
 type recordingNotifier struct {
-	mu        sync.Mutex
-	items     []WaitingNotification
-	messageID string
+	mu           sync.Mutex
+	items        []WaitingNotification
+	runningItems []WaitingNotification
+	messageID    string
 }
 
 func (n *recordingNotifier) Available() bool { return true }
@@ -451,6 +499,14 @@ func (n *recordingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNoti
 	return WaitingNotificationResult{MessageID: messageID, Updated: note.MessageID != ""}, nil
 }
 
+func (n *recordingNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	note.Running = running
+	n.runningItems = append(n.runningItems, note)
+	return nil
+}
+
 func (n *recordingNotifier) count() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -462,5 +518,13 @@ func (n *recordingNotifier) notes() []WaitingNotification {
 	defer n.mu.Unlock()
 	cp := make([]WaitingNotification, len(n.items))
 	copy(cp, n.items)
+	return cp
+}
+
+func (n *recordingNotifier) runningNotes() []WaitingNotification {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cp := make([]WaitingNotification, len(n.runningItems))
+	copy(cp, n.runningItems)
 	return cp
 }

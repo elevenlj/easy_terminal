@@ -67,12 +67,19 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 		"config": map[string]any{"wide_screen_mode": true, "update_multi": true},
 		"header": map[string]any{
 			"template": "blue",
-			"title":    map[string]any{"tag": "plain_text", "content": note.Name},
+			"title":    map[string]any{"tag": "plain_text", "content": larkNotificationTitle(note)},
 		},
 		"elements": elements,
 	}
 	b, err := json.Marshal(card)
 	return string(b), err
+}
+
+func larkNotificationTitle(note WaitingNotification) string {
+	if note.Running {
+		return note.Name + "（Running）"
+	}
+	return note.Name
 }
 
 func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
@@ -142,6 +149,32 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	}
 	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
 	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true, TipSent: tipSent}, nil
+}
+
+func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {
+	if !n.Available() || note.MessageID == "" {
+		return nil
+	}
+	note.Running = running
+	content, err := larkNotificationCardContent(note, n.receiveID, n.mention)
+	if err != nil {
+		return err
+	}
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(note.MessageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(content).
+			Build()).
+		Build()
+	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success() {
+		return fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
+	return nil
 }
 
 func (n *LarkAppNotifier) sendUpdateTip(messageID string, updateNo int) error {

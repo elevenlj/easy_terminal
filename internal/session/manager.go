@@ -332,7 +332,9 @@ type RuntimeSession struct {
 	inputLineBuffer        string
 	lastNotifiedRoundHash  string
 	lastNotifiedMessageID  string
+	lastNotifiedContent    string
 	notificationUpdateNo   int
+	notificationRunning    bool
 	startupNotifyMode      startupNotifyMode
 	subscribers            map[chan RuntimeEvent]struct{}
 	snapshotWaiters        []chan struct{}
@@ -504,7 +506,9 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
 		rt.lastNotifiedMessageID = ""
+		rt.lastNotifiedContent = ""
 		rt.notificationUpdateNo = 0
+		rt.notificationRunning = false
 	}
 	rt.session.Status = StatusRunning
 	rt.startupNotifyMode = startupNotifyNormal
@@ -621,8 +625,14 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	}
 	rt.session.HistorySize += int64(len(cp))
 	rt.session.UpdatedAt = time.Now().UTC()
+	var runningNote WaitingNotification
+	markRunning := false
 	if renderable {
+		wasWaiting := rt.session.Status == StatusWaiting
 		rt.session.Status = StatusRunning
+		if wasWaiting {
+			runningNote, markRunning = rt.markNotificationRunningLocked()
+		}
 		if rt.startupNotifyMode == startupNotifySettling {
 			rt.scheduleStartupNotifyFinalLocked(defaultStartupPresetSettleDelay)
 		}
@@ -641,6 +651,9 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	if rt.manager.store != nil {
 		_ = rt.manager.store.AppendOutput(context.Background(), s.ID, seq, cp)
 		_ = rt.manager.store.UpdateSession(context.Background(), s)
+	}
+	if markRunning {
+		rt.updateNotificationRunning(runningNote, true)
 	}
 }
 
@@ -818,9 +831,11 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		if result.MessageID != "" {
 			rt.lastNotifiedMessageID = result.MessageID
 		}
+		rt.lastNotifiedContent = n.Content
 		if result.Updated {
 			rt.notificationUpdateNo = n.UpdateNo
 		}
+		rt.notificationRunning = false
 	}
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
@@ -830,6 +845,41 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, string, bool) {
 	n, contentHash, ok, _ := rt.waitingNotificationCandidateLocked()
 	return n, contentHash, ok
+}
+
+func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, bool) {
+	if rt.manager.notifier == nil || rt.lastNotifiedMessageID == "" || rt.lastNotifiedContent == "" || rt.notificationRunning {
+		return WaitingNotification{}, false
+	}
+	if _, ok := rt.manager.notifier.(WaitingRunningNotifier); !ok {
+		return WaitingNotification{}, false
+	}
+	rt.notificationRunning = true
+	return WaitingNotification{
+		SessionID: rt.session.ID,
+		Name:      rt.session.Name,
+		Content:   rt.lastNotifiedContent,
+		MessageID: rt.lastNotifiedMessageID,
+		UpdateNo:  rt.notificationUpdateNo,
+		Running:   true,
+	}, true
+}
+
+func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, running bool) {
+	notifier, ok := rt.manager.notifier.(WaitingRunningNotifier)
+	if !ok {
+		return
+	}
+	if err := notifier.UpdateWaitingRunning(note, running); err != nil {
+		log.Printf("waiting notification running marker failed session=%s message=%s running=%v: %v", note.SessionID, note.MessageID, running, err)
+		if running {
+			rt.mu.Lock()
+			if rt.lastNotifiedMessageID == note.MessageID {
+				rt.notificationRunning = false
+			}
+			rt.mu.Unlock()
+		}
+	}
 }
 
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
