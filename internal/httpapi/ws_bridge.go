@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 
@@ -75,51 +74,65 @@ func (b *wsBridge) readClient() {
 }
 
 func filterTerminalResponses(data []byte) []byte {
-	data = regexpReplace(data, []byte{0x1b, '['}, 'R')
-	data = regexpReplace(data, []byte{0x1b, '[', '?'}, 'c')
-	data = filterOSC(data)
-	return data
-}
-
-func regexpReplace(data []byte, prefix []byte, final byte) []byte {
-	var out bytes.Buffer
+	out := make([]byte, 0, len(data))
 	for i := 0; i < len(data); {
-		if bytes.HasPrefix(data[i:], prefix) {
-			j := i + len(prefix)
-			for j < len(data) && ((data[j] >= '0' && data[j] <= '9') || data[j] == ';') {
-				j++
-			}
-			if j < len(data) && data[j] == final {
-				i = j + 1
-				continue
+		if data[i] == 0x1b && i+1 < len(data) {
+			switch data[i+1] {
+			case '[':
+				if end, ok := terminalResponseCSIEnd(data, i+2); ok {
+					i = end + 1
+					continue
+				}
+			case ']', 'P', '^', '_':
+				if end, ok := stringControlEnd(data, i+2); ok {
+					i = end + 1
+					continue
+				}
 			}
 		}
-		out.WriteByte(data[i])
+		out = append(out, data[i])
 		i++
 	}
-	return out.Bytes()
+	return out
 }
 
-func filterOSC(data []byte) []byte {
-	var out bytes.Buffer
-	for i := 0; i < len(data); {
-		if i+1 < len(data) && data[i] == 0x1b && data[i+1] == ']' {
-			j := i + 2
-			for j < len(data) {
-				if data[j] == 0x07 {
-					i = j + 1
-					goto next
-				}
-				if data[j] == 0x1b && j+1 < len(data) && data[j+1] == '\\' {
-					i = j + 2
-					goto next
-				}
-				j++
-			}
-		}
-		out.WriteByte(data[i])
-		i++
-	next:
+func terminalResponseCSIEnd(data []byte, start int) (int, bool) {
+	if start >= len(data) || !isCSIParamByte(data[start]) {
+		return 0, false
 	}
-	return out.Bytes()
+	for i := start; i < len(data); i++ {
+		b := data[i]
+		if b >= 0x40 && b <= 0x7e {
+			return i, isTerminalResponseCSIFinal(b)
+		}
+		if !isCSIParamByte(b) && !(b >= 0x20 && b <= 0x2f) {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+func isCSIParamByte(b byte) bool {
+	return b >= 0x30 && b <= 0x3f
+}
+
+func isTerminalResponseCSIFinal(b byte) bool {
+	switch b {
+	case 'R', 'c', 'n', 't', 'u':
+		return true
+	default:
+		return false
+	}
+}
+
+func stringControlEnd(data []byte, start int) (int, bool) {
+	for i := start; i < len(data); i++ {
+		if data[i] == 0x07 {
+			return i, true
+		}
+		if data[i] == 0x1b && i+1 < len(data) && data[i+1] == '\\' {
+			return i + 1, true
+		}
+	}
+	return 0, false
 }
