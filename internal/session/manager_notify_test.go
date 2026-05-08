@@ -220,6 +220,22 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	}
 }
 
+func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
+	content, err := larkUpdateTipCardContent(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "已更新-3") {
+		t.Fatalf("tip content should include update marker, got %s", content)
+	}
+	if !strings.Contains(content, `"tag":"note"`) {
+		t.Fatalf("tip content should use note element, got %s", content)
+	}
+	if strings.Contains(content, `"header"`) {
+		t.Fatalf("tip content should not include a header, got %s", content)
+	}
+}
+
 func TestNotifyAfterStableDoesNotSendWhenNotificationDisabled(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier))

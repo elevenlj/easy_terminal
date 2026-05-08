@@ -136,7 +136,7 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	}
 	tipSent := false
 	if note.UpdateNo > 0 {
-		if err := n.sendUpdateTip(note.UpdateNo); err == nil {
+		if err := n.sendUpdateTip(note.MessageID, note.UpdateNo); err == nil {
 			tipSent = true
 		}
 	}
@@ -144,33 +144,41 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true, TipSent: tipSent}, nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTip(updateNo int) error {
-	token, err := n.tenantAccessToken(context.Background())
+func (n *LarkAppNotifier) sendUpdateTip(messageID string, updateNo int) error {
+	if messageID == "" {
+		return nil
+	}
+	content, err := larkUpdateTipCardContent(updateNo)
 	if err != nil {
 		return err
 	}
-	content, _ := json.Marshal(map[string]string{"text": fmt.Sprintf("已更新-%d", updateNo)})
-	payload, _ := json.Marshal(map[string]any{
-		"receive_id": n.receiveID,
-		"msg_type":   "text",
-		"content":    string(content),
-	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType("interactive").
+			Content(content).
+			ReplyInThread(false).
+			Build()).
+		Build()
+	resp, err := n.client.Im.V1.Message.Reply(context.Background(), req)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("lark update tip API returned %s: %s", resp.Status, string(body))
+	if !resp.Success() {
+		return fmt.Errorf("lark update tip reply API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func larkUpdateTipCardContent(updateNo int) (string, error) {
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": false},
+		"elements": []map[string]any{
+			{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", updateNo)}}},
+		},
+	}
+	b, err := json.Marshal(card)
+	return string(b), err
 }
 
 func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error) {
