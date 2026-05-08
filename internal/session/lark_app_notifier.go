@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 type LarkAppNotifier struct {
@@ -37,28 +38,47 @@ func (n *LarkAppNotifier) Available() bool {
 	return n != nil && n.client != nil && n.receiveID != ""
 }
 
-func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) error {
+func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
 	if !n.Available() {
-		return errors.New("lark notifier is not configured")
+		return WaitingNotificationResult{}, errors.New("lark notifier is not configured")
+	}
+	content, err := larkNotificationCardContent(note, n.receiveID, n.mention)
+	if err != nil {
+		return WaitingNotificationResult{}, err
+	}
+	if note.MessageID != "" {
+		return n.updateWaiting(note, content)
+	}
+	return n.createWaiting(note, content)
+}
+
+func larkNotificationCardContent(note WaitingNotification, receiveID string, mention bool) (string, error) {
+	elements := []map[string]any{
+		{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": note.Content}},
+	}
+	if note.UpdateNo > 0 {
+		elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", note.UpdateNo)}}})
+	}
+	elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": note.SessionID}}})
+	if mention {
+		elements = append([]map[string]any{{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": "<at id=" + receiveID + "></at>"}}}, elements...)
 	}
 	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
+		"config": map[string]any{"wide_screen_mode": true, "update_multi": true},
 		"header": map[string]any{
 			"template": "blue",
 			"title":    map[string]any{"tag": "plain_text", "content": note.Name},
 		},
-		"elements": []map[string]any{
-			{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": note.Content}},
-			{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": note.SessionID}}},
-		},
+		"elements": elements,
 	}
-	if n.mention {
-		card["elements"] = append([]map[string]any{{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": "<at id=" + n.receiveID + "></at>"}}}, card["elements"].([]map[string]any)...)
-	}
-	content, _ := json.Marshal(card)
+	b, err := json.Marshal(card)
+	return string(b), err
+}
+
+func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
 	token, err := n.tenantAccessToken(context.Background())
 	if err != nil {
-		return err
+		return WaitingNotificationResult{}, err
 	}
 	payload, _ := json.Marshal(map[string]any{
 		"receive_id": n.receiveID,
@@ -67,18 +87,18 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) error {
 	})
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return WaitingNotificationResult{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return WaitingNotificationResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
+		return WaitingNotificationResult{}, fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
 	}
 	var createResp struct {
 		Code int `json:"code"`
@@ -90,10 +110,32 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) error {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&createResp); err == nil && createResp.Code == 0 {
 		defaultLarkMessageRegistry.remember(note.SessionID, createResp.Data.MessageID, createResp.Data.RootID, createResp.Data.ParentID)
+		return WaitingNotificationResult{MessageID: createResp.Data.MessageID, RootID: createResp.Data.RootID, ParentID: createResp.Data.ParentID}, nil
 	} else {
 		defaultLarkMessageRegistry.rememberLatest(note.SessionID)
+		if createResp.Code != 0 {
+			return WaitingNotificationResult{}, fmt.Errorf("lark message API returned code %d", createResp.Code)
+		}
 	}
-	return nil
+	return WaitingNotificationResult{}, nil
+}
+
+func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(note.MessageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(content).
+			Build()).
+		Build()
+	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
+	if err != nil {
+		return WaitingNotificationResult{}, err
+	}
+	if !resp.Success() {
+		return WaitingNotificationResult{}, fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
+	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true}, nil
 }
 
 func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error) {

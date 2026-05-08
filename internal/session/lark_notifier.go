@@ -18,11 +18,14 @@ func (n *LarkNotifier) Available() bool {
 	return n != nil && n.WebhookURL != ""
 }
 
-func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) error {
+func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
 	if !n.Available() {
-		return errors.New("lark webhook is not configured")
+		return WaitingNotificationResult{}, errors.New("lark webhook is not configured")
 	}
 	content := note.Content
+	if note.UpdateNo > 0 {
+		content += fmt.Sprintf("\n\n已更新-%d", note.UpdateNo)
+	}
 	if n.MentionAll {
 		content = "<at id=all></at>\n" + content
 	}
@@ -36,13 +39,13 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) error {
 	b, _ := json.Marshal(payload)
 	resp, err := http.Post(n.WebhookURL, "application/json", bytes.NewReader(b))
 	if err != nil {
-		return err
+		return WaitingNotificationResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("%s: %s", resp.Status, string(body))
+		return WaitingNotificationResult{}, fmt.Errorf("%s: %s", resp.Status, string(body))
 	}
 	defaultLarkMessageRegistry.rememberLatest(note.SessionID)
-	return nil
+	return WaitingNotificationResult{}, nil
 }

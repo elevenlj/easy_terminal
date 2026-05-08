@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,6 +152,71 @@ func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 	}
 	if notes[0].Content != "$ echo hello\nhello\n$" {
 		t.Fatalf("unexpected stable notification content: %q", notes[0].Content)
+	}
+}
+
+func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("今天天气怎么样\r")
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	rt.HandleOutput([]byte("more output"))
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？\n• 成都今天晴转多云。")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version = rt.notifyVersion
+	rt.mu.Unlock()
+	rt.notifyIfStillWaiting(version)
+
+	notes := notifier.notes()
+	if len(notes) != 2 {
+		t.Fatalf("expected create and update notifications, got %#v", notes)
+	}
+	if notes[0].MessageID != "" || notes[0].UpdateNo != 0 {
+		t.Fatalf("first notification should create a new message, got %#v", notes[0])
+	}
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
+		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
+	}
+
+	rt.MarkInputActivity("echo next\r")
+	rt.SetVisibleSnapshot("$ echo next\nnext\n$")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version = rt.notifyVersion
+	rt.mu.Unlock()
+	rt.notifyIfStillWaiting(version)
+	notes = notifier.notes()
+	if len(notes) != 3 {
+		t.Fatalf("expected next round notification, got %#v", notes)
+	}
+	if notes[2].MessageID != "" || notes[2].UpdateNo != 0 {
+		t.Fatalf("new round should create a new message, got %#v", notes[2])
+	}
+}
+
+func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "done",
+		UpdateNo:  2,
+	}, "open-id", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "已更新-2") {
+		t.Fatalf("card content should include update marker, got %s", content)
 	}
 }
 
@@ -351,17 +417,22 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 }
 
 type recordingNotifier struct {
-	mu    sync.Mutex
-	items []WaitingNotification
+	mu        sync.Mutex
+	items     []WaitingNotification
+	messageID string
 }
 
 func (n *recordingNotifier) Available() bool { return true }
 
-func (n *recordingNotifier) NotifyWaiting(note WaitingNotification) error {
+func (n *recordingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.items = append(n.items, note)
-	return nil
+	messageID := n.messageID
+	if messageID == "" {
+		messageID = "msg-recording"
+	}
+	return WaitingNotificationResult{MessageID: messageID, Updated: note.MessageID != ""}, nil
 }
 
 func (n *recordingNotifier) count() int {

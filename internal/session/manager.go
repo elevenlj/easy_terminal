@@ -331,6 +331,8 @@ type RuntimeSession struct {
 	lastInputText          string
 	inputLineBuffer        string
 	lastNotifiedRoundHash  string
+	lastNotifiedMessageID  string
+	notificationUpdateNo   int
 	startupNotifyMode      startupNotifyMode
 	subscribers            map[chan RuntimeEvent]struct{}
 	snapshotWaiters        []chan struct{}
@@ -501,6 +503,8 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
+		rt.lastNotifiedMessageID = ""
+		rt.notificationUpdateNo = 0
 	}
 	rt.session.Status = StatusRunning
 	rt.startupNotifyMode = startupNotifyNormal
@@ -795,10 +799,15 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	if rt.startupNotifyMode == startupNotifyFinal {
 		rt.startupNotifyMode = startupNotifyNormal
 	}
+	if rt.lastNotifiedMessageID != "" {
+		n.MessageID = rt.lastNotifiedMessageID
+		n.UpdateNo = rt.notificationUpdateNo + 1
+	}
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
 		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
-	if err := rt.manager.notifier.NotifyWaiting(n); err != nil {
+	result, err := rt.manager.notifier.NotifyWaiting(n)
+	if err != nil {
 		log.Printf("waiting notification send failed session=%s version=%d hash=%s: %v", n.SessionID, version, shortNotifyHash(contentHash), err)
 		return
 	}
@@ -806,6 +815,12 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	rt.mu.Lock()
 	if rt.session.Status == StatusWaiting && rt.session.Live && rt.session.NotifyOnWaiting && rt.notifyVersion == version {
 		rt.lastNotifiedRoundHash = contentHash
+		if result.MessageID != "" {
+			rt.lastNotifiedMessageID = result.MessageID
+		}
+		if result.Updated {
+			rt.notificationUpdateNo = n.UpdateNo
+		}
 	}
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)

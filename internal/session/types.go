@@ -35,9 +35,18 @@ type WaitingNotification struct {
 	SessionID string
 	Name      string
 	Content   string
+	MessageID string
+	UpdateNo  int
+}
+
+type WaitingNotificationResult struct {
+	MessageID string
+	RootID    string
+	ParentID  string
+	Updated   bool
 }
 
 type WaitingNotifier interface {
 	Available() bool
-	NotifyWaiting(WaitingNotification) error
+	NotifyWaiting(WaitingNotification) (WaitingNotificationResult, error)
 }
