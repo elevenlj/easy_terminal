@@ -879,14 +879,11 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 			rt.lastNotifiedMessageID = result.MessageID
 		}
 		rt.lastNotifiedContent = n.Content
-		rt.notificationUpdateNo = n.UpdateNo
+		if result.Updated {
+			rt.notificationUpdateNo = n.UpdateNo
+		}
 		rt.notificationRunning = n.Running
-	} else if result.MessageID != "" && n.MessageID != "" && sameRound && rt.lastNotifiedMessageID == n.MessageID {
-		rt.lastNotifiedMessageID = result.MessageID
-		rt.lastNotifiedContent = n.Content
-		rt.notificationUpdateNo = n.UpdateNo
-		rt.notificationRunning = n.Running
-	} else if result.MessageID != "" && sameRound && rt.lastNotifiedMessageID == "" {
+	} else if result.MessageID != "" && !result.Updated && sameRound && rt.lastNotifiedMessageID == "" {
 		rt.lastNotifiedMessageID = result.MessageID
 		rt.lastNotifiedContent = n.Content
 		rt.notificationUpdateNo = n.UpdateNo

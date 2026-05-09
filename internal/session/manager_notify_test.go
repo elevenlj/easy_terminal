@@ -157,7 +157,7 @@ func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 }
 
 func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
-	notifier := &recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}
+	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
@@ -187,13 +187,13 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 		t.Fatalf("first notification should create a new message, got %#v", notes[0])
 	}
 	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
-		t.Fatalf("second notification should replace msg-1 with update no 1, got %#v", notes[1])
+		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
 	}
 	if notes[1].Running {
 		t.Fatalf("waiting notification update should clear running title state, got %#v", notes[1])
 	}
-	if rt.lastNotifiedMessageID != "msg-2" {
-		t.Fatalf("runtime should store replacement message id, got %q", rt.lastNotifiedMessageID)
+	if rt.lastNotifiedMessageID != "msg-1" {
+		t.Fatalf("runtime should keep updated message id, got %q", rt.lastNotifiedMessageID)
 	}
 
 	rt.MarkInputActivity("echo next\r")
@@ -213,7 +213,7 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 }
 
 func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testing.T) {
-	notifier := &advancingNotifier{recordingNotifier: recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}}
+	notifier := &advancingNotifier{recordingNotifier: recordingNotifier{messageID: "msg-1"}}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
@@ -251,7 +251,7 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 		t.Fatalf("first notification should create, got %#v", notes[0])
 	}
 	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
-		t.Fatalf("second same-round notification should replace msg-1, got %#v", notes[1])
+		t.Fatalf("second same-round notification should update msg-1, got %#v", notes[1])
 	}
 }
 
@@ -450,7 +450,7 @@ func TestNotifyIfStillWaitingSkipsStaleSendAfterNewOutput(t *testing.T) {
 }
 
 func TestNotifyIfStillWaitingCoalescesSameRoundUpdate(t *testing.T) {
-	notifier := &recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}
+	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(250*time.Millisecond))
 	rt := &RuntimeSession{
 		manager: m,
@@ -539,6 +539,54 @@ func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	}
 	if !strings.Contains(content, "A（Running）") {
 		t.Fatalf("card content should include running title suffix, got %s", content)
+	}
+}
+
+func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
+	content, err := larkUpdateTipCardContent(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "已更新-3") {
+		t.Fatalf("tip content should include update marker, got %s", content)
+	}
+	if !strings.Contains(content, `"tag":"note"`) {
+		t.Fatalf("tip content should use note element, got %s", content)
+	}
+	if strings.Contains(content, `"header"`) {
+		t.Fatalf("tip content should not include a header, got %s", content)
+	}
+}
+
+func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
+	notifier := &LarkAppNotifier{}
+	var sent []string
+	notifier.tipSender = func(messageID string, updateNo int) error {
+		sent = append(sent, fmt.Sprintf("%s:%d", messageID, updateNo))
+		return nil
+	}
+
+	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-1", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-2", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"msg-1:1", "msg-1:2", "msg-2:1"}
+	if len(sent) != len(want) {
+		t.Fatalf("sent tips = %#v, want %#v", sent, want)
+	}
+	for i := range want {
+		if sent[i] != want[i] {
+			t.Fatalf("sent tip %d = %q, want %q; all=%#v", i, sent[i], want[i], sent)
+		}
 	}
 }
 
@@ -739,11 +787,10 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 }
 
 type recordingNotifier struct {
-	mu               sync.Mutex
-	items            []WaitingNotification
-	runningItems     []WaitingNotification
-	messageID        string
-	replaceMessageID string
+	mu           sync.Mutex
+	items        []WaitingNotification
+	runningItems []WaitingNotification
+	messageID    string
 }
 
 func (n *recordingNotifier) Available() bool { return true }
@@ -753,13 +800,10 @@ func (n *recordingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNoti
 	defer n.mu.Unlock()
 	n.items = append(n.items, note)
 	messageID := n.messageID
-	if note.MessageID != "" && n.replaceMessageID != "" {
-		messageID = n.replaceMessageID
-	}
 	if messageID == "" {
 		messageID = "msg-recording"
 	}
-	return WaitingNotificationResult{MessageID: messageID}, nil
+	return WaitingNotificationResult{MessageID: messageID, Updated: note.MessageID != ""}, nil
 }
 
 func (n *recordingNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {

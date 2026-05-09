@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"sync"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -20,6 +20,9 @@ type LarkAppNotifier struct {
 	client    *lark.Client
 	receiveID string
 	mention   bool
+	tipMu     sync.Mutex
+	tipSent   map[string]map[int]bool
+	tipSender func(string, int) error
 }
 
 func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkAppNotifier {
@@ -32,6 +35,7 @@ func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkA
 		client:    lark.NewClient(appID, appSecret),
 		receiveID: receiveID,
 		mention:   mention,
+		tipSent:   make(map[string]map[int]bool),
 	}
 }
 
@@ -48,7 +52,7 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotifi
 		return WaitingNotificationResult{}, err
 	}
 	if note.MessageID != "" {
-		return n.replaceWaiting(note, content)
+		return n.updateWaiting(note, content)
 	}
 	return n.createWaiting(note, content)
 }
@@ -128,11 +132,28 @@ func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string
 	return WaitingNotificationResult{}, nil
 }
 
-func (n *LarkAppNotifier) replaceWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
-	if err := n.deleteWaiting(note.MessageID); err != nil {
-		log.Printf("lark delete old waiting message failed message=%s session=%s: %v", note.MessageID, note.SessionID, err)
+func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(note.MessageID).
+		Body(larkim.NewPatchMessageReqBodyBuilder().
+			Content(content).
+			Build()).
+		Build()
+	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
+	if err != nil {
+		return WaitingNotificationResult{}, err
 	}
-	return n.createWaiting(note, content)
+	if !resp.Success() {
+		return WaitingNotificationResult{}, fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	tipSent := false
+	if note.UpdateNo > 0 {
+		if err := n.sendUpdateTipOnce(note.MessageID, note.UpdateNo); err == nil {
+			tipSent = true
+		}
+	}
+	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
+	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true, TipSent: tipSent}, nil
 }
 
 func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {
@@ -161,21 +182,79 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 	return nil
 }
 
-func (n *LarkAppNotifier) deleteWaiting(messageID string) error {
+func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) error {
+	if messageID == "" || updateNo <= 0 {
+		return nil
+	}
+	n.tipMu.Lock()
+	if n.tipSent == nil {
+		n.tipSent = make(map[string]map[int]bool)
+	}
+	sent := n.tipSent[messageID]
+	if sent == nil {
+		sent = make(map[int]bool)
+		n.tipSent[messageID] = sent
+	}
+	if sent[updateNo] {
+		n.tipMu.Unlock()
+		return nil
+	}
+	n.tipMu.Unlock()
+
+	send := n.sendUpdateTip
+	if n.tipSender != nil {
+		send = n.tipSender
+	}
+	if err := send(messageID, updateNo); err != nil {
+		return err
+	}
+
+	n.tipMu.Lock()
+	sent = n.tipSent[messageID]
+	if sent == nil {
+		sent = make(map[int]bool)
+		n.tipSent[messageID] = sent
+	}
+	sent[updateNo] = true
+	n.tipMu.Unlock()
+	return nil
+}
+
+func (n *LarkAppNotifier) sendUpdateTip(messageID string, updateNo int) error {
 	if messageID == "" {
 		return nil
 	}
-	req := larkim.NewDeleteMessageReqBuilder().
+	content, err := larkUpdateTipCardContent(updateNo)
+	if err != nil {
+		return err
+	}
+	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(messageID).
+		Body(larkim.NewReplyMessageReqBodyBuilder().
+			MsgType("interactive").
+			Content(content).
+			ReplyInThread(false).
+			Build()).
 		Build()
-	resp, err := n.client.Im.V1.Message.Delete(context.Background(), req)
+	resp, err := n.client.Im.V1.Message.Reply(context.Background(), req)
 	if err != nil {
 		return err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("lark delete message API returned code %d: %s", resp.Code, resp.Msg)
+		return fmt.Errorf("lark update tip reply API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func larkUpdateTipCardContent(updateNo int) (string, error) {
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": false},
+		"elements": []map[string]any{
+			{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", updateNo)}}},
+		},
+	}
+	b, err := json.Marshal(card)
+	return string(b), err
 }
 
 func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error) {

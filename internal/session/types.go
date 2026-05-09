@@ -44,6 +44,8 @@ type WaitingNotificationResult struct {
 	MessageID string
 	RootID    string
 	ParentID  string
+	Updated   bool
+	TipSent   bool
 }
 
 type WaitingNotifier interface {
