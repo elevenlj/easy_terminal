@@ -110,6 +110,12 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		OnP1MessageReceiveV1(func(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
 			return b.HandleP1MessageReceive(ctx, event)
 		}).
+		OnP2MessageReactionCreatedV1(func(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
+			return nil
+		}).
+		OnP2MessageReactionDeletedV1(func(ctx context.Context, event *larkim.P2MessageReactionDeletedV1) error {
+			return nil
+		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil
 		}).
@@ -130,6 +136,8 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	incoming := extractLarkIncomingMessage(valueOf(msg.Content), valueOf(msg.MessageType))
+	log.Printf("lark reply bridge received P2 message=%s chat=%s chat_type=%s msg_type=%s text_len=%d attachments=%d",
+		valueOf(msg.MessageId), valueOf(msg.ChatId), valueOf(msg.ChatType), valueOf(msg.MessageType), len(incoming.Text), len(incoming.Attachments))
 	if incoming.Text == "" && len(incoming.Attachments) == 0 {
 		return nil
 	}
@@ -182,6 +190,8 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 	if text == "" {
 		return nil
 	}
+	log.Printf("lark reply bridge received P1 message=%s chat=%s chat_type=%s msg_type=%s mention=%v text_len=%d",
+		e.OpenMessageID, e.OpenChatID, e.ChatType, e.MsgType, e.IsMention, len(text))
 	b.markLarkMessageProcessing(ctx, e.OpenMessageID)
 	routeCtx := larkRouteContext{
 		MessageID:    e.OpenMessageID,
@@ -421,8 +431,11 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 		return b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
 	}
 	if routeCtx.SenderOpenID == "" || b.createChat == nil {
+		log.Printf("lark reply bridge skipped dedicated chat creation session=%s name=%q reason=missing_sender_or_creator sender=%q",
+			s.ID, s.Name, routeCtx.SenderOpenID)
 		return s, nil
 	}
+	log.Printf("lark reply bridge creating dedicated chat session=%s name=%q owner=%s", s.ID, s.Name, routeCtx.SenderOpenID)
 	chatID, err := b.createChat(ctx, s.ID, s.Name, routeCtx.SenderOpenID)
 	if err != nil {
 		log.Printf("lark reply bridge failed to create session chat session=%s name=%q: %v", s.ID, s.Name, err)
@@ -432,6 +445,7 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 	if err != nil {
 		return updated, err
 	}
+	log.Printf("lark reply bridge bound session=%s to lark chat=%s", updated.ID, chatID)
 	if b.sendChatText != nil {
 		if err := b.sendChatText(ctx, chatID, fmt.Sprintf("已创建会话 %s（%s）。之后直接在这个对话里发消息。", updated.Name, updated.ID)); err != nil {
 			log.Printf("lark reply bridge failed to send session chat intro session=%s chat=%s: %v", updated.ID, chatID, err)
