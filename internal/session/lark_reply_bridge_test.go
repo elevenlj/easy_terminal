@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -44,6 +45,51 @@ func TestExtractLarkIncomingMessageWithPostAttachments(t *testing.T) {
 	}
 	if got.Attachments[1].Kind != "file" || got.Attachments[1].Key != "file_a" || got.Attachments[1].Name != "报告.pdf" {
 		t.Fatalf("second attachment = %#v, want file file_a", got.Attachments[1])
+	}
+}
+
+func TestLarkReplyBridgeAddsProcessingReactionForP2Message(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var reactions []string
+	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
+		reactions = append(reactions, messageID+":"+emoji)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-react", "", "", "text", `{"text":"echo from lark"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 1 || reactions[0] != "m-react:"+larkProcessingReactionEmoji {
+		t.Fatalf("expected processing reaction on incoming message, got %#v", reactions)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("message should still route to terminal, got %d terminals", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo from lark\r") {
+		t.Fatalf("terminal should receive submitted input despite reaction, got %q", got)
+	}
+}
+
+func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.addReaction = func(context.Context, string, string) error {
+		return errors.New("missing reaction permission")
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-react-fail", "", "", "text", `{"text":"echo from lark"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("reaction failure should not block routing, got %d terminals", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo from lark\r") {
+		t.Fatalf("terminal should receive submitted input despite reaction failure, got %q", got)
 	}
 }
 

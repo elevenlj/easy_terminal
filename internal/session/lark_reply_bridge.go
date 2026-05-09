@@ -36,9 +36,12 @@ type LarkReplyBridge struct {
 	pipelines               map[string][]string
 	replyText               func(context.Context, string, string) error
 	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
+	addReaction             func(context.Context, string, string) error
 }
 
 var structuredInputEnterDelay = 200 * time.Millisecond
+
+const larkProcessingReactionEmoji = "EYES"
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
@@ -57,6 +60,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *Com
 	}
 	b.replyText = b.replyTextToMessage
 	b.downloadFile = b.downloadLarkAttachment
+	b.addReaction = b.addLarkMessageReaction
 	return b
 }
 
@@ -116,6 +120,7 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 	if incoming.Text == "" && len(incoming.Attachments) == 0 {
 		return nil
 	}
+	b.markLarkMessageProcessing(ctx, valueOf(msg.MessageId))
 	sessionID, err := b.RouteIncoming(ctx, valueOf(msg.MessageId), valueOf(msg.ParentId), valueOf(msg.RootId), incoming)
 	if err != nil {
 		log.Printf("lark reply bridge failed to route message %s: %v", valueOf(msg.MessageId), err)
@@ -123,6 +128,15 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 	}
 	log.Printf("lark reply bridge routed message %s to %s", valueOf(msg.MessageId), sessionID)
 	return nil
+}
+
+func (b *LarkReplyBridge) markLarkMessageProcessing(ctx context.Context, messageID string) {
+	if b.addReaction == nil || messageID == "" {
+		return
+	}
+	if err := b.addReaction(ctx, messageID, larkProcessingReactionEmoji); err != nil {
+		log.Printf("lark reply bridge failed to add processing reaction message=%s emoji=%s: %v", messageID, larkProcessingReactionEmoji, err)
+	}
 }
 
 func shouldIgnoreLarkP2Message(sender *larkim.EventSender, messageType string) bool {
@@ -664,6 +678,26 @@ func (b *LarkReplyBridge) replyTextToMessage(ctx context.Context, messageID stri
 	}
 	if !resp.Success() {
 		return fmt.Errorf("lark reply API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (b *LarkReplyBridge) addLarkMessageReaction(ctx context.Context, messageID string, emoji string) error {
+	if b.apiClient == nil || messageID == "" || emoji == "" {
+		return nil
+	}
+	req := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(larkim.NewCreateMessageReactionReqBodyBuilder().
+			ReactionType(larkim.NewEmojiBuilder().EmojiType(emoji).Build()).
+			Build()).
+		Build()
+	resp, err := b.apiClient.Im.V1.MessageReaction.Create(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success() {
+		return fmt.Errorf("lark reaction API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
 }
