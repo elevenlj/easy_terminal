@@ -414,6 +414,63 @@ func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
 	}
 }
 
+func TestNotifyIfStillWaitingSkipsStaleSendAfterNewOutput(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\npartial")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notificationPatchMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		rt.notifyIfStillWaiting(version)
+		close(done)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	rt.HandleOutput([]byte("complete\n"))
+	rt.SetVisibleSnapshot("$ echo hello\npartial\ncomplete\n$")
+	rt.notificationPatchMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stale waiting notification did not return")
+	}
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("stale waiting notification should not be sent after new output, got %d", got)
+	}
+}
+
+func TestRunningTitleUpdateSkipsStaleMessageAfterReplacement(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "msg-new",
+	}
+
+	rt.updateNotificationRunning(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "old",
+		MessageID: "msg-old",
+		Running:   false,
+	}, false)
+
+	if got := len(notifier.runningNotes()); got != 0 {
+		t.Fatalf("stale running title update should not patch old message, got %d", got)
+	}
+}
+
 func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",

@@ -630,6 +630,8 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	markRunning := false
 	if renderable {
 		rt.session.Status = StatusRunning
+		rt.stateVersion++
+		rt.notifyVersion++
 		if rt.lastNotifiedMessageID != "" && rt.lastNotifiedContent != "" && !rt.notificationRunning {
 			runningNote, markRunning = rt.markNotificationRunningLocked()
 		}
@@ -831,6 +833,17 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
 		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
 	rt.notificationPatchMu.Lock()
+	rt.mu.Lock()
+	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version {
+		currentVersion := rt.notifyVersion
+		currentStatus := rt.session.Status
+		rt.mu.Unlock()
+		rt.notificationPatchMu.Unlock()
+		log.Printf("waiting notification send skipped session=%s version=%d current_version=%d status=%s reason=stale_before_send",
+			n.SessionID, version, currentVersion, currentStatus)
+		return
+	}
+	rt.mu.Unlock()
 	result, err := rt.manager.notifier.NotifyWaiting(n)
 	rt.notificationPatchMu.Unlock()
 	if err != nil {
@@ -924,6 +937,15 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 	}
 	rt.notificationPatchMu.Lock()
 	defer rt.notificationPatchMu.Unlock()
+	rt.mu.Lock()
+	currentMessageID := rt.lastNotifiedMessageID
+	if currentMessageID != "" && currentMessageID != note.MessageID {
+		rt.mu.Unlock()
+		log.Printf("waiting notification running marker skipped session=%s message=%s current_message=%s running=%v reason=stale_message",
+			note.SessionID, note.MessageID, currentMessageID, running)
+		return
+	}
+	rt.mu.Unlock()
 	if err := notifier.UpdateWaitingRunning(note, running); err != nil {
 		log.Printf("waiting notification running marker failed session=%s message=%s running=%v: %v", note.SessionID, note.MessageID, running, err)
 		if running {
