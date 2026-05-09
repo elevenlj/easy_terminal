@@ -48,6 +48,7 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			notify_on_waiting INTEGER NOT NULL DEFAULT 0,
 			peer_session_id TEXT NOT NULL DEFAULT '',
 			bridge_enabled INTEGER NOT NULL DEFAULT 0,
+			lark_chat_id TEXT NOT NULL DEFAULT '',
 			history_size INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS session_output_chunks (
@@ -75,6 +76,7 @@ func (s *SQLite) migrate(ctx context.Context) error {
 		{"notify_on_waiting", "INTEGER NOT NULL DEFAULT 0"},
 		{"peer_session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"bridge_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"lark_chat_id", "TEXT NOT NULL DEFAULT ''"},
 		{"history_size", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if err := s.ensureSessionColumn(ctx, col.name, col.typ); err != nil {
@@ -108,19 +110,19 @@ func (s *SQLite) ensureSessionColumn(ctx context.Context, name, typ string) erro
 }
 
 func (s *SQLite) CreateSession(ctx context.Context, sess session.Session) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,history_size) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		sess.ID, sess.Name, sess.Status, sess.CreatedAt, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.HistorySize)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,history_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sess.ID, sess.Name, sess.Status, sess.CreatedAt, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, sess.HistorySize)
 	return err
 }
 
 func (s *SQLite) UpdateSession(ctx context.Context, sess session.Session) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET name=?,status=?,updated_at=?,exit_code=?,live=?,notify_on_waiting=?,peer_session_id=?,bridge_enabled=?,history_size=? WHERE id=?`,
-		sess.Name, sess.Status, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.HistorySize, sess.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET name=?,status=?,updated_at=?,exit_code=?,live=?,notify_on_waiting=?,peer_session_id=?,bridge_enabled=?,lark_chat_id=?,history_size=? WHERE id=?`,
+		sess.Name, sess.Status, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, sess.HistorySize, sess.ID)
 	return err
 }
 
 func (s *SQLite) ListSessions(ctx context.Context) ([]session.Session, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,history_size FROM sessions ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,history_size FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +139,7 @@ func (s *SQLite) ListSessions(ctx context.Context) ([]session.Session, error) {
 }
 
 func (s *SQLite) GetSession(ctx context.Context, id string) (session.Session, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,history_size FROM sessions WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,history_size FROM sessions WHERE id=?`, id)
 	sess, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return session.Session{}, false, nil
@@ -216,7 +218,7 @@ func scanSession(row sessionScanner) (session.Session, error) {
 	var sess session.Session
 	var exit sql.NullInt64
 	var live, notify, bridge int
-	if err := row.Scan(&sess.ID, &sess.Name, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt, &exit, &live, &notify, &sess.PeerSessionID, &bridge, &sess.HistorySize); err != nil {
+	if err := row.Scan(&sess.ID, &sess.Name, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt, &exit, &live, &notify, &sess.PeerSessionID, &bridge, &sess.LarkChatID, &sess.HistorySize); err != nil {
 		return session.Session{}, err
 	}
 	if exit.Valid {

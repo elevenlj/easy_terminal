@@ -93,6 +93,82 @@ func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeStartCreatesDedicatedChat(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge.createChat = func(_ context.Context, sessionID, name, ownerOpenID string) (string, error) {
+		if sessionID != "sess-1" || name != "手机会话" || ownerOpenID != "ou-user" {
+			t.Fatalf("unexpected create chat args: session=%q name=%q owner=%q", sessionID, name, ownerOpenID)
+		}
+		return "oc-chat-1", nil
+	}
+	var chatMessages []string
+	bridge.sendChatText = func(_ context.Context, chatID, text string) error {
+		chatMessages = append(chatMessages, chatID+":"+text)
+		return nil
+	}
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-start-chat", "", "", "text", `{"text":"开始 手机会话"}`, "p2p", "oc-main", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].LarkChatID != "oc-chat-1" {
+		t.Fatalf("created session should bind lark chat, got %#v", sessions)
+	}
+	if got, ok := defaultLarkMessageRegistry.lookupChat("oc-chat-1"); !ok || got != "sess-1" {
+		t.Fatalf("registry chat lookup = %q,%v; want sess-1,true", got, ok)
+	}
+	if len(chatMessages) != 1 || !strings.Contains(chatMessages[0], "oc-chat-1:已创建会话 手机会话") {
+		t.Fatalf("expected intro message to session chat, got %#v", chatMessages)
+	}
+}
+
+func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-chat-a"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+
+	err = bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-chat-input", "", "", "text", `{"text":"pwd"}`, "group", "oc-chat-a", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("terminal count = %d, want 1", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, "pwd\r") {
+		t.Fatalf("dedicated chat input should route to existing terminal, got %q", got)
+	}
+}
+
+func TestLarkNotificationCardCanTargetDedicatedChat(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "done",
+		ChatID:    "oc-chat-a",
+	}, "open-id", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "done") {
+		t.Fatalf("card content should still render body, got %s", content)
+	}
+}
+
 func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -873,6 +949,15 @@ func resetLarkRegistryForTest() {
 	defer defaultLarkMessageRegistry.mu.Unlock()
 	defaultLarkMessageRegistry.messageToSession = make(map[string]string)
 	defaultLarkMessageRegistry.latestSessionID = ""
+	defaultLarkMessageRegistry.chatToSession = make(map[string]string)
+}
+
+func p2MessageWithChat(messageID, parentID, rootID, messageType, content, chatType, chatID, openID string) *larkim.P2MessageReceiveV1 {
+	msg := p2MessageWithSender(messageID, parentID, rootID, messageType, content, "user")
+	msg.Event.Message.ChatId = strPtr(chatID)
+	msg.Event.Message.ChatType = strPtr(chatType)
+	msg.Event.Sender.SenderId = &larkim.UserId{OpenId: strPtr(openID)}
+	return msg
 }
 
 func waitForBrowserRequest(t *testing.T, mu *sync.Mutex, requests *[]string, sessionID string) {

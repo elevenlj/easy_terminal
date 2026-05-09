@@ -265,6 +265,72 @@ func (m *Manager) UpdateNotifyOnWaiting(ctx context.Context, id string, enabled 
 	return s, true, err
 }
 
+func (m *Manager) BindLarkChat(ctx context.Context, id string, chatID string) (Session, bool, error) {
+	chatID = strings.TrimSpace(chatID)
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return Session{}, exists, err
+		}
+		s.LarkChatID = chatID
+		s.UpdatedAt = time.Now().UTC()
+		if m.store != nil {
+			err = m.store.UpdateSession(ctx, s)
+		}
+		if err == nil && chatID != "" {
+			defaultLarkMessageRegistry.rememberChat(chatID, id)
+		}
+		return s, true, err
+	}
+	rt.mu.Lock()
+	rt.session.LarkChatID = chatID
+	rt.session.UpdatedAt = time.Now().UTC()
+	s := rt.session
+	rt.mu.Unlock()
+	if m.store != nil {
+		if err := m.store.UpdateSession(ctx, s); err != nil {
+			return s, true, err
+		}
+	}
+	if chatID != "" {
+		defaultLarkMessageRegistry.rememberChat(chatID, id)
+	}
+	return s, true, nil
+}
+
+func (m *Manager) FindSessionByLarkChatID(ctx context.Context, chatID string) (Session, bool, error) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return Session{}, false, nil
+	}
+	m.mu.RLock()
+	for _, rt := range m.sessions {
+		s := rt.Snapshot()
+		if s.LarkChatID == chatID {
+			m.mu.RUnlock()
+			return s, true, nil
+		}
+	}
+	m.mu.RUnlock()
+	if m.store == nil {
+		return Session{}, false, nil
+	}
+	list, err := m.store.ListSessions(ctx)
+	if err != nil {
+		return Session{}, false, err
+	}
+	for _, s := range list {
+		if s.LarkChatID == chatID {
+			if s.Live && s.Status != StatusExited && s.Status != StatusFailed {
+				defaultLarkMessageRegistry.rememberChat(chatID, s.ID)
+			}
+			return s, true, nil
+		}
+	}
+	return Session{}, false, nil
+}
+
 func (m *Manager) DeleteSession(ctx context.Context, id string) error {
 	m.mu.Lock()
 	rt, ok := m.sessions[id]
@@ -936,6 +1002,7 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		Name:      rt.session.Name,
 		Content:   rt.lastNotifiedContent,
 		MessageID: rt.lastNotifiedMessageID,
+		ChatID:    rt.session.LarkChatID,
 		UpdateNo:  rt.notificationUpdateNo,
 		Running:   true,
 	}, true
@@ -959,6 +1026,7 @@ func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, 
 		Name:      rt.session.Name,
 		Content:   rt.lastNotifiedContent,
 		MessageID: rt.lastNotifiedMessageID,
+		ChatID:    rt.session.LarkChatID,
 		UpdateNo:  rt.notificationUpdateNo,
 		Running:   false,
 	}, true
@@ -1010,7 +1078,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content}, contentHash, true, "ready"
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

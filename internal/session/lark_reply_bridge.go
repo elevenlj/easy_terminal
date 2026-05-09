@@ -37,6 +37,8 @@ type LarkReplyBridge struct {
 	replyText               func(context.Context, string, string) error
 	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 	addReaction             func(context.Context, string, string) error
+	createChat              func(context.Context, string, string, string) (string, error)
+	sendChatText            func(context.Context, string, string) error
 }
 
 var structuredInputEnterDelay = 200 * time.Millisecond
@@ -45,6 +47,15 @@ const larkProcessingReactionEmoji = "THINKING"
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
+}
+
+type larkRouteContext struct {
+	MessageID    string
+	ParentID     string
+	RootID       string
+	ChatID       string
+	ChatType     string
+	SenderOpenID string
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
@@ -61,6 +72,8 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *Com
 	b.replyText = b.replyTextToMessage
 	b.downloadFile = b.downloadLarkAttachment
 	b.addReaction = b.addLarkMessageReaction
+	b.createChat = b.createLarkChat
+	b.sendChatText = b.sendTextToChat
 	return b
 }
 
@@ -121,7 +134,15 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	b.markLarkMessageProcessing(ctx, valueOf(msg.MessageId))
-	sessionID, err := b.RouteIncoming(ctx, valueOf(msg.MessageId), valueOf(msg.ParentId), valueOf(msg.RootId), incoming)
+	routeCtx := larkRouteContext{
+		MessageID:    valueOf(msg.MessageId),
+		ParentID:     valueOf(msg.ParentId),
+		RootID:       valueOf(msg.RootId),
+		ChatID:       valueOf(msg.ChatId),
+		ChatType:     valueOf(msg.ChatType),
+		SenderOpenID: larkSenderOpenID(event.Event.Sender),
+	}
+	sessionID, err := b.RouteIncomingWithContext(ctx, routeCtx, incoming)
 	if err != nil {
 		log.Printf("lark reply bridge failed to route message %s: %v", valueOf(msg.MessageId), err)
 		return err
@@ -176,19 +197,24 @@ func (b *LarkReplyBridge) RouteText(ctx context.Context, messageID, parentID, ro
 }
 
 func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID, rootID string, incoming larkIncomingMessage) (string, error) {
+	return b.RouteIncomingWithContext(ctx, larkRouteContext{MessageID: messageID, ParentID: parentID, RootID: rootID}, incoming)
+}
+
+func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx larkRouteContext, incoming larkIncomingMessage) (string, error) {
+	messageID, parentID, rootID := routeCtx.MessageID, routeCtx.ParentID, routeCtx.RootID
 	if b.duplicate(messageID) {
 		return "", nil
 	}
 	text := cleanLarkText(incoming.Text)
 	parts := splitLarkPipeline(text)
 	if len(incoming.Attachments) > 0 {
-		return b.routeAttachments(ctx, messageID, parentID, rootID, text, parts, incoming.Attachments)
+		return b.routeAttachments(ctx, routeCtx, text, parts, incoming.Attachments)
 	}
 	if len(parts) == 0 {
 		return "", nil
 	}
 	text = parts[0]
-	if sessionID := b.resolveSessionID(text, parentID, rootID); sessionID != "" && b.hasPendingFiles(sessionID) {
+	if sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType); sessionID != "" && b.hasPendingFiles(sessionID) {
 		rt, ok := b.manager.GetRuntime(sessionID)
 		if !ok {
 			if err := b.replyLarkText(ctx, messageID, "会话不在线"); err != nil {
@@ -206,7 +232,7 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		return sessionID, nil
 	}
 	if name, presetCodes, ok := b.parseLarkStartCommand(text); ok {
-		s, err := b.createLarkSession(ctx, name)
+		s, err := b.createLarkSessionForMessage(ctx, name, routeCtx)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
 			if presetErr := b.runSessionNamePreset(s, presetCodes); presetErr != nil {
@@ -219,7 +245,7 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		}
 		return s.ID, err
 	}
-	sessionID := b.resolveSessionID(text, parentID, rootID)
+	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType)
 	if isStopCommand(text) {
 		if sessionID == "" {
 			if err := b.replyLarkText(ctx, messageID, "未找到会话"); err != nil {
@@ -265,7 +291,7 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		return sessionID, nil
 	}
 	if sessionID == "" {
-		s, err := b.createLarkSession(ctx, "lark-session")
+		s, err := b.createLarkSessionForMessage(ctx, "lark-session", routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -273,7 +299,7 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 	}
 	rt, ok := b.manager.GetRuntime(sessionID)
 	if !ok {
-		s, err := b.createLarkSession(ctx, sessionID)
+		s, err := b.createLarkSessionForMessage(ctx, sessionID, routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -296,13 +322,14 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 	return sessionID, nil
 }
 
-func (b *LarkReplyBridge) routeAttachments(ctx context.Context, messageID, parentID, rootID, text string, parts []string, refs []larkAttachmentRef) (string, error) {
+func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRouteContext, text string, parts []string, refs []larkAttachmentRef) (string, error) {
+	messageID, parentID, rootID := routeCtx.MessageID, routeCtx.ParentID, routeCtx.RootID
 	if len(parts) > 0 {
 		text = parts[0]
 	}
-	sessionID := b.resolveSessionID(text, parentID, rootID)
+	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType)
 	if sessionID == "" {
-		s, err := b.createLarkSession(ctx, "lark-session")
+		s, err := b.createLarkSessionForMessage(ctx, "lark-session", routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -310,7 +337,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, messageID, paren
 	}
 	rt, ok := b.manager.GetRuntime(sessionID)
 	if !ok {
-		s, err := b.createLarkSession(ctx, sessionID)
+		s, err := b.createLarkSessionForMessage(ctx, sessionID, routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -374,6 +401,43 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 		return s, err
 	}
 	b.manager.EnsureBrowser(updated.ID)
+	return updated, nil
+}
+
+func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name string, routeCtx larkRouteContext) (Session, error) {
+	s, err := b.createLarkSession(ctx, name)
+	if err != nil {
+		return s, err
+	}
+	if routeCtx.ChatID != "" && routeCtx.ChatType == "group" {
+		return b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
+	}
+	if routeCtx.SenderOpenID == "" || b.createChat == nil {
+		return s, nil
+	}
+	chatID, err := b.createChat(ctx, s.ID, s.Name, routeCtx.SenderOpenID)
+	if err != nil {
+		log.Printf("lark reply bridge failed to create session chat session=%s name=%q: %v", s.ID, s.Name, err)
+		return s, nil
+	}
+	updated, err := b.bindSessionToLarkChat(ctx, s, chatID)
+	if err != nil {
+		return updated, err
+	}
+	if b.sendChatText != nil {
+		if err := b.sendChatText(ctx, chatID, fmt.Sprintf("已创建会话 %s（%s）。之后直接在这个对话里发消息。", updated.Name, updated.ID)); err != nil {
+			log.Printf("lark reply bridge failed to send session chat intro session=%s chat=%s: %v", updated.ID, chatID, err)
+		}
+	}
+	return updated, nil
+}
+
+func (b *LarkReplyBridge) bindSessionToLarkChat(ctx context.Context, sess Session, chatID string) (Session, error) {
+	updated, ok, err := b.manager.BindLarkChat(ctx, sess.ID, chatID)
+	if err != nil || !ok {
+		return sess, err
+	}
+	defaultLarkMessageRegistry.rememberChat(chatID, updated.ID)
 	return updated, nil
 }
 
@@ -708,6 +772,74 @@ func (b *LarkReplyBridge) replyTextToMessage(ctx context.Context, messageID stri
 	return nil
 }
 
+func (b *LarkReplyBridge) createLarkChat(ctx context.Context, sessionID, sessionName, ownerOpenID string) (string, error) {
+	if b.apiClient == nil {
+		return "", nil
+	}
+	name := larkSessionChatName(sessionName)
+	body := larkim.NewCreateChatReqBodyBuilder().
+		Name(name).
+		UserIdList([]string{ownerOpenID}).
+		ChatMode("group").
+		ChatType("private").
+		JoinMessageVisibility("not_anyone").
+		LeaveMessageVisibility("not_anyone").
+		MembershipApproval("no_approval_required").
+		Build()
+	req := larkim.NewCreateChatReqBuilder().
+		UserIdType("open_id").
+		Uuid("easy-terminal-" + sessionID).
+		Body(body).
+		Build()
+	resp, err := b.apiClient.Im.V1.Chat.Create(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("lark create chat API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	if resp.Data == nil || resp.Data.ChatId == nil || *resp.Data.ChatId == "" {
+		return "", fmt.Errorf("lark create chat API returned empty chat_id")
+	}
+	return *resp.Data.ChatId, nil
+}
+
+func larkSessionChatName(sessionName string) string {
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		sessionName = "session"
+	}
+	const prefix = "ET · "
+	rs := []rune(sessionName)
+	if len(rs) > 40 {
+		sessionName = string(rs[:40])
+	}
+	return prefix + sessionName
+}
+
+func (b *LarkReplyBridge) sendTextToChat(ctx context.Context, chatID string, text string) error {
+	if b.apiClient == nil || chatID == "" {
+		return nil
+	}
+	content, _ := json.Marshal(map[string]string{"text": text})
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType("chat_id").
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(chatID).
+			MsgType("text").
+			Content(string(content)).
+			Build()).
+		Build()
+	resp, err := b.apiClient.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success() {
+		return fmt.Errorf("lark chat text API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
 func (b *LarkReplyBridge) addLarkMessageReaction(ctx context.Context, messageID string, emoji string) error {
 	if b.apiClient == nil || messageID == "" || emoji == "" {
 		return nil
@@ -747,14 +879,33 @@ func (b *LarkReplyBridge) duplicate(messageID string) bool {
 	return false
 }
 
-func (b *LarkReplyBridge) resolveSessionID(text, parentID, rootID string) string {
+func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, rootID, chatID, chatType string) string {
+	if id, ok := defaultLarkMessageRegistry.lookupChat(chatID); ok {
+		return id
+	}
+	if b.manager != nil && chatID != "" {
+		if s, ok, err := b.manager.FindSessionByLarkChatID(ctx, chatID); err == nil && ok && s.Live && s.Status != StatusExited && s.Status != StatusFailed {
+			defaultLarkMessageRegistry.rememberChat(chatID, s.ID)
+			return s.ID
+		}
+	}
 	if id, ok := defaultLarkMessageRegistry.lookup(parentID, rootID); ok {
 		return id
 	}
 	if m := regexp.MustCompile(`sess-\d+`).FindString(text); m != "" {
 		return m
 	}
+	if chatID != "" && chatType == "group" {
+		return ""
+	}
 	return defaultLarkMessageRegistry.latestNotifiedSessionID()
+}
+
+func larkSenderOpenID(sender *larkim.EventSender) string {
+	if sender == nil || sender.SenderId == nil || sender.SenderId.OpenId == nil {
+		return ""
+	}
+	return *sender.SenderId.OpenId
 }
 
 func cleanLarkText(text string) string {

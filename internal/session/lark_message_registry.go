@@ -8,11 +8,15 @@ type LarkMessageRegistry struct {
 	mu               sync.RWMutex
 	messageToSession map[string]string
 	latestSessionID  string
+	chatToSession    map[string]string
 }
 
 func (r *LarkMessageRegistry) remember(sessionID string, messageIDs ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.messageToSession == nil {
+		r.messageToSession = make(map[string]string)
+	}
 	for _, id := range messageIDs {
 		if id != "" {
 			r.messageToSession[id] = sessionID
@@ -21,6 +25,29 @@ func (r *LarkMessageRegistry) remember(sessionID string, messageIDs ...string) {
 	if sessionID != "" {
 		r.latestSessionID = sessionID
 	}
+}
+
+func (r *LarkMessageRegistry) rememberChat(chatID string, sessionID string) {
+	if chatID == "" || sessionID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.chatToSession == nil {
+		r.chatToSession = make(map[string]string)
+	}
+	r.chatToSession[chatID] = sessionID
+	r.latestSessionID = sessionID
+}
+
+func (r *LarkMessageRegistry) lookupChat(chatID string) (string, bool) {
+	if chatID == "" {
+		return "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	sessionID, ok := r.chatToSession[chatID]
+	return sessionID, ok
 }
 
 func (r *LarkMessageRegistry) lookup(messageIDs ...string) (string, bool) {

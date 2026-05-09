@@ -40,7 +40,7 @@ func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkA
 }
 
 func (n *LarkAppNotifier) Available() bool {
-	return n != nil && n.client != nil && n.receiveID != ""
+	return n != nil && n.client != nil
 }
 
 func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
@@ -92,12 +92,21 @@ func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
+	receiveID := n.receiveID
+	receiveIDType := "open_id"
+	if note.ChatID != "" {
+		receiveID = note.ChatID
+		receiveIDType = "chat_id"
+	}
+	if receiveID == "" {
+		return WaitingNotificationResult{}, errors.New("lark notification receiver is not configured")
+	}
 	payload, _ := json.Marshal(map[string]any{
-		"receive_id": n.receiveID,
+		"receive_id": receiveID,
 		"msg_type":   "interactive",
 		"content":    string(content),
 	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type="+receiveIDType, bytes.NewReader(payload))
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}

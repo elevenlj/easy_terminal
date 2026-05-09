@@ -20,6 +20,7 @@ type Session struct {
 	NotifyOnWaiting        bool      `json:"notify_on_waiting"`
 	PeerSessionID          string    `json:"peer_session_id,omitempty"`
 	BridgeEnabled          bool      `json:"bridge_enabled,omitempty"`
+	LarkChatID             string    `json:"lark_chat_id,omitempty"`
 	HistorySize            int64     `json:"history_size,omitempty"`
 	NotificationsAvailable bool      `json:"notifications_available"`
 }
@@ -36,6 +37,7 @@ type WaitingNotification struct {
 	Name      string
 	Content   string
 	MessageID string
+	ChatID    string
 	UpdateNo  int
 	Running   bool
 }
