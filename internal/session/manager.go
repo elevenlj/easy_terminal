@@ -318,6 +318,7 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 
 type RuntimeSession struct {
 	mu                     sync.Mutex
+	notificationPatchMu    sync.Mutex
 	manager                *Manager
 	session                Session
 	terminal               Terminal
@@ -827,7 +828,9 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
 		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
+	rt.notificationPatchMu.Lock()
 	result, err := rt.manager.notifier.NotifyWaiting(n)
+	rt.notificationPatchMu.Unlock()
 	if err != nil {
 		log.Printf("waiting notification send failed session=%s version=%d hash=%s: %v", n.SessionID, version, shortNotifyHash(contentHash), err)
 		return
@@ -913,6 +916,8 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 	if !ok {
 		return
 	}
+	rt.notificationPatchMu.Lock()
+	defer rt.notificationPatchMu.Unlock()
 	if err := notifier.UpdateWaitingRunning(note, running); err != nil {
 		log.Printf("waiting notification running marker failed session=%s message=%s running=%v: %v", note.SessionID, note.MessageID, running, err)
 		if running {

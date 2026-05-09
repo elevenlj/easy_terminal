@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -299,6 +300,73 @@ func TestWaitingTransitionClearsRunningTitle(t *testing.T) {
 	}
 }
 
+func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
+	notifier := newSequencingNotifier("msg-1")
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour))
+	rt := &RuntimeSession{
+		manager:                m,
+		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:  "msg-1",
+		lastNotifiedContent:    "> echo hello\npartial",
+		notificationUpdateNo:   1,
+		notificationRunning:    false,
+		lastInputText:          "echo hello",
+		visibleSnapshot:        "> echo hello\npartial\ncomplete",
+		visibleSnapshotVersion: 1,
+		snapshotAtRoundStart:   "> echo hello",
+		roundReply:             []byte("partial\ncomplete"),
+		notifyVersion:          4,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		rt.notifyIfStillWaiting(4)
+		close(done)
+	}()
+
+	select {
+	case <-notifier.notifyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("waiting notification update did not start")
+	}
+	outputDone := make(chan struct{})
+	go func() {
+		rt.HandleOutput([]byte("more output"))
+		close(outputDone)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-notifier.runningStarted:
+		t.Fatal("running title update should wait for in-flight waiting patch")
+	default:
+	}
+
+	close(notifier.releaseNotify)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("waiting notification update did not finish")
+	}
+	select {
+	case <-notifier.runningStarted:
+	case <-time.After(time.Second):
+		t.Fatal("running title update did not run after waiting patch")
+	}
+	select {
+	case <-outputDone:
+	case <-time.After(time.Second):
+		t.Fatal("output handling did not finish")
+	}
+
+	events := notifier.events()
+	if len(events) != 2 {
+		t.Fatalf("expected waiting patch then running patch, got %#v", events)
+	}
+	if events[0] != "notify:false" || events[1] != "running:true" {
+		t.Fatalf("running title patch should happen after waiting patch, got %#v", events)
+	}
+}
+
 func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
@@ -588,5 +656,52 @@ func (n *recordingNotifier) runningNotes() []WaitingNotification {
 	defer n.mu.Unlock()
 	cp := make([]WaitingNotification, len(n.runningItems))
 	copy(cp, n.runningItems)
+	return cp
+}
+
+type sequencingNotifier struct {
+	mu             sync.Mutex
+	notifyOnce     sync.Once
+	runningOnce    sync.Once
+	messageID      string
+	eventsList     []string
+	notifyStarted  chan struct{}
+	runningStarted chan struct{}
+	releaseNotify  chan struct{}
+}
+
+func newSequencingNotifier(messageID string) *sequencingNotifier {
+	return &sequencingNotifier{
+		messageID:      messageID,
+		notifyStarted:  make(chan struct{}),
+		runningStarted: make(chan struct{}),
+		releaseNotify:  make(chan struct{}),
+	}
+}
+
+func (n *sequencingNotifier) Available() bool { return true }
+
+func (n *sequencingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
+	n.notifyOnce.Do(func() { close(n.notifyStarted) })
+	<-n.releaseNotify
+	n.mu.Lock()
+	n.eventsList = append(n.eventsList, fmt.Sprintf("notify:%v", note.Running))
+	n.mu.Unlock()
+	return WaitingNotificationResult{MessageID: n.messageID, Updated: note.MessageID != ""}, nil
+}
+
+func (n *sequencingNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {
+	n.runningOnce.Do(func() { close(n.runningStarted) })
+	n.mu.Lock()
+	n.eventsList = append(n.eventsList, fmt.Sprintf("running:%v", running))
+	n.mu.Unlock()
+	return nil
+}
+
+func (n *sequencingNotifier) events() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cp := make([]string, len(n.eventsList))
+	copy(cp, n.eventsList)
 	return cp
 }
