@@ -154,6 +154,39 @@ func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeRoutesP1ByDedicatedChatID(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "P1A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-p1-chat"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+
+	err = bridge.HandleP1MessageReceive(context.Background(), &larkim.P1MessageReceiveV1{
+		Event: &larkim.P1MessageReceiveV1Data{
+			OpenMessageID:    "p1-chat-input",
+			OpenChatID:       "oc-p1-chat",
+			ChatType:         "group",
+			OpenID:           "ou-user",
+			TextWithoutAtBot: "echo p1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("terminal count = %d, want 1", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo p1\r") {
+		t.Fatalf("P1 dedicated chat input should route to existing terminal, got %q", got)
+	}
+}
+
 func TestLarkNotificationCardCanTargetDedicatedChat(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",

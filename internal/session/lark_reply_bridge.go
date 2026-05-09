@@ -183,7 +183,15 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	b.markLarkMessageProcessing(ctx, e.OpenMessageID)
-	sessionID, err := b.RouteText(ctx, e.OpenMessageID, e.ParentID, e.RootID, text)
+	routeCtx := larkRouteContext{
+		MessageID:    e.OpenMessageID,
+		ParentID:     e.ParentID,
+		RootID:       e.RootID,
+		ChatID:       e.OpenChatID,
+		ChatType:     e.ChatType,
+		SenderOpenID: e.OpenID,
+	}
+	sessionID, err := b.RouteIncomingWithContext(ctx, routeCtx, larkIncomingMessage{Text: text})
 	if err != nil {
 		log.Printf("lark reply bridge failed to route P1 message %s: %v", e.OpenMessageID, err)
 		return err
