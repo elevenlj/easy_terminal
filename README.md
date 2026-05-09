@@ -144,6 +144,10 @@ cp conf/config.local.example.json conf/config.local.json
   "fast_waiting_transition_ms": 1000,
   "conservative_waiting_transition_ms": 3000,
   "lark_notify_max_lines": 100,
+  "lark_notify_drop_line_patterns": [
+    "LSP server '.+': command '.+' not found",
+    "^\\s*agent mode \\(shift \\+ tab to toggle\\)\\s*$"
+  ],
   "codex_no_anchor_fallback_lines": 80,
   "session_name_presets": {
     "会话 A": {
@@ -185,6 +189,7 @@ cp conf/config.local.example.json conf/config.local.json
 | `fast_waiting_transition_ms` | 普通输出稳定后进入 waiting 的延迟 |
 | `conservative_waiting_transition_ms` | Codex/TUI 等更保守场景的 waiting 延迟 |
 | `lark_notify_max_lines` | 飞书通知最多保留尾部行数 |
+| `lark_notify_drop_line_patterns` | 飞书通知按行删除规则，数组内每项是正则；某行匹配任一规则时只删除该行 |
 | `codex_no_anchor_fallback_lines` | Codex TUI 无法锚定输入时的尾部回退行数 |
 | `session_pre_start_command` | 每个新终端会话创建后自动执行的一条命令 |
 | `session_name_presets` | 按会话名精确匹配的启动预设 |

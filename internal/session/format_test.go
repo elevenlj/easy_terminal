@@ -501,6 +501,41 @@ func TestPickNotifyContentDropsPromptStatusAndCodexSuggestions(t *testing.T) {
 	}
 }
 
+func TestPickNotifyContentDropsConfiguredMatchingLinesOnly(t *testing.T) {
+	if err := SetLarkNotifyDropLinePatterns([]string{
+		`LSP server '.+': command '.+' not found`,
+		`^\s*agent mode \(shift \+ tab to toggle\)\s*$`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLinePatterns(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	visible := strings.Join([]string{
+		"> Explain the technical principles",
+		"⚠ LSP server 'go': command 'gopls' not found. Install it to enable type checking.",
+		"keep this gopls mention because the full regex does not match",
+		"agent mode (shift + tab to toggle)",
+		"• Real answer line",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, "Explain the technical principles")
+	if strings.Contains(got, "LSP server") || strings.Contains(got, "agent mode") {
+		t.Fatalf("configured noisy lines should be dropped, got %q", got)
+	}
+	if !strings.Contains(got, "keep this gopls mention") || !strings.Contains(got, "Real answer line") {
+		t.Fatalf("non-matching lines should stay, got %q", got)
+	}
+}
+
+func TestSetLarkNotifyDropLinePatternsRejectsInvalidRegex(t *testing.T) {
+	if err := SetLarkNotifyDropLinePatterns([]string{"["}); err == nil {
+		t.Fatal("invalid regex should return an error")
+	}
+}
+
 func TestPickNotifyContentRemovesExtraBlankLinesAndHorizontalRules(t *testing.T) {
 	visible := strings.Join([]string{
 		"Searching the web",

@@ -29,6 +29,7 @@ type Config struct {
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
+	LarkNotifyDropLinePatterns      []string                              `json:"lark_notify_drop_line_patterns"`
 	CodexNoAnchorFallbackLines      int                                   `json:"codex_no_anchor_fallback_lines"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
@@ -132,6 +133,9 @@ func loadConfig() Config {
 		cfg.CodexNoAnchorFallbackLines = 80
 	}
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	if err := session.SetLarkNotifyDropLinePatterns(cfg.LarkNotifyDropLinePatterns); err != nil {
+		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
+	}
 	session.SetCodexNoAnchorFallbackLines(cfg.CodexNoAnchorFallbackLines)
 	return cfg
 }

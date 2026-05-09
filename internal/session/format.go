@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -19,10 +20,16 @@ const (
 
 var larkNotifyMaxLines atomic.Int64
 var codexNoAnchorFallbackLines atomic.Int64
+var larkNotifyDropLinePatterns atomic.Value
+
+type larkNotifyDropLinePattern struct {
+	re *regexp.Regexp
+}
 
 func init() {
 	larkNotifyMaxLines.Store(defaultMaxLarkTextLines)
 	codexNoAnchorFallbackLines.Store(defaultCodexNoAnchorFallbackLines)
+	larkNotifyDropLinePatterns.Store([]larkNotifyDropLinePattern{})
 }
 
 func SetLarkNotifyMaxLines(lines int) {
@@ -39,6 +46,23 @@ func SetCodexNoAnchorFallbackLines(lines int) {
 	codexNoAnchorFallbackLines.Store(int64(lines))
 }
 
+func SetLarkNotifyDropLinePatterns(patterns []string) error {
+	compiled := make([]larkNotifyDropLinePattern, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("invalid lark notify drop line pattern %q: %w", pattern, err)
+		}
+		compiled = append(compiled, larkNotifyDropLinePattern{re: re})
+	}
+	larkNotifyDropLinePatterns.Store(compiled)
+	return nil
+}
+
 func sanitizeForLarkAudit(text string) string {
 	return emailRE.ReplaceAllString(text, "[email]")
 }
@@ -46,6 +70,30 @@ func sanitizeForLarkAudit(text string) string {
 func truncateForLark(text string) string {
 	text = truncateLinesFromTail(text, int(larkNotifyMaxLines.Load()), larkTruncatedPrefix)
 	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
+}
+
+func dropConfiguredLarkNotifyLines(text string) string {
+	patterns, _ := larkNotifyDropLinePatterns.Load().([]larkNotifyDropLinePattern)
+	if len(patterns) == 0 || text == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		drop := false
+		for _, pattern := range patterns {
+			if pattern.re.MatchString(line) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
 
 func truncateLinesFromTail(text string, maxLines int, prefix string) string {
@@ -137,6 +185,7 @@ func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roun
 		}
 	}
 	body = cleanupLarkNotifyText(body, lastInputText)
+	body = dropConfiguredLarkNotifyLines(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
