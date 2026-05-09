@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 
@@ -24,9 +23,6 @@ type LarkAppNotifier struct {
 	tipMu     sync.Mutex
 	tipSent   map[string]map[int]bool
 	tipSender func(string, int) error
-	navMu     sync.Mutex
-	navMsgID  string
-	navSender func(string, string) (string, error)
 }
 
 func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkAppNotifier {
@@ -92,16 +88,48 @@ func larkNotificationTitle(note WaitingNotification) string {
 }
 
 func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
-	messageID, rootID, parentID, err := n.postInteractiveMessage(content)
+	token, err := n.tenantAccessToken(context.Background())
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
-	defaultLarkMessageRegistry.remember(note.SessionID, messageID, rootID, parentID)
-	defaultLarkMessageRegistry.rememberNotification(note, messageID)
-	if err := n.updateSessionNavigator(note.SessionID); err != nil {
-		logLarkNavigatorError(err)
+	payload, _ := json.Marshal(map[string]any{
+		"receive_id": n.receiveID,
+		"msg_type":   "interactive",
+		"content":    string(content),
+	})
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
+	if err != nil {
+		return WaitingNotificationResult{}, err
 	}
-	return WaitingNotificationResult{MessageID: messageID, RootID: rootID, ParentID: parentID}, nil
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return WaitingNotificationResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return WaitingNotificationResult{}, fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
+	}
+	var createResp struct {
+		Code int `json:"code"`
+		Data struct {
+			MessageID string `json:"message_id"`
+			RootID    string `json:"root_id"`
+			ParentID  string `json:"parent_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err == nil && createResp.Code == 0 {
+		defaultLarkMessageRegistry.remember(note.SessionID, createResp.Data.MessageID, createResp.Data.RootID, createResp.Data.ParentID)
+		return WaitingNotificationResult{MessageID: createResp.Data.MessageID, RootID: createResp.Data.RootID, ParentID: createResp.Data.ParentID}, nil
+	} else {
+		defaultLarkMessageRegistry.rememberLatest(note.SessionID)
+		if createResp.Code != 0 {
+			return WaitingNotificationResult{}, fmt.Errorf("lark message API returned code %d", createResp.Code)
+		}
+	}
+	return WaitingNotificationResult{}, nil
 }
 
 func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
@@ -125,10 +153,6 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 		}
 	}
 	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
-	defaultLarkMessageRegistry.rememberNotification(note, note.MessageID)
-	if err := n.updateSessionNavigator(note.SessionID); err != nil {
-		logLarkNavigatorError(err)
-	}
 	return WaitingNotificationResult{MessageID: note.MessageID, Updated: true, TipSent: tipSent}, nil
 }
 
@@ -155,102 +179,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 		return fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
-	defaultLarkMessageRegistry.rememberNotification(note, note.MessageID)
-	if err := n.updateSessionNavigator(note.SessionID); err != nil {
-		logLarkNavigatorError(err)
-	}
 	return nil
-}
-
-func (n *LarkAppNotifier) postInteractiveMessage(content string) (string, string, string, error) {
-	token, err := n.tenantAccessToken(context.Background())
-	if err != nil {
-		return "", "", "", err
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"receive_id": n.receiveID,
-		"msg_type":   "interactive",
-		"content":    content,
-	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id", bytes.NewReader(payload))
-	if err != nil {
-		return "", "", "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", "", "", fmt.Errorf("lark message API returned %s: %s", resp.Status, string(body))
-	}
-	var createResp struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Data struct {
-			MessageID string `json:"message_id"`
-			RootID    string `json:"root_id"`
-			ParentID  string `json:"parent_id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
-		return "", "", "", err
-	}
-	if createResp.Code != 0 {
-		return "", "", "", fmt.Errorf("lark message API returned code %d: %s", createResp.Code, createResp.Msg)
-	}
-	return createResp.Data.MessageID, createResp.Data.RootID, createResp.Data.ParentID, nil
-}
-
-func (n *LarkAppNotifier) updateSessionNavigator(selectedSessionID string) error {
-	content, err := larkSessionNavigatorCardContent(selectedSessionID)
-	if err != nil {
-		return err
-	}
-	n.navMu.Lock()
-	defer n.navMu.Unlock()
-	send := n.sendSessionNavigator
-	if n.navSender != nil {
-		send = n.navSender
-	}
-	messageID, err := send(n.navMsgID, content)
-	if err != nil {
-		return err
-	}
-	if messageID != "" {
-		n.navMsgID = messageID
-	}
-	return nil
-}
-
-func (n *LarkAppNotifier) sendSessionNavigator(messageID string, content string) (string, error) {
-	if messageID == "" {
-		createdID, _, _, err := n.postInteractiveMessage(content)
-		return createdID, err
-	}
-	req := larkim.NewPatchMessageReqBuilder().
-		MessageId(messageID).
-		Body(larkim.NewPatchMessageReqBodyBuilder().
-			Content(content).
-			Build()).
-		Build()
-	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
-	if err != nil {
-		return "", err
-	}
-	if !resp.Success() {
-		return "", fmt.Errorf("lark navigator patch API returned code %d: %s", resp.Code, resp.Msg)
-	}
-	return messageID, nil
-}
-
-func logLarkNavigatorError(err error) {
-	if err != nil {
-		log.Printf("lark session navigator update failed: %v", err)
-	}
 }
 
 func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) error {
