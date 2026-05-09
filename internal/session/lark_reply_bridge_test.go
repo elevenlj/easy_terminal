@@ -87,10 +87,6 @@ func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 }
 
 func TestSubmitStructuredInputDelaysEnterForTUI(t *testing.T) {
-	previousDelay := structuredInputEnterDelay
-	structuredInputEnterDelay = 10 * time.Millisecond
-	defer func() { structuredInputEnterDelay = previousDelay }()
-
 	term := &recordingTerminal{readCh: make(chan []byte)}
 	rt := &RuntimeSession{
 		manager:  NewManager(nil, nil),

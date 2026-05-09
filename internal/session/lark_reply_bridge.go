@@ -38,7 +38,7 @@ type LarkReplyBridge struct {
 	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 }
 
-var structuredInputEnterDelay = 50 * time.Millisecond
+var structuredInputEnterDelay = 200 * time.Millisecond
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
