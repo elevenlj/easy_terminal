@@ -763,6 +763,49 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	}
 }
 
+func TestLarkReplyBridgeStopCommandSendsCtrlC(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-stop", "", "", "text", `{"text":"开始 Stop会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-stop", "m-start-stop", "", "text", `{"text":"/stop"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) == 0 || parts[len(parts)-1] != "\x03" {
+		t.Fatalf("/stop should send Ctrl-C to terminal, got %#v", parts)
+	}
+	if strings.Contains(launcher.terminals[0].writes(), "/stop") {
+		t.Fatalf("/stop should not be sent as text, writes: %q", launcher.terminals[0].writes())
+	}
+}
+
+func TestLarkReplyBridgeStopCommandWithoutSessionDoesNotCreateTerminal(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-stop-missing", "", "", "text", `{"text":"/stop"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("/stop without a session should not create a terminal, got %d", len(launcher.terminals))
+	}
+	if reply != "未找到会话" {
+		t.Fatalf("reply = %q, want 未找到会话", reply)
+	}
+}
+
 func TestLarkReplyBridgeCurrentRoundCommandUsesRepliedNotificationSession(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

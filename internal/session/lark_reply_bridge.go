@@ -220,6 +220,26 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 		return s.ID, err
 	}
 	sessionID := b.resolveSessionID(text, parentID, rootID)
+	if isStopCommand(text) {
+		if sessionID == "" {
+			if err := b.replyLarkText(ctx, messageID, "未找到会话"); err != nil {
+				return "", err
+			}
+			return "", nil
+		}
+		rt, ok := b.manager.GetRuntime(sessionID)
+		if !ok {
+			if err := b.replyLarkText(ctx, messageID, "会话不在线"); err != nil {
+				return sessionID, err
+			}
+			return sessionID, nil
+		}
+		if err := rt.WriteInput("\x03"); err != nil {
+			return sessionID, err
+		}
+		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		return sessionID, nil
+	}
 	if isCurrentRoundCommand(text) {
 		if sessionID == "" {
 			if err := b.replyLarkText(ctx, messageID, "未找到会话"); err != nil {
@@ -651,6 +671,11 @@ func (b *LarkReplyBridge) clearPendingFiles(sessionID string) {
 func isCurrentRoundCommand(text string) bool {
 	text = strings.TrimSpace(text)
 	return text == "/c" || text == "／c"
+}
+
+func isStopCommand(text string) bool {
+	text = strings.TrimSpace(text)
+	return text == "/stop" || text == "／stop"
 }
 
 func (b *LarkReplyBridge) replyLarkText(ctx context.Context, messageID string, text string) error {
