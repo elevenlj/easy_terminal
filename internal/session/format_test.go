@@ -176,7 +176,7 @@ func TestPickNotifyContentUsesCodexExitTailWhenSnapshotContainsHistory(t *testin
 	}
 }
 
-func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T) {
+func TestNotifyContentWaitsWhenCodexInputAnchorAndRoundReplyAreMissing(t *testing.T) {
 	SetCodexNoAnchorFallbackLines(3)
 	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
@@ -189,23 +189,15 @@ func TestPickNotifyContentUsesVisibleSnapshotWhenInputAnchorMissing(t *testing.T
 		"• old answer",
 		"• latest tail",
 	}, "\n")
-	got := PickNotifyContent(visible, "", nil, "missing long wrapped input")
-	want := strings.Join([]string{
-		"[missing input anchor; showing tail]",
-		"> previous",
-		"• old answer",
-		"• latest tail",
-	}, "\n")
-	if got != want {
-		t.Fatalf("missing input anchor should fall back to codex tail:\n%q\nwant:\n%q", got, want)
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "missing long wrapped input") {
+		t.Fatalf("missing input anchor without round reply should wait instead of sending old TUI history")
 	}
 }
 
-func TestPickNotifyContentUsesFullVisibleSnapshotForNonCodexMissingAnchor(t *testing.T) {
+func TestNotifyContentWaitsWhenNonCodexInputAnchorAndRoundReplyAreMissing(t *testing.T) {
 	visible := "plain history\nold answer"
-	got := PickNotifyContent(visible, "", nil, "missing input")
-	if got != visible {
-		t.Fatalf("non-codex missing input anchor should keep visible snapshot:\n%q\nwant:\n%q", got, visible)
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "missing input") {
+		t.Fatalf("missing input anchor without round reply should wait instead of sending old visible history")
 	}
 }
 
@@ -384,25 +376,88 @@ func TestPickNotifyContentDoesNotTreatPlainOutputAsInputAnchor(t *testing.T) {
 	}
 }
 
-func TestPickNotifyContentDoesNotUseRoundReplyWhenVisibleSnapshotExists(t *testing.T) {
+func TestPickNotifyContentUsesRoundReplyWhenVisibleSnapshotHasNoCurrentAnchor(t *testing.T) {
 	got := PickNotifyContent("old visible history", "stale snapshot", []byte("current answer only"), "missing input")
-	if got != "old visible history" {
+	want := "missing input\ncurrent answer only"
+	if got != want {
 		t.Fatalf("unexpected content: %q", got)
 	}
 }
 
-func TestPickNotifyContentDoesNotUseRoundReplyWithoutVisibleSnapshot(t *testing.T) {
+func TestPickNotifyContentUsesRoundReplyWhenSnapshotDiffContainsTUIHistory(t *testing.T) {
+	before := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ TUI App                 │",
+		"╰────────────────────────────╯",
+		"> old input",
+		"old answer",
+	}, "\n")
+	visible := before + "\n" + strings.Join([]string{
+		"> another old input",
+		"another old answer",
+		"current answer",
+	}, "\n")
+	got := PickNotifyContent(visible, before, []byte("current answer"), "hidden input")
+	want := "hidden input\ncurrent answer"
+	if got != want {
+		t.Fatalf("round reply should win when visible diff has no input echo:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesRoundReplyForSlashCommandWhenVisibleContainsTUIHistory(t *testing.T) {
+	visible := strings.Join([]string{
+		"/fast",
+		"/fast toggle Fast mode to enable fastest inference with increased plan usage",
+		"• Fast mode set to on›gpt-5.5 medium fast · ~/project/easy_terminal›Explain this codebase",
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.130.0) │",
+		"│ model: gpt-5.5 medium fast │",
+		"│ directory: ~/project       │",
+		"╰────────────────────────────╯",
+		"› 成都天气如何",
+		"• Searching the web",
+		"• 成都现在多云/阴，约 23°C。",
+		"• Fast mode set to off",
+	}, "\n")
+	round := []byte("\x1b[2m• \x1b[22mFast mode set to off")
+	got := PickNotifyContent(visible, "old snapshot", round, "/fast")
+	want := "/fast\n• Fast mode set to off"
+	if got != want {
+		t.Fatalf("slash command should use concise round reply instead of visible TUI history:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesRoundReplyWithoutVisibleSnapshot(t *testing.T) {
 	got := PickNotifyContent("", "", []byte("current answer only"), "missing input")
-	if got != "missing input" {
+	want := "missing input\ncurrent answer only"
+	if got != want {
 		t.Fatalf("unexpected no-browser content: %q", got)
 	}
 }
 
-func TestPickNotifyContentSuppressesDirtyRoundReplyWhenVisibleSnapshotExists(t *testing.T) {
+func TestPickNotifyContentKeepsVisibleSnapshotWhenItHasCurrentAnchor(t *testing.T) {
+	visible := "> missing input\n• visible answer"
+	got := PickNotifyContent(visible, "stale snapshot", []byte("current answer only"), "missing input")
+	if got != visible {
+		t.Fatalf("visible current-round anchor should win over round reply: %q", got)
+	}
+}
+
+func TestNotifyContentWaitsWhenRoundReplyIsOnlyControlNoise(t *testing.T) {
+	dirty := []byte("\x1b[?2026h\x1b[19;2H\x1b[0m\x1b[49m\x1b[K\x1b[20;2H\x1b[0m\x1b[49m\x1b[K")
+	if !NotifyContentNeedsMoreSnapshot("old visible history", "old visible history", dirty, "hidden input") {
+		t.Fatalf("control-only round reply should not be ready")
+	}
+	got := PickNotifyContent("old visible history", "old visible history", dirty, "hidden input")
+	if got != "hidden input" {
+		t.Fatalf("control-only round reply should leave only input fallback, got %q", got)
+	}
+}
+
+func TestNotifyContentWaitsWhenRoundReplyLooksCorrupted(t *testing.T) {
 	dirty := []byte("[O\r\n•RneReececctcotionin2nnngneg.ec..ct..ti.")
-	got := PickNotifyContent("OpenAI Codex old screen", "stale snapshot", dirty, "Implement {feature}")
-	if got != "OpenAI Codex old screen" {
-		t.Fatalf("dirty round reply should not be used when visible snapshot exists: %q", got)
+	if !NotifyContentNeedsMoreSnapshot("old visible history", "old visible history", dirty, "Implement {feature}") {
+		t.Fatalf("corrupted round reply should wait for a better snapshot/output")
 	}
 }
 
@@ -440,7 +495,7 @@ func TestNotifyContentNeedsMoreSnapshotForTransientOnlyRound(t *testing.T) {
 	}
 }
 
-func TestNotifyContentUsesVisibleSnapshotWhenSnapshotAnchorIsMissing(t *testing.T) {
+func TestNotifyContentUsesRoundReplyWhenSnapshotAnchorIsMissing(t *testing.T) {
 	SetCodexNoAnchorFallbackLines(2)
 	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
@@ -454,12 +509,12 @@ func TestNotifyContentUsesVisibleSnapshotWhenSnapshotAnchorIsMissing(t *testing.
 	}, "\n")
 	round := []byte("> wrapped long input\n• current answer")
 	if NotifyContentNeedsMoreSnapshot(visible, "", round, "wrapped long input") {
-		t.Fatalf("visible snapshot should be enough when snapshot cannot anchor the input")
+		t.Fatalf("round reply should be enough when snapshot cannot anchor the input")
 	}
 	got := PickNotifyContent(visible, "", round, "wrapped long input")
-	want := "[missing input anchor; showing tail]\n> old\n• old answer"
+	want := "> wrapped long input\n• current answer"
 	if got != want {
-		t.Fatalf("unexpected codex tail fallback:\n%q\nwant:\n%q", got, want)
+		t.Fatalf("unexpected round reply fallback:\n%q\nwant:\n%q", got, want)
 	}
 }
 

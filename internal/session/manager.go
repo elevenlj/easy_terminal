@@ -1092,6 +1092,9 @@ func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {
 	if strings.TrimSpace(rt.lastInputText) == "" || strings.TrimSpace(rt.visibleSnapshot) == "" {
 		return false
 	}
+	if currentRoundReplyText(rt.roundReply, rt.lastInputText) != "" {
+		return false
+	}
 	if rt.visibleSnapshotVersion <= rt.snapshotAtRoundVersion {
 		return true
 	}

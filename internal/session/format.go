@@ -160,11 +160,7 @@ func SanitizeRoundReply(data []byte) string {
 
 func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) string {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
-	if body == "" {
-		body = currentRoundReplyText(roundReply, lastInputText)
-		fromVisible = false
-	}
+	body, fromVisible := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
 	if body == "" {
 		if lastInputText == "" {
 			body = strings.TrimSpace(visibleSnapshot)
@@ -191,16 +187,52 @@ func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roun
 
 func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
-	if !fromVisible || strings.TrimSpace(body) == "" {
-		body = currentRoundReplyText(roundReply, lastInputText)
-	}
+	body, _ := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
 	if strings.TrimSpace(body) == "" {
 		return true
 	}
 	cleaned := cleanupLarkNotifyText(body, lastInputText)
 	hasReply := hasReplyLine(cleaned, lastInputText)
 	return !hasReply || (containsTransientStatusLine(body) && !hasReply)
+}
+
+func selectNotifyBody(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) (string, bool) {
+	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+	replyBody := currentRoundReplyText(roundReply, lastInputText)
+	if shouldPreferRoundReplyOverVisible(visibleBody, replyBody, lastInputText) {
+		return replyBody, false
+	}
+	if lastInputText != "" && !visibleSnapshotHasInputEcho(visibleSnapshot, lastInputText) {
+		if replyBody != "" {
+			return replyBody, false
+		}
+		if visibleSnapshotHasHardRoundAnchor(visibleSnapshot, lastInputText) {
+			return visibleBody, fromVisible
+		}
+		return "", false
+	}
+	if strings.TrimSpace(visibleBody) != "" {
+		return visibleBody, fromVisible
+	}
+	return replyBody, false
+}
+
+func shouldPreferRoundReplyOverVisible(visibleBody string, replyBody string, lastInputText string) bool {
+	visibleBody = strings.TrimSpace(visibleBody)
+	replyBody = strings.TrimSpace(replyBody)
+	input := strings.TrimSpace(lastInputText)
+	if visibleBody == "" || replyBody == "" || input == "" || !strings.HasPrefix(input, "/") {
+		return false
+	}
+	cleanVisible := cleanupLarkNotifyText(visibleBody, input)
+	cleanReply := cleanupLarkNotifyText(replyBody, input)
+	if cleanVisible == "" || cleanReply == "" {
+		return false
+	}
+	if len([]rune(cleanVisible)) > len([]rune(cleanReply))*3 {
+		return true
+	}
+	return countInputEchoLines(cleanVisible) > 1
 }
 
 func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) bool {
@@ -318,6 +350,33 @@ func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart str
 	return ""
 }
 
+func visibleSnapshotHasInputEcho(visibleSnapshot string, lastInputText string) bool {
+	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
+	lastInputText = strings.TrimSpace(lastInputText)
+	if visibleSnapshot == "" || lastInputText == "" {
+		return false
+	}
+	return visibleTextFromLastInput(visibleSnapshot, lastInputText) != ""
+}
+
+func visibleSnapshotHasHardRoundAnchor(visibleSnapshot string, lastInputText string) bool {
+	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
+	lastInputText = strings.TrimSpace(lastInputText)
+	if visibleSnapshot == "" || lastInputText == "" {
+		return false
+	}
+	if codexExitSegment(visibleSnapshot) != "" {
+		return true
+	}
+	if isTrustTUIScreen(visibleSnapshot) {
+		return true
+	}
+	if visibleTextFromLastShellInput(visibleSnapshot) != "" {
+		return true
+	}
+	return strings.EqualFold(lastInputText, "codex") && isFullScreenTUIScreen(visibleSnapshot)
+}
+
 func normalizeSnapshotText(text string) string {
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
@@ -399,7 +458,7 @@ func visibleTextFromLastShellInput(visibleSnapshot string) string {
 
 func currentRoundReplyText(roundReply []byte, lastInputText string) string {
 	text := SanitizeRoundReply(roundReply)
-	if text == "" {
+	if text == "" || isLikelyCorruptedRoundReply(text) {
 		return ""
 	}
 	if lastInputText != "" {
@@ -407,10 +466,56 @@ func currentRoundReplyText(roundReply []byte, lastInputText string) string {
 			return current
 		}
 	}
-	if lastInputText != "" && !hasAssistantBulletLine(text) {
+	if lastInputText != "" && !hasReplyLine(cleanupLarkNotifyText(text, lastInputText), lastInputText) {
 		return ""
 	}
 	return text
+}
+
+func isLikelyCorruptedRoundReply(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	runes := []rune(trimmed)
+	if len(runes) < 24 {
+		return false
+	}
+	if strings.Contains(trimmed, "•") && !strings.Contains(trimmed, "• ") {
+		return true
+	}
+	if len(strings.Fields(trimmed)) == 1 {
+		digits := 0
+		punct := 0
+		for _, r := range runes {
+			if unicode.IsDigit(r) {
+				digits++
+			}
+			if unicode.IsPunct(r) || unicode.IsSymbol(r) {
+				punct++
+			}
+		}
+		if digits+punct >= 4 {
+			return true
+		}
+	}
+	letters := 0
+	repeatedLetterTransitions := 0
+	var prevLetter rune
+	for _, r := range runes {
+		if unicode.IsLetter(r) {
+			letters++
+			if prevLetter == r {
+				repeatedLetterTransitions++
+			}
+			prevLetter = r
+			continue
+		}
+		if !unicode.IsSpace(r) {
+			prevLetter = 0
+		}
+	}
+	return letters >= 18 && repeatedLetterTransitions*4 >= letters
 }
 
 func startsWithInputEcho(text string, input string) bool {
@@ -419,15 +524,6 @@ func startsWithInputEcho(text string, input string) bool {
 			continue
 		}
 		return isInputEchoLine(line, input)
-	}
-	return false
-}
-
-func hasAssistantBulletLine(text string) bool {
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "• ") {
-			return true
-		}
 	}
 	return false
 }
@@ -579,6 +675,16 @@ func hasReplyLine(text string, lastInputText string) bool {
 		return true
 	}
 	return input == ""
+}
+
+func countInputEchoLines(text string) int {
+	count := 0
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if _, ok := inputEchoText(strings.TrimSpace(line)); ok {
+			count++
+		}
+	}
+	return count
 }
 
 func isInputEchoLine(line string, input string) bool {

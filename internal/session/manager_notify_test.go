@@ -107,6 +107,56 @@ func TestWaitingNotificationWaitsForSnapshotAfterCurrentInput(t *testing.T) {
 	}
 }
 
+func TestWaitingNotificationCanUseRoundReplyWhenSnapshotDoesNotShowInput(t *testing.T) {
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil),
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+	}
+	rt.SetVisibleSnapshot("old TUI screen\nold answer")
+	rt.MarkInputActivity("new hidden tui input\r")
+	rt.HandleOutput([]byte("current answer from pty\n"))
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	n, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected round reply notification when snapshot has no input anchor, reason=%s", reason)
+	}
+	want := "new hidden tui input\ncurrent answer from pty"
+	if n.Content != want {
+		t.Fatalf("content = %q, want %q", n.Content, want)
+	}
+}
+
+func TestNotifyAfterStableSendsRoundReplyWhenSnapshotDoesNotShowInput(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+	}
+	rt.SetVisibleSnapshot("old TUI screen\nold answer")
+	rt.MarkInputActivity("hidden tui input\r")
+	rt.HandleOutput([]byte("current answer from pty\n"))
+	rt.mu.Lock()
+	version := rt.stateVersion
+	rt.mu.Unlock()
+
+	rt.notifyAfterStable(version)
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one notification, got %#v", notes)
+	}
+	want := "hidden tui input\ncurrent answer from pty"
+	if notes[0].Content != want {
+		t.Fatalf("content = %q, want %q", notes[0].Content, want)
+	}
+	if strings.Contains(notes[0].Content, "old answer") {
+		t.Fatalf("old visible history leaked into notification: %q", notes[0].Content)
+	}
+}
+
 func TestNotifyStableDelayFastForPlainOutputAndConservativeForCodex(t *testing.T) {
 	m := NewManager(nil, nil, WithWaitingTransitionDelays(120*time.Millisecond, 450*time.Millisecond))
 	rt := &RuntimeSession{
