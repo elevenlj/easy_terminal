@@ -110,6 +110,43 @@ func TestSubmitStructuredInputDelaysEnterForTUI(t *testing.T) {
 	}
 }
 
+func TestSubmitStructuredInputClearsPreviousNotificationBeforeEcho(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	notifier := &recordingNotifier{}
+	manager := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager:                manager,
+		session:                Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:  "msg-old",
+		lastNotifiedContent:    "old reply",
+		notificationUpdateNo:   0,
+		notificationRunning:    false,
+		snapshotAtRoundStart:   "old snapshot",
+		visibleSnapshot:        "old snapshot",
+		visibleSnapshotVersion: 1,
+	}
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	term.onWrite = func(data string) {
+		if data == "second input" {
+			rt.HandleOutput([]byte(data))
+		}
+	}
+	rt.terminal = term
+
+	if err := SubmitStructuredInput(rt, "second input"); err != nil {
+		t.Fatal(err)
+	}
+	if running := notifier.runningNotes(); len(running) != 0 {
+		t.Fatalf("input echo should not mark previous notification running, got %#v", running)
+	}
+	if rt.lastNotifiedMessageID != "" {
+		t.Fatalf("new input round should clear previous message id before terminal echo, got %q", rt.lastNotifiedMessageID)
+	}
+}
+
 func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -814,6 +851,7 @@ type recordingTerminal struct {
 	buf       strings.Builder
 	parts     []string
 	writeTime []time.Time
+	onWrite   func(string)
 	readCh    chan []byte
 	closed    bool
 }
@@ -827,11 +865,17 @@ func (t *recordingTerminal) Read(p []byte) (int, error) {
 }
 
 func (t *recordingTerminal) Write(p []byte) (int, error) {
+	data := string(p)
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.parts = append(t.parts, string(p))
+	t.parts = append(t.parts, data)
 	t.writeTime = append(t.writeTime, time.Now())
-	return t.buf.Write(p)
+	n, err := t.buf.Write(p)
+	onWrite := t.onWrite
+	t.mu.Unlock()
+	if onWrite != nil {
+		onWrite(data)
+	}
+	return n, err
 }
 
 func (t *recordingTerminal) Close() error {

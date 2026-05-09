@@ -756,13 +756,15 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
 	sessionID := rt.Snapshot().ID
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true", sessionID, len(text))
-	if err := rt.WriteInput(text); err != nil {
+	rt.MarkInputActivity(text + "\r")
+	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err
 	}
 	if structuredInputEnterDelay > 0 {
 		time.Sleep(structuredInputEnterDelay)
 	}
-	return rt.WriteInput("\r")
+	_, err := rt.terminal.Write([]byte("\r"))
+	return err
 }
 
 type larkIncomingMessage struct {
