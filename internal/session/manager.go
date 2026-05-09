@@ -825,6 +825,8 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		n.UpdateNo = rt.notificationUpdateNo + 1
 		n.Running = false
 	}
+	roundInput := rt.lastInputText
+	roundSnapshotVersion := rt.snapshotAtRoundVersion
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
 		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
@@ -837,6 +839,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	}
 	log.Printf("waiting notification sent session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
 	rt.mu.Lock()
+	sameRound := rt.lastInputText == roundInput && rt.snapshotAtRoundVersion == roundSnapshotVersion
 	if rt.session.Status == StatusWaiting && rt.session.Live && rt.session.NotifyOnWaiting && rt.notifyVersion == version {
 		rt.lastNotifiedRoundHash = contentHash
 		if result.MessageID != "" {
@@ -846,6 +849,10 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		if result.Updated {
 			rt.notificationUpdateNo = n.UpdateNo
 		}
+		rt.notificationRunning = n.Running
+	} else if result.MessageID != "" && !result.Updated && sameRound && rt.lastNotifiedMessageID == "" {
+		rt.lastNotifiedMessageID = result.MessageID
+		rt.lastNotifiedContent = n.Content
 		rt.notificationRunning = n.Running
 	}
 	rt.mu.Unlock()

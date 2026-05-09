@@ -209,6 +209,49 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	}
 }
 
+func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testing.T) {
+	notifier := &advancingNotifier{recordingNotifier: recordingNotifier{messageID: "msg-1"}}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	notifier.afterNotify = func() {
+		rt.HandleOutput([]byte("more output"))
+		rt.SetVisibleSnapshot("> echo hello\npartial\ncomplete")
+		rt.mu.Lock()
+		rt.session.Status = StatusWaiting
+		rt.mu.Unlock()
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("> echo hello\npartial")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	rt.mu.Lock()
+	preservedMessageID := rt.lastNotifiedMessageID
+	nextVersion := rt.notifyVersion
+	rt.mu.Unlock()
+	if preservedMessageID != "msg-1" {
+		t.Fatalf("same-round create should preserve message id after version advance, got %q", preservedMessageID)
+	}
+
+	rt.notifyIfStillWaiting(nextVersion)
+	notes := notifier.notes()
+	if len(notes) != 2 {
+		t.Fatalf("expected create then update, got %#v", notes)
+	}
+	if notes[0].MessageID != "" {
+		t.Fatalf("first notification should create, got %#v", notes[0])
+	}
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
+		t.Fatalf("second same-round notification should update msg-1, got %#v", notes[1])
+	}
+}
+
 func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier))
@@ -657,6 +700,21 @@ func (n *recordingNotifier) runningNotes() []WaitingNotification {
 	cp := make([]WaitingNotification, len(n.runningItems))
 	copy(cp, n.runningItems)
 	return cp
+}
+
+type advancingNotifier struct {
+	recordingNotifier
+	afterNotify func()
+}
+
+func (n *advancingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
+	result, err := n.recordingNotifier.NotifyWaiting(note)
+	if n.afterNotify != nil {
+		afterNotify := n.afterNotify
+		n.afterNotify = nil
+		afterNotify()
+	}
+	return result, err
 }
 
 type sequencingNotifier struct {
