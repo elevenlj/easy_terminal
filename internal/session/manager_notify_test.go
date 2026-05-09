@@ -456,6 +456,38 @@ func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
 	}
 }
 
+func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
+	notifier := &LarkAppNotifier{}
+	var sent []string
+	notifier.tipSender = func(messageID string, updateNo int) error {
+		sent = append(sent, fmt.Sprintf("%s:%d", messageID, updateNo))
+		return nil
+	}
+
+	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-1", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.sendUpdateTipOnce("msg-2", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"msg-1:1", "msg-1:2", "msg-2:1"}
+	if len(sent) != len(want) {
+		t.Fatalf("sent tips = %#v, want %#v", sent, want)
+	}
+	for i := range want {
+		if sent[i] != want[i] {
+			t.Fatalf("sent tip %d = %q, want %q; all=%#v", i, sent[i], want[i], sent)
+		}
+	}
+}
+
 func TestNotifyAfterStableDoesNotSendWhenNotificationDisabled(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier))

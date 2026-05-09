@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -19,6 +20,9 @@ type LarkAppNotifier struct {
 	client    *lark.Client
 	receiveID string
 	mention   bool
+	tipMu     sync.Mutex
+	tipSent   map[string]map[int]bool
+	tipSender func(string, int) error
 }
 
 func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkAppNotifier {
@@ -31,6 +35,7 @@ func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkA
 		client:    lark.NewClient(appID, appSecret),
 		receiveID: receiveID,
 		mention:   mention,
+		tipSent:   make(map[string]map[int]bool),
 	}
 }
 
@@ -143,7 +148,7 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	}
 	tipSent := false
 	if note.UpdateNo > 0 {
-		if err := n.sendUpdateTip(note.MessageID, note.UpdateNo); err == nil {
+		if err := n.sendUpdateTipOnce(note.MessageID, note.UpdateNo); err == nil {
 			tipSent = true
 		}
 	}
@@ -174,6 +179,44 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 		return fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	defaultLarkMessageRegistry.remember(note.SessionID, note.MessageID)
+	return nil
+}
+
+func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) error {
+	if messageID == "" || updateNo <= 0 {
+		return nil
+	}
+	n.tipMu.Lock()
+	if n.tipSent == nil {
+		n.tipSent = make(map[string]map[int]bool)
+	}
+	sent := n.tipSent[messageID]
+	if sent == nil {
+		sent = make(map[int]bool)
+		n.tipSent[messageID] = sent
+	}
+	if sent[updateNo] {
+		n.tipMu.Unlock()
+		return nil
+	}
+	n.tipMu.Unlock()
+
+	send := n.sendUpdateTip
+	if n.tipSender != nil {
+		send = n.tipSender
+	}
+	if err := send(messageID, updateNo); err != nil {
+		return err
+	}
+
+	n.tipMu.Lock()
+	sent = n.tipSent[messageID]
+	if sent == nil {
+		sent = make(map[int]bool)
+		n.tipSent[messageID] = sent
+	}
+	sent[updateNo] = true
+	n.tipMu.Unlock()
 	return nil
 }
 
