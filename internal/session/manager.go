@@ -748,13 +748,21 @@ func (rt *RuntimeSession) notifyAfterStable(version int64) {
 		return
 	}
 	if rt.session.Status == StatusRunning {
+		var waitingNote WaitingNotification
+		clearRunning := false
 		rt.session.Status = StatusWaiting
+		if rt.notificationRunning {
+			waitingNote, clearRunning = rt.markNotificationWaitingLocked()
+		}
 		rt.session.UpdatedAt = time.Now().UTC()
 		rt.notifyVersion++
 		s := rt.session
 		notifyVersion := rt.notifyVersion
 		rt.mu.Unlock()
 		_ = rt.manager.persist(context.Background(), s)
+		if clearRunning {
+			rt.updateNotificationRunning(waitingNote, false)
+		}
 		rt.notifyIfStillWaiting(notifyVersion)
 		return
 	}
@@ -814,7 +822,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	if rt.lastNotifiedMessageID != "" {
 		n.MessageID = rt.lastNotifiedMessageID
 		n.UpdateNo = rt.notificationUpdateNo + 1
-		n.Running = rt.notificationRunning
+		n.Running = false
 	}
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
@@ -874,6 +882,29 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		MessageID: rt.lastNotifiedMessageID,
 		UpdateNo:  rt.notificationUpdateNo,
 		Running:   true,
+	}, true
+}
+
+func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, bool) {
+	switch {
+	case rt.manager.notifier == nil:
+		return WaitingNotification{}, false
+	case rt.lastNotifiedMessageID == "":
+		return WaitingNotification{}, false
+	case rt.lastNotifiedContent == "":
+		return WaitingNotification{}, false
+	}
+	if _, ok := rt.manager.notifier.(WaitingRunningNotifier); !ok {
+		return WaitingNotification{}, false
+	}
+	rt.notificationRunning = false
+	return WaitingNotification{
+		SessionID: rt.session.ID,
+		Name:      rt.session.Name,
+		Content:   rt.lastNotifiedContent,
+		MessageID: rt.lastNotifiedMessageID,
+		UpdateNo:  rt.notificationUpdateNo,
+		Running:   false,
 	}, true
 }
 

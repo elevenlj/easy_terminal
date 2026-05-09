@@ -188,8 +188,8 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
 		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
 	}
-	if !notes[1].Running {
-		t.Fatalf("same-round content update should preserve running title state, got %#v", notes[1])
+	if notes[1].Running {
+		t.Fatalf("waiting notification update should clear running title state, got %#v", notes[1])
 	}
 
 	rt.MarkInputActivity("echo next\r")
@@ -263,6 +263,39 @@ func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
 	}
 	if running[0].MessageID != "msg-1" || !running[0].Running {
 		t.Fatalf("unexpected running marker note: %#v", running[0])
+	}
+}
+
+func TestWaitingTransitionClearsRunningTitle(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager:                m,
+		session:                Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: false},
+		lastNotifiedMessageID:  "msg-1",
+		lastNotifiedContent:    "> echo hello\nhello",
+		notificationUpdateNo:   1,
+		notificationRunning:    true,
+		visibleSnapshot:        "> echo hello\nhello",
+		visibleSnapshotVersion: 1,
+		stateVersion:           7,
+		notifyVersion:          3,
+	}
+
+	rt.notifyAfterStable(7)
+
+	running := notifier.runningNotes()
+	if len(running) != 1 {
+		t.Fatalf("expected one running-clear update, got %#v", running)
+	}
+	if running[0].MessageID != "msg-1" || running[0].Running {
+		t.Fatalf("waiting transition should clear running title on current message, got %#v", running[0])
+	}
+	if got := rt.Snapshot().Status; got != StatusWaiting {
+		t.Fatalf("session should transition to waiting, got %s", got)
+	}
+	if rt.notificationRunning {
+		t.Fatal("runtime should not retain running notification state after waiting transition")
 	}
 }
 
