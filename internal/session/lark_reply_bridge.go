@@ -42,6 +42,7 @@ type LarkReplyBridge struct {
 }
 
 var structuredInputEnterDelay = 200 * time.Millisecond
+var structuredInputEnterSequence = "\r\n"
 
 const larkProcessingReactionEmoji = "THINKING"
 
@@ -988,7 +989,7 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	}
 	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
 	sessionID := rt.Snapshot().ID
-	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true", sessionID, len(text))
+	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true enter_len=%d", sessionID, len(text), len(structuredInputEnterSequence))
 	rt.MarkInputActivity(text + "\r")
 	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err
@@ -996,7 +997,11 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	if structuredInputEnterDelay > 0 {
 		time.Sleep(structuredInputEnterDelay)
 	}
-	_, err := rt.terminal.Write([]byte("\r"))
+	enter := structuredInputEnterSequence
+	if enter == "" {
+		enter = "\r"
+	}
+	_, err := rt.terminal.Write([]byte(enter))
 	return err
 }
 

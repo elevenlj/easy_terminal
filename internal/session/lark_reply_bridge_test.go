@@ -553,8 +553,9 @@ func TestLarkReplyBridgeStartWithoutDefaultKeepsFallbackBehavior(t *testing.T) {
 	if len(sessions) != 1 || sessions[0].Name != "lark-session" {
 		t.Fatalf("start without configured default should keep fallback behavior, got %#v", sessions)
 	}
-	if got := launcher.terminals[0].writes(); got != "开始\r" {
-		t.Fatalf("fallback session should receive original text, got %q", got)
+	parts := launcher.terminals[0].writeParts()
+	if !lastSubmittedWrite(parts, "开始") {
+		t.Fatalf("fallback session should receive original text, got %#v", parts)
 	}
 }
 
@@ -1128,7 +1129,11 @@ func (t *recordingTerminal) writeTimes() []time.Time {
 }
 
 func lastSubmittedWrite(parts []string, text string) bool {
-	return len(parts) >= 2 && parts[len(parts)-2] == text && parts[len(parts)-1] == "\r"
+	return len(parts) >= 2 && parts[len(parts)-2] == text && isEnterWrite(parts[len(parts)-1])
+}
+
+func isEnterWrite(text string) bool {
+	return text == "\r" || text == "\n" || text == "\r\n"
 }
 
 type blockingWaiter struct{}
