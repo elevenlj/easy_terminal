@@ -676,6 +676,11 @@ func TestLarkReplyBridgeRoutesP1Start(t *testing.T) {
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	var reactions []string
+	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
+		reactions = append(reactions, messageID+":"+emoji)
+		return nil
+	}
 
 	err := bridge.HandleP1MessageReceive(context.Background(), &larkim.P1MessageReceiveV1{
 		Event: &larkim.P1MessageReceiveV1Data{
@@ -695,6 +700,9 @@ func TestLarkReplyBridgeRoutesP1Start(t *testing.T) {
 	}
 	if !sessions[0].NotifyOnWaiting {
 		t.Fatalf("P1 lark-created session should enable notifications by default: %#v", sessions[0])
+	}
+	if len(reactions) != 1 || reactions[0] != "p1-start:"+larkProcessingReactionEmoji {
+		t.Fatalf("expected processing reaction on P1 message, got %#v", reactions)
 	}
 }
 

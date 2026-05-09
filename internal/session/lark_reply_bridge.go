@@ -41,7 +41,7 @@ type LarkReplyBridge struct {
 
 var structuredInputEnterDelay = 200 * time.Millisecond
 
-const larkProcessingReactionEmoji = "EYES"
+const larkProcessingReactionEmoji = "THINKING"
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
@@ -161,6 +161,7 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 	if text == "" {
 		return nil
 	}
+	b.markLarkMessageProcessing(ctx, e.OpenMessageID)
 	sessionID, err := b.RouteText(ctx, e.OpenMessageID, e.ParentID, e.RootID, text)
 	if err != nil {
 		log.Printf("lark reply bridge failed to route P1 message %s: %v", e.OpenMessageID, err)
