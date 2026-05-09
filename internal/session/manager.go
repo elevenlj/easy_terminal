@@ -749,21 +749,13 @@ func (rt *RuntimeSession) notifyAfterStable(version int64) {
 		return
 	}
 	if rt.session.Status == StatusRunning {
-		var waitingNote WaitingNotification
-		clearRunning := false
 		rt.session.Status = StatusWaiting
-		if rt.notificationRunning {
-			waitingNote, clearRunning = rt.markNotificationWaitingLocked()
-		}
 		rt.session.UpdatedAt = time.Now().UTC()
 		rt.notifyVersion++
 		s := rt.session
 		notifyVersion := rt.notifyVersion
 		rt.mu.Unlock()
 		_ = rt.manager.persist(context.Background(), s)
-		if clearRunning {
-			rt.updateNotificationRunning(waitingNote, false)
-		}
 		rt.notifyIfStillWaiting(notifyVersion)
 		return
 	}
@@ -805,10 +797,18 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		_, _, _, reason := rt.waitingNotificationCandidateLocked()
 		log.Printf("waiting notification not ready session=%s version=%d reason=%s status=%s live=%v notify_version=%d last_input=%q visible_len=%d round_len=%d",
 			rt.session.ID, version, reason, rt.session.Status, rt.session.Live, rt.notifyVersion, rt.lastInputText, len(rt.visibleSnapshot), len(rt.roundReply))
+		var waitingNote WaitingNotification
+		clearRunning := false
+		if reason == "duplicate_hash" && rt.notificationRunning {
+			waitingNote, clearRunning = rt.markNotificationWaitingLocked()
+		}
 		if reason != "duplicate_hash" {
 			rt.rescheduleNotifyRetryLocked(version)
 		}
 		rt.mu.Unlock()
+		if clearRunning {
+			rt.updateNotificationRunning(waitingNote, false)
+		}
 		return
 	}
 	if rt.startupNotifyMode == startupNotifySuppress || rt.startupNotifyMode == startupNotifySettling {
@@ -846,13 +846,12 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 			rt.lastNotifiedMessageID = result.MessageID
 		}
 		rt.lastNotifiedContent = n.Content
-		if result.Updated {
-			rt.notificationUpdateNo = n.UpdateNo
-		}
+		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
-	} else if result.MessageID != "" && !result.Updated && sameRound && rt.lastNotifiedMessageID == "" {
+	} else if result.MessageID != "" && sameRound && rt.lastNotifiedMessageID == "" {
 		rt.lastNotifiedMessageID = result.MessageID
 		rt.lastNotifiedContent = n.Content
+		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
 	}
 	rt.mu.Unlock()
