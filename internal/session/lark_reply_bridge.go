@@ -15,6 +15,7 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -97,6 +98,9 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		OnP1MessageReceiveV1(func(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
 			return b.HandleP1MessageReceive(ctx, event)
 		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			return b.HandleP2CardActionTrigger(ctx, event)
+		}).
 		OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
 			return nil
 		}).
@@ -147,6 +151,42 @@ func shouldIgnoreLarkP2Message(sender *larkim.EventSender, messageType string) b
 		return false
 	}
 	return *sender.SenderType != "" && *sender.SenderType != "user"
+}
+
+func (b *LarkReplyBridge) HandleP2CardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	_ = ctx
+	sessionID := larkCardActionSessionID(event)
+	if sessionID == "" {
+		return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: "warning", Content: "未找到会话"}}, nil
+	}
+	content, err := larkSessionNavigatorCardContent(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return nil, err
+	}
+	defaultLarkMessageRegistry.rememberLatest(sessionID)
+	return &callback.CardActionTriggerResponse{
+		Card:  &callback.Card{Type: "raw", Data: raw},
+		Toast: &callback.Toast{Type: "success", Content: "已切换到 " + sessionID},
+	}, nil
+}
+
+func larkCardActionSessionID(event *callback.CardActionTriggerEvent) string {
+	if event == nil || event.Event == nil || event.Event.Action == nil {
+		return ""
+	}
+	value := event.Event.Action.Value
+	if value == nil {
+		return ""
+	}
+	if action, _ := value["action"].(string); action != larkSessionNavigatorAction {
+		return ""
+	}
+	sessionID, _ := value["session_id"].(string)
+	return sessionID
 }
 
 func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *larkim.P1MessageReceiveV1) error {

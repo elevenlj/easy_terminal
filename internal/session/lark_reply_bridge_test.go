@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -90,6 +91,58 @@ func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
 	}
 	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo from lark\r") {
 		t.Fatalf("terminal should receive submitted input despite reaction failure, got %q", got)
+	}
+}
+
+func TestLarkReplyBridgeCardActionSwitchesNavigatorSession(t *testing.T) {
+	resetLarkRegistryForTest()
+	defaultLarkMessageRegistry.rememberNotification(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "content A",
+	}, "msg-a")
+	defaultLarkMessageRegistry.rememberNotification(WaitingNotification{
+		SessionID: "sess-2",
+		Name:      "B",
+		Content:   "content B",
+	}, "msg-b")
+	bridge := NewLarkReplyBridge("app", "secret", NewManager(nil, &recordingLauncher{}), &CommandAgentConfig{}, t.TempDir())
+
+	resp, err := bridge.HandleP2CardActionTrigger(context.Background(), &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Action: &callback.CallBackAction{
+				Value: map[string]interface{}{"action": larkSessionNavigatorAction, "session_id": "sess-1"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Card == nil || resp.Card.Type != "raw" {
+		t.Fatalf("expected raw card response, got %#v", resp)
+	}
+	if resp.Toast == nil || !strings.Contains(resp.Toast.Content, "sess-1") {
+		t.Fatalf("expected session switch toast, got %#v", resp.Toast)
+	}
+	if got := defaultLarkMessageRegistry.latestNotifiedSessionID(); got != "sess-1" {
+		t.Fatalf("latest session = %q, want sess-1", got)
+	}
+}
+
+func TestLarkReplyBridgeCardActionRejectsUnknownAction(t *testing.T) {
+	resetLarkRegistryForTest()
+	bridge := NewLarkReplyBridge("app", "secret", NewManager(nil, &recordingLauncher{}), &CommandAgentConfig{}, t.TempDir())
+
+	resp, err := bridge.HandleP2CardActionTrigger(context.Background(), &callback.CardActionTriggerEvent{
+		Event: &callback.CardActionTriggerRequest{
+			Action: &callback.CallBackAction{Value: map[string]interface{}{"action": "other", "session_id": "sess-1"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "warning" {
+		t.Fatalf("expected warning toast, got %#v", resp)
 	}
 }
 
@@ -873,6 +926,7 @@ func resetLarkRegistryForTest() {
 	defer defaultLarkMessageRegistry.mu.Unlock()
 	defaultLarkMessageRegistry.messageToSession = make(map[string]string)
 	defaultLarkMessageRegistry.latestSessionID = ""
+	defaultLarkMessageRegistry.sessionLatest = make(map[string]LarkSessionNavItem)
 }
 
 func waitForBrowserRequest(t *testing.T, mu *sync.Mutex, requests *[]string, sessionID string) {

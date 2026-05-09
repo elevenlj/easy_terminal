@@ -558,6 +558,34 @@ func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
 	}
 }
 
+func TestLarkSessionNavigatorCardContentIncludesTabsAndSelectedContent(t *testing.T) {
+	resetLarkRegistryForTest()
+	defaultLarkMessageRegistry.rememberNotification(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "reply A",
+	}, "msg-a")
+	defaultLarkMessageRegistry.rememberNotification(WaitingNotification{
+		SessionID: "sess-2",
+		Name:      "B",
+		Content:   "reply B",
+		UpdateNo:  2,
+	}, "msg-b")
+
+	content, err := larkSessionNavigatorCardContent("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"easy_terminal 会话导航", "● A", "B", "reply A", larkSessionNavigatorAction} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("navigator card should include %q, got %s", want, content)
+		}
+	}
+	if strings.Contains(content, "reply B") {
+		t.Fatalf("navigator card should show selected content only, got %s", content)
+	}
+}
+
 func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
 	notifier := &LarkAppNotifier{}
 	var sent []string
