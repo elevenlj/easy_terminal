@@ -38,6 +38,8 @@ type LarkReplyBridge struct {
 	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 }
 
+var structuredInputEnterDelay = 50 * time.Millisecond
+
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
 }
@@ -756,6 +758,9 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true", sessionID, len(text))
 	if err := rt.WriteInput(text); err != nil {
 		return err
+	}
+	if structuredInputEnterDelay > 0 {
+		time.Sleep(structuredInputEnterDelay)
 	}
 	return rt.WriteInput("\r")
 }

@@ -86,6 +86,34 @@ func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 	}
 }
 
+func TestSubmitStructuredInputDelaysEnterForTUI(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 10 * time.Millisecond
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	rt := &RuntimeSession{
+		manager:  NewManager(nil, nil),
+		terminal: term,
+		session:  Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true},
+	}
+
+	if err := SubmitStructuredInput(rt, "hello tui"); err != nil {
+		t.Fatal(err)
+	}
+	parts := term.writeParts()
+	if !lastSubmittedWrite(parts, "hello tui") {
+		t.Fatalf("structured input should write text and enter separately, got %#v", parts)
+	}
+	times := term.writeTimes()
+	if len(times) < 2 {
+		t.Fatalf("expected text and enter write times, got %d", len(times))
+	}
+	if got := times[len(times)-1].Sub(times[len(times)-2]); got < structuredInputEnterDelay {
+		t.Fatalf("enter should be delayed after text by at least %s, got %s", structuredInputEnterDelay, got)
+	}
+}
+
 func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -786,11 +814,12 @@ func (h recordingHandle) Terminal() Terminal { return h.terminal }
 func (h recordingHandle) Process() Waiter    { return blockingWaiter{} }
 
 type recordingTerminal struct {
-	mu     sync.Mutex
-	buf    strings.Builder
-	parts  []string
-	readCh chan []byte
-	closed bool
+	mu        sync.Mutex
+	buf       strings.Builder
+	parts     []string
+	writeTime []time.Time
+	readCh    chan []byte
+	closed    bool
 }
 
 func (t *recordingTerminal) Read(p []byte) (int, error) {
@@ -805,6 +834,7 @@ func (t *recordingTerminal) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.parts = append(t.parts, string(p))
+	t.writeTime = append(t.writeTime, time.Now())
 	return t.buf.Write(p)
 }
 
@@ -831,6 +861,14 @@ func (t *recordingTerminal) writeParts() []string {
 	defer t.mu.Unlock()
 	cp := make([]string, len(t.parts))
 	copy(cp, t.parts)
+	return cp
+}
+
+func (t *recordingTerminal) writeTimes() []time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	cp := make([]time.Time, len(t.writeTime))
+	copy(cp, t.writeTime)
 	return cp
 }
 
