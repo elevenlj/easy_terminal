@@ -748,14 +748,16 @@ func PrepareStructuredInput(text string) string {
 }
 
 func SubmitStructuredInput(rt *RuntimeSession, text string) error {
-	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
-	payload := text + "\r"
-	sessionID := ""
-	if rt != nil {
-		sessionID = rt.Snapshot().ID
+	if rt == nil {
+		return fmt.Errorf("runtime not found")
 	}
+	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	sessionID := rt.Snapshot().ID
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true", sessionID, len(text))
-	return rt.WriteInput(payload)
+	if err := rt.WriteInput(text); err != nil {
+		return err
+	}
+	return rt.WriteInput("\r")
 }
 
 type larkIncomingMessage struct {
