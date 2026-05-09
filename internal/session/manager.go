@@ -21,6 +21,7 @@ const (
 	maxRoundBytes                        = 64 * 1024
 	defaultFastWaitingTransition         = 300 * time.Millisecond
 	defaultConservativeWaitingTransition = 700 * time.Millisecond
+	defaultNotificationUpdateCoalesce    = 15 * time.Second
 	defaultNotifyRetryDelay              = time.Second
 	defaultStartupPresetSettleDelay      = 2 * time.Second
 )
@@ -56,6 +57,7 @@ type Manager struct {
 	idCounter           atomic.Int64
 	fastWaiting         time.Duration
 	conservativeWaiting time.Duration
+	updateCoalesce      time.Duration
 	preStartCommand     string
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
@@ -70,6 +72,7 @@ func NewManager(store Store, launcher Launcher, opts ...ManagerOption) *Manager 
 		launcher:            launcher,
 		fastWaiting:         defaultFastWaitingTransition,
 		conservativeWaiting: defaultConservativeWaitingTransition,
+		updateCoalesce:      defaultNotificationUpdateCoalesce,
 		sessions:            make(map[string]*RuntimeSession),
 	}
 	for _, opt := range opts {
@@ -92,6 +95,14 @@ func WithWaitingTransitionDelays(fast, conservative time.Duration) ManagerOption
 		}
 		if conservative > 0 {
 			m.conservativeWaiting = conservative
+		}
+	}
+}
+
+func WithNotificationUpdateCoalesce(delay time.Duration) ManagerOption {
+	return func(m *Manager) {
+		if delay >= 0 {
+			m.updateCoalesce = delay
 		}
 	}
 }
@@ -829,7 +840,16 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	}
 	roundInput := rt.lastInputText
 	roundSnapshotVersion := rt.snapshotAtRoundVersion
+	updateCoalesce := time.Duration(0)
+	if n.MessageID != "" {
+		updateCoalesce = rt.manager.updateCoalesce
+	}
 	rt.mu.Unlock()
+	if updateCoalesce > 0 && !rt.waitForNotificationUpdateCoalesce(version, updateCoalesce) {
+		log.Printf("waiting notification update coalesced session=%s version=%d hash=%s delay=%s",
+			n.SessionID, version, shortNotifyHash(contentHash), updateCoalesce)
+		return
+	}
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
 		n.SessionID, n.Name, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
 	rt.notificationPatchMu.Lock()
@@ -861,6 +881,11 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		rt.lastNotifiedContent = n.Content
 		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
+	} else if result.MessageID != "" && n.MessageID != "" && sameRound && rt.lastNotifiedMessageID == n.MessageID {
+		rt.lastNotifiedMessageID = result.MessageID
+		rt.lastNotifiedContent = n.Content
+		rt.notificationUpdateNo = n.UpdateNo
+		rt.notificationRunning = n.Running
 	} else if result.MessageID != "" && sameRound && rt.lastNotifiedMessageID == "" {
 		rt.lastNotifiedMessageID = result.MessageID
 		rt.lastNotifiedContent = n.Content
@@ -870,6 +895,18 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
 	rt.manager.notificationSent(n.SessionID)
+}
+
+func (rt *RuntimeSession) waitForNotificationUpdateCoalesce(version int64, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	<-timer.C
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.session.Status == StatusWaiting &&
+		rt.session.Live &&
+		rt.session.NotifyOnWaiting &&
+		rt.notifyVersion == version
 }
 
 func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, string, bool) {

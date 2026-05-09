@@ -134,7 +134,7 @@ func TestNotifyStableDelayFastForPlainOutputAndConservativeForCodex(t *testing.T
 
 func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 	notifier := &recordingNotifier{}
-	m := NewManager(nil, nil, WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
@@ -158,7 +158,7 @@ func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 
 func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}
-	m := NewManager(nil, nil, WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -214,7 +214,7 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 
 func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testing.T) {
 	notifier := &advancingNotifier{recordingNotifier: recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}}
-	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -257,7 +257,7 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 
 func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
-	m := NewManager(nil, nil, WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -286,7 +286,7 @@ func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
 
 func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
-	m := NewManager(nil, nil, WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -315,7 +315,7 @@ func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
 
 func TestWaitingTransitionKeepsRunningTitleUntilFinalNotification(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
-	m := NewManager(nil, nil, WithNotifier(notifier))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager:                m,
 		session:                Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
@@ -349,7 +349,7 @@ func TestWaitingTransitionKeepsRunningTitleUntilFinalNotification(t *testing.T) 
 
 func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
 	notifier := newSequencingNotifier("msg-1")
-	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour))
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
 		manager:                m,
 		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -446,6 +446,47 @@ func TestNotifyIfStillWaitingSkipsStaleSendAfterNewOutput(t *testing.T) {
 	}
 	if got := notifier.count(); got != 0 {
 		t.Fatalf("stale waiting notification should not be sent after new output, got %d", got)
+	}
+}
+
+func TestNotifyIfStillWaitingCoalescesSameRoundUpdate(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1", replaceMessageID: "msg-2"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(250*time.Millisecond))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\npartial")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+	rt.notifyIfStillWaiting(version)
+
+	rt.HandleOutput([]byte(" more"))
+	rt.SetVisibleSnapshot("$ echo hello\npartial more")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version = rt.notifyVersion
+	rt.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		rt.notifyIfStillWaiting(version)
+		close(done)
+	}()
+	time.Sleep(150 * time.Millisecond)
+	rt.HandleOutput([]byte(" complete"))
+	rt.SetVisibleSnapshot("$ echo hello\npartial more complete\n$")
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("coalesced waiting notification did not return")
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("same-round update should be coalesced after newer output, got %#v", notes)
 	}
 }
 
