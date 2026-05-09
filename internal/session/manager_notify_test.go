@@ -188,8 +188,8 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
 		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
 	}
-	if notes[1].Running {
-		t.Fatalf("content update should restore normal title state, got %#v", notes[1])
+	if !notes[1].Running {
+		t.Fatalf("same-round content update should preserve running title state, got %#v", notes[1])
 	}
 
 	rt.MarkInputActivity("echo next\r")
@@ -234,6 +234,35 @@ func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
 	}
 	if running[0].Content != "> 今天天气怎么样\n• 你想查哪个城市的天气？" {
 		t.Fatalf("running marker should keep last notified content, got %q", running[0].Content)
+	}
+}
+
+func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("今天天气怎么样\r")
+	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 先给一版计划。")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+	rt.mu.Lock()
+	rt.session.Status = StatusRunning
+	rt.mu.Unlock()
+	rt.HandleOutput([]byte("more output"))
+
+	running := notifier.runningNotes()
+	if len(running) != 1 {
+		t.Fatalf("expected running marker even when session was already running, got %#v", running)
+	}
+	if running[0].MessageID != "msg-1" || !running[0].Running {
+		t.Fatalf("unexpected running marker note: %#v", running[0])
 	}
 }
 

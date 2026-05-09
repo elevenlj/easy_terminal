@@ -78,7 +78,7 @@ func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 3 || parts[len(parts)-2] != "请分析这张图" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 2 || parts[len(parts)-1] != "请分析这张图\r" {
 		t.Fatalf("followup text should append text and enter, got %#v", parts)
 	}
 	if got := launcher.terminals[0].writes(); strings.Count(got, "/tmp/lark-image.png") != 1 {
@@ -106,7 +106,7 @@ func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 2 || parts[len(parts)-2] != "/tmp/a.png /tmp/b.png 对比这两张图" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 1 || parts[len(parts)-1] != "/tmp/a.png /tmp/b.png 对比这两张图\r" {
 		t.Fatalf("image+text should submit immediately, got %#v", parts)
 	}
 	if len(replies) != 0 {
@@ -132,7 +132,7 @@ func TestLarkReplyBridgeImageMessageWithTextSubmitsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 2 || parts[len(parts)-2] != "/tmp/a.png 请分析这张图" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 1 || parts[len(parts)-1] != "/tmp/a.png 请分析这张图\r" {
 		t.Fatalf("image message with text should submit immediately, got %#v", parts)
 	}
 	if len(replies) != 0 {
@@ -159,13 +159,13 @@ func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) 
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 4 {
-		t.Fatalf("expected pending input, clear, new input, enter; got %#v", parts)
+	if len(parts) < 3 {
+		t.Fatalf("expected pending input, clear, submitted new input; got %#v", parts)
 	}
-	if parts[len(parts)-3] != "\x15" {
+	if parts[len(parts)-2] != "\x15" {
 		t.Fatalf("new attachment+text should clear stale pending input before submit, got %#v", parts)
 	}
-	if parts[len(parts)-2] != "/tmp/new.png 分析新的" || parts[len(parts)-1] != "\r" {
+	if parts[len(parts)-1] != "/tmp/new.png 分析新的\r" {
 		t.Fatalf("new attachment+text should submit only current attachment and text, got %#v", parts)
 	}
 }
@@ -265,8 +265,8 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 		t.Fatalf("terminal did not receive followup input: %q", got)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 2 || parts[len(parts)-2] != "echo from lark" || parts[len(parts)-1] != "\r" {
-		t.Fatalf("lark followup should submit text and enter separately, got %#v", parts)
+	if len(parts) < 1 || parts[len(parts)-1] != "echo from lark\r" {
+		t.Fatalf("lark followup should submit text and enter atomically, got %#v", parts)
 	}
 	waitForBrowserRequest(t, &browserMu, &browserRequests, "sess-1")
 }
@@ -488,7 +488,7 @@ func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 2 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 1 || parts[len(parts)-1] != "pwd\r" {
 		t.Fatalf("first pipeline command should be submitted immediately, got %#v", parts)
 	}
 	if strings.Contains(launcher.terminals[0].writes(), "cd /tmp") {
@@ -497,7 +497,7 @@ func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
 
 	bridge.OnNotificationSent("sess-1")
 	parts = launcher.terminals[0].writeParts()
-	if len(parts) < 4 || parts[len(parts)-2] != "cd /tmp" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 2 || parts[len(parts)-1] != "cd /tmp\r" {
 		t.Fatalf("second pipeline command should run after notification, got %#v", parts)
 	}
 	if strings.Contains(launcher.terminals[0].writes(), "pwdpwd") {
@@ -506,7 +506,7 @@ func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
 
 	bridge.OnNotificationSent("sess-1")
 	parts = launcher.terminals[0].writeParts()
-	if len(parts) < 6 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 3 || parts[len(parts)-1] != "pwd\r" {
 		t.Fatalf("third pipeline command should run after next notification, got %#v", parts)
 	}
 }
@@ -559,7 +559,7 @@ func TestLarkReplyBridgeStartPipelineWithFullWidthPipe(t *testing.T) {
 
 	bridge.OnNotificationSent("sess-1")
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 2 || parts[len(parts)-2] != "pwd" || parts[len(parts)-1] != "\r" {
+	if len(parts) < 1 || parts[len(parts)-1] != "pwd\r" {
 		t.Fatalf("queued start pipeline command should run after notification, got %#v", parts)
 	}
 }

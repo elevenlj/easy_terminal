@@ -628,9 +628,8 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	var runningNote WaitingNotification
 	markRunning := false
 	if renderable {
-		wasWaiting := rt.session.Status == StatusWaiting
 		rt.session.Status = StatusRunning
-		if wasWaiting {
+		if rt.lastNotifiedMessageID != "" && rt.lastNotifiedContent != "" && !rt.notificationRunning {
 			runningNote, markRunning = rt.markNotificationRunningLocked()
 		}
 		if rt.startupNotifyMode == startupNotifySettling {
@@ -815,6 +814,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	if rt.lastNotifiedMessageID != "" {
 		n.MessageID = rt.lastNotifiedMessageID
 		n.UpdateNo = rt.notificationUpdateNo + 1
+		n.Running = rt.notificationRunning
 	}
 	rt.mu.Unlock()
 	log.Printf("waiting notification sending session=%s name=%q version=%d hash=%s content_len=%d preview=%q",
@@ -835,7 +835,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		if result.Updated {
 			rt.notificationUpdateNo = n.UpdateNo
 		}
-		rt.notificationRunning = false
+		rt.notificationRunning = n.Running
 	}
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
@@ -848,10 +848,22 @@ func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, stri
 }
 
 func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, bool) {
-	if rt.manager.notifier == nil || rt.lastNotifiedMessageID == "" || rt.lastNotifiedContent == "" || rt.notificationRunning {
+	switch {
+	case rt.manager.notifier == nil:
+		log.Printf("waiting notification running marker skipped session=%s reason=no_notifier", rt.session.ID)
+		return WaitingNotification{}, false
+	case rt.lastNotifiedMessageID == "":
+		log.Printf("waiting notification running marker skipped session=%s reason=no_message_id", rt.session.ID)
+		return WaitingNotification{}, false
+	case rt.lastNotifiedContent == "":
+		log.Printf("waiting notification running marker skipped session=%s message=%s reason=no_content", rt.session.ID, rt.lastNotifiedMessageID)
+		return WaitingNotification{}, false
+	case rt.notificationRunning:
+		log.Printf("waiting notification running marker skipped session=%s message=%s reason=already_running", rt.session.ID, rt.lastNotifiedMessageID)
 		return WaitingNotification{}, false
 	}
 	if _, ok := rt.manager.notifier.(WaitingRunningNotifier); !ok {
+		log.Printf("waiting notification running marker skipped session=%s message=%s reason=notifier_unsupported", rt.session.ID, rt.lastNotifiedMessageID)
 		return WaitingNotification{}, false
 	}
 	rt.notificationRunning = true
@@ -879,7 +891,9 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 			}
 			rt.mu.Unlock()
 		}
+		return
 	}
+	log.Printf("waiting notification running marker updated session=%s message=%s running=%v", note.SessionID, note.MessageID, running)
 }
 
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
