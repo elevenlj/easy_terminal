@@ -32,8 +32,12 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 	payload := map[string]any{
 		"msg_type": "interactive",
 		"card": map[string]any{
-			"header":   map[string]any{"template": "blue", "title": map[string]any{"tag": "plain_text", "content": note.Name}},
-			"elements": []map[string]any{{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": content}}},
+			"schema": "2.0",
+			"header": map[string]any{"template": "blue", "title": map[string]any{"tag": "plain_text", "content": note.Name}},
+			"body": map[string]any{"elements": []map[string]any{
+				{"tag": "markdown", "content": content},
+				larkShortcutActionElement(note.SessionID),
+			}},
 		},
 	}
 	b, _ := json.Marshal(payload)

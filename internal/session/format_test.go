@@ -587,6 +587,13 @@ func TestSetLarkNotifyDropLinePatternsRejectsInvalidRegex(t *testing.T) {
 	}
 }
 
+func TestSetLarkNotifyDropLineRulesRejectsInvalidRegex(t *testing.T) {
+	err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{{Title: "坏规则", Pattern: "["}})
+	if err == nil || !strings.Contains(err.Error(), "坏规则") {
+		t.Fatalf("invalid titled regex should return title in error, got %v", err)
+	}
+}
+
 func TestPickNotifyContentRemovesExtraBlankLinesAndHorizontalRules(t *testing.T) {
 	visible := strings.Join([]string{
 		"Searching the web",

@@ -7,7 +7,9 @@ const state = {
   quick: [],
   config: null,
   search: "",
-  showEnded: false,
+  larkRegistrationTimer: null,
+  editingPresetCommand: null,
+  startupJSONDirty: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -15,6 +17,7 @@ const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 20;
 const DEFAULT_TERMINAL_COLS = 120;
 const DEFAULT_TERMINAL_ROWS = 36;
+const ONBOARDING_SEEN_KEY = "easy_terminal.onboarding_seen.v1";
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -46,8 +49,7 @@ async function loadSessions() {
 function visibleSessions() {
   const q = state.search.trim().toLowerCase();
   return state.sessions.filter((s) => {
-    const ended = !s.live || s.status === "exited" || s.status === "failed";
-    if (ended && !state.showEnded) return false;
+    if (!s.live || s.status === "exited" || s.status === "failed") return false;
     if (!q) return true;
     return `${s.name} ${s.id} ${s.status}`.toLowerCase().includes(q);
   });
@@ -63,7 +65,6 @@ function renderSessions() {
       <div class="session-head">
         <div class="session-name"></div>
         <div class="session-actions">
-          <button class="link-btn finish-btn" type="button">Finish</button>
           <button class="link-btn delete-btn" type="button">Delete</button>
         </div>
       </div>
@@ -77,10 +78,6 @@ function renderSessions() {
     el.querySelector(".session-name").textContent = s.name;
     el.querySelector(".notify-input").checked = Boolean(s.notify_on_waiting);
     el.querySelector(".notify-state").textContent = s.notifications_available ? (s.notify_on_waiting ? "已启用" : "未启用") : "不可用";
-    el.querySelector(".finish-btn").onclick = async (ev) => {
-      ev.stopPropagation();
-      await finishSession(s.id);
-    };
     el.querySelector(".delete-btn").onclick = async (ev) => {
       ev.stopPropagation();
       await deleteSession(s.id);
@@ -220,6 +217,23 @@ async function loadConfig() {
 function renderConfig() {
   const cfg = state.config;
   if (!cfg) return;
+  $("lark-register-panel").hidden = true;
+  $("lark-register-panel").classList.add("hidden");
+  $("lark-register-qr").src = "";
+  $("lark-register-code").textContent = "";
+  $("lark-register-link").href = "";
+  $("lark-register-status").textContent = "等待扫码确认...";
+  $("lark-register-start").disabled = false;
+  $("lark-test-start").disabled = false;
+  $("lark-test-result").innerHTML = "";
+  $("cfg-agent-preset").value = "";
+  $("cfg-agent-custom-command").value = "";
+  renderAgentPresetControls();
+  setAgentPresetStatus("选择常用 Agent 后，会自动补默认会话预设。");
+  $("preset-session-name").value = "";
+  state.editingPresetCommand = null;
+  setPresetStatus("");
+  stopLarkRegistrationPolling();
   $("cfg-fast-waiting").value = cfg.fast_waiting_transition_ms;
   $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
   $("cfg-lark-max-lines").value = cfg.lark_notify_max_lines;
@@ -227,12 +241,53 @@ function renderConfig() {
   $("cfg-lark-app-secret").value = cfg.lark_app_secret || "";
   $("cfg-lark-receive-id").value = cfg.lark_notify_receive_id || "";
   $("cfg-lark-default-session-name").value = cfg.lark_default_session_name || "";
+  $("cfg-lark-session-chat-prefix").value = cfg.lark_session_chat_prefix || "ET · ";
   $("cfg-lark-mention-enabled").checked = Boolean(cfg.lark_mention_enabled);
   $("cfg-prestart-command").value = cfg.session_pre_start_command || "";
-  $("cfg-drop-patterns").value = (cfg.lark_notify_drop_line_patterns || []).join("\n");
+  $("cfg-drop-patterns").value = JSON.stringify(normalizeDropRules(cfg.lark_notify_drop_line_patterns || []), null, 2);
+  $("cfg-lark-custom-shortcuts").value = JSON.stringify(cfg.lark_custom_shortcuts || [], null, 2);
   $("cfg-session-name-presets").value = JSON.stringify(cfg.session_name_presets || {}, null, 2);
   $("cfg-session-start-presets").value = JSON.stringify(cfg.session_start_presets || {}, null, 2);
+  renderDropRules();
+  renderCustomShortcuts();
+  renderPreStartCommandRows();
+  renderNamePresets();
+  state.startupJSONDirty = false;
+  updateStartupJSONPreview();
   $("config-error").textContent = "";
+}
+
+function setConfigTab(targetID) {
+  document.querySelectorAll(".config-tab").forEach((item) => item.classList.toggle("active", item.dataset.configTarget === targetID));
+  document.querySelectorAll(".config-panel").forEach((panel) => panel.classList.toggle("active", panel.id === targetID));
+}
+
+async function openConfigDialog(targetID = "config-lark") {
+  if (!state.config) await loadConfig();
+  renderConfig();
+  setConfigTab(targetID);
+  $("config-dialog").showModal();
+}
+
+function onboardingSeen() {
+  try {
+    return window.localStorage?.getItem(ONBOARDING_SEEN_KEY) === "1";
+  } catch {
+    return true;
+  }
+}
+
+function markOnboardingSeen() {
+  try {
+    window.localStorage?.setItem(ONBOARDING_SEEN_KEY, "1");
+  } catch {}
+}
+
+function maybeShowOnboarding() {
+  if (onboardingSeen()) return;
+  const dialog = $("onboarding-dialog");
+  if (!dialog || $("config-dialog").open || $("help-dialog").open) return;
+  dialog.showModal();
 }
 
 function readNumber(id) {
@@ -242,34 +297,631 @@ function readNumber(id) {
 }
 
 function readConfigForm() {
-  let namePresets;
-  let startPresets;
-  try {
-    namePresets = JSON.parse($("cfg-session-name-presets").value || "{}");
-    startPresets = JSON.parse($("cfg-session-start-presets").value || "{}");
-  } catch {
-    throw new Error("启动预设必须是有效 JSON");
-  }
+  if (state.startupJSONDirty) syncStartupJSONPreview({ throwOnError: true });
+  const namePresets = parseJSONObject($("cfg-session-name-presets").value || "{}", "会话名预设 JSON");
+  const startPresets = parseJSONObject($("cfg-session-start-presets").value || "{}", "开始命令后缀预设 JSON");
+  const dropRules = parseJSONArray($("cfg-drop-patterns").value || "[]", "通知过滤正则 JSON")
+    .map((item) => ({
+      title: String(item?.title || "").trim(),
+      pattern: String(item?.pattern || "").trim(),
+    }))
+    .filter((item) => item.title || item.pattern);
+  const customShortcuts = parseJSONArray($("cfg-lark-custom-shortcuts").value || "[]", "飞书自定义快捷键 JSON")
+    .map((item) => ({
+      label: String(item?.label || "").trim(),
+      command: String(item?.command || "").trim(),
+    }))
+    .filter((item) => item.label && item.command);
   return {
     lark_app_id: $("cfg-lark-app-id").value.trim(),
     lark_app_secret: $("cfg-lark-app-secret").value,
     lark_notify_receive_id: $("cfg-lark-receive-id").value.trim(),
     lark_mention_enabled: $("cfg-lark-mention-enabled").checked,
     lark_default_session_name: $("cfg-lark-default-session-name").value.trim(),
+    lark_session_chat_prefix: $("cfg-lark-session-chat-prefix").value.trim(),
     fast_waiting_transition_ms: readNumber("cfg-fast-waiting"),
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting"),
     lark_notify_max_lines: readNumber("cfg-lark-max-lines"),
     session_pre_start_command: $("cfg-prestart-command").value,
-    lark_notify_drop_line_patterns: $("cfg-drop-patterns").value.split("\n").map((line) => line.trim()).filter(Boolean),
+    lark_notify_drop_line_patterns: dropRules,
+    lark_custom_shortcuts: customShortcuts,
     session_name_presets: namePresets,
     session_start_presets: startPresets,
   };
+}
+
+function parseJSONArray(text, label) {
+  let value;
+  try {
+    value = JSON.parse(text || "[]");
+  } catch (err) {
+    throw new Error(`${label} 格式不正确：${err.message}`);
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} 必须是 JSON 数组`);
+  }
+  return value;
+}
+
+function normalizeDropRules(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return { title: "", pattern: item.trim() };
+      return {
+        title: String(item?.title || "").trim(),
+        pattern: String(item?.pattern || "").trim(),
+      };
+    });
+}
+
+function readDropRulesForUI() {
+  try {
+    const rules = JSON.parse($("cfg-drop-patterns").value || "[]");
+    return normalizeDropRules(rules);
+  } catch {
+    return null;
+  }
+}
+
+function writeDropRulesFromUI(rules) {
+  $("cfg-drop-patterns").value = JSON.stringify(normalizeDropRules(rules || []), null, 2);
+  renderDropRules();
+}
+
+function renderDropRules() {
+  const list = $("drop-rule-list");
+  list.innerHTML = "";
+  const rules = readDropRulesForUI();
+  if (!rules) {
+    const err = document.createElement("div");
+    err.className = "preset-empty";
+    err.textContent = "通知过滤正则 JSON 格式不正确。";
+    list.appendChild(err);
+    return;
+  }
+  if (rules.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preset-empty";
+    empty.textContent = "还没有过滤规则。";
+    list.appendChild(empty);
+    return;
+  }
+  rules.forEach((rule, index) => {
+    const row = document.createElement("div");
+    row.className = "drop-rule-row";
+    const title = document.createElement("input");
+    title.className = "drop-rule-title";
+    title.placeholder = "标题";
+    title.value = rule.title || "";
+    const pattern = document.createElement("input");
+    pattern.className = "drop-rule-pattern";
+    pattern.placeholder = "正则表达式";
+    pattern.value = rule.pattern || "";
+    const remove = document.createElement("button");
+    remove.className = "drop-rule-remove";
+    remove.type = "button";
+    remove.textContent = "删除";
+    title.oninput = () => updateDropRule(index, title.value, pattern.value);
+    pattern.oninput = () => updateDropRule(index, title.value, pattern.value);
+    remove.onclick = () => deleteDropRule(index);
+    row.appendChild(title);
+    row.appendChild(pattern);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+}
+
+function addDropRule() {
+  const rules = readDropRulesForUI();
+  if (!rules) return;
+  rules.push({ title: "", pattern: "" });
+  writeDropRulesFromUI(rules);
+}
+
+function updateDropRule(index, title, pattern) {
+  const rules = readDropRulesForUI();
+  if (!rules || !rules[index]) return;
+  rules[index] = { title, pattern };
+  $("cfg-drop-patterns").value = JSON.stringify(rules, null, 2);
+}
+
+function deleteDropRule(index) {
+  const rules = readDropRulesForUI();
+  if (!rules) return;
+  rules.splice(index, 1);
+  writeDropRulesFromUI(rules);
+}
+
+function readCustomShortcutsForUI() {
+  try {
+    const shortcuts = JSON.parse($("cfg-lark-custom-shortcuts").value || "[]");
+    if (!Array.isArray(shortcuts)) return null;
+    return shortcuts;
+  } catch {
+    return null;
+  }
+}
+
+function writeCustomShortcutsFromUI(shortcuts) {
+  $("cfg-lark-custom-shortcuts").value = JSON.stringify(shortcuts || [], null, 2);
+  renderCustomShortcuts();
+}
+
+function renderCustomShortcuts() {
+  const list = $("custom-shortcut-list");
+  list.innerHTML = "";
+  const shortcuts = readCustomShortcutsForUI();
+  if (!shortcuts) {
+    const err = document.createElement("div");
+    err.className = "preset-empty";
+    err.textContent = "自定义快捷键 JSON 格式不正确。";
+    list.appendChild(err);
+    return;
+  }
+  if (shortcuts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preset-empty";
+    empty.textContent = "还没有自定义快捷键。";
+    list.appendChild(empty);
+    return;
+  }
+  shortcuts.forEach((shortcut, index) => {
+    const row = document.createElement("div");
+    row.className = "custom-shortcut-row";
+    const label = document.createElement("input");
+    label.className = "custom-shortcut-label";
+    label.placeholder = "按钮名称";
+    const command = document.createElement("input");
+    command.className = "custom-shortcut-command";
+    command.placeholder = "要提交的指令";
+    const remove = document.createElement("button");
+    remove.className = "custom-shortcut-remove";
+    remove.type = "button";
+    remove.textContent = "删除";
+    label.value = shortcut?.label || "";
+    command.value = shortcut?.command || "";
+    label.oninput = () => updateCustomShortcut(index, label.value, command.value);
+    command.oninput = () => updateCustomShortcut(index, label.value, command.value);
+    remove.onclick = () => deleteCustomShortcut(index);
+    row.appendChild(label);
+    row.appendChild(command);
+    row.appendChild(remove);
+    list.appendChild(row);
+  });
+}
+
+function addCustomShortcut() {
+  const shortcuts = readCustomShortcutsForUI();
+  if (!shortcuts) return;
+  shortcuts.push({ label: "", command: "" });
+  writeCustomShortcutsFromUI(shortcuts);
+}
+
+function updateCustomShortcut(index, label, command) {
+  const shortcuts = readCustomShortcutsForUI();
+  if (!shortcuts || !shortcuts[index]) return;
+  shortcuts[index] = { label, command };
+  $("cfg-lark-custom-shortcuts").value = JSON.stringify(shortcuts, null, 2);
+}
+
+function deleteCustomShortcut(index) {
+  const shortcuts = readCustomShortcutsForUI();
+  if (!shortcuts) return;
+  shortcuts.splice(index, 1);
+  writeCustomShortcutsFromUI(shortcuts);
+}
+
+function parseJSONObject(text, label) {
+  let value;
+  try {
+    value = JSON.parse(text || "{}");
+  } catch (err) {
+    throw new Error(`${label} 格式不正确：${err.message}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} 必须是 JSON 对象`);
+  }
+  return value;
 }
 
 async function saveConfig() {
   const cfg = readConfigForm();
   state.config = await api("/api/config", { method: "PATCH", body: JSON.stringify(cfg) });
   renderConfig();
+}
+
+async function testLarkConfig() {
+  $("lark-test-start").disabled = true;
+  renderLarkTestResult({ steps: [{ name: "测试中", ok: true, message: "正在发送飞书测试通知..." }] });
+  try {
+    const result = await api("/api/config/lark-test", { method: "POST", body: JSON.stringify(readConfigForm()) });
+    renderLarkTestResult(result);
+  } finally {
+    $("lark-test-start").disabled = false;
+  }
+}
+
+function renderLarkTestResult(result) {
+  const box = $("lark-test-result");
+  box.innerHTML = "";
+  for (const step of result.steps || []) {
+    const row = document.createElement("div");
+    row.className = `lark-test-step ${step.ok ? "ok" : "fail"}`;
+    row.innerHTML = `<div><strong></strong><span></span></div>`;
+    row.querySelector("strong").textContent = step.name || "";
+    row.querySelector("span").textContent = step.message || "";
+    box.appendChild(row);
+  }
+}
+
+function agentPresetCommand() {
+  const preset = $("cfg-agent-preset").value;
+  if (preset === "custom") return $("cfg-agent-custom-command").value.trim();
+  return {
+    codex: "codex",
+    claude: "claude",
+    opencode: "opencode",
+  }[preset] || "";
+}
+
+function renderAgentPresetControls() {
+  const custom = $("cfg-agent-preset").value === "custom";
+  $("cfg-agent-custom-command").hidden = !custom;
+  $("cfg-agent-custom-command").classList.toggle("hidden", !custom);
+}
+
+function setAgentPresetStatus(message, ok = null) {
+  const el = $("agent-preset-status");
+  el.textContent = message || "";
+  el.classList.toggle("ok", ok === true);
+  el.classList.toggle("fail", ok === false);
+}
+
+function ensureDefaultAgentPreset() {
+  const presets = readNamePresetsForUI();
+  if (!presets) {
+    setAgentPresetStatus("会话名预设 JSON 格式不正确，先修正后再生成。", false);
+    return;
+  }
+  const sessionName = $("cfg-lark-default-session-name").value.trim() || "临时";
+  if (presets[sessionName]) {
+    setAgentPresetStatus(`“${sessionName}”已有预设，未覆盖。`, null);
+    return;
+  }
+  const command = agentPresetCommand();
+  if (!command) {
+    setAgentPresetStatus("填写自定义 Agent 命令后，会自动补默认会话预设。", null);
+    return;
+  }
+  presets[sessionName] = { commands: [command] };
+  writeNamePresetsFromUI(presets);
+  setAgentPresetStatus(`已为“${sessionName}”补充预设：${command}`, true);
+}
+
+function readNamePresetsForUI() {
+  try {
+    const presets = JSON.parse($("cfg-session-name-presets").value || "{}");
+    if (!presets || typeof presets !== "object" || Array.isArray(presets)) return null;
+    return presets;
+  } catch {
+    return null;
+  }
+}
+
+function writeNamePresetsFromUI(presets) {
+  $("cfg-session-name-presets").value = JSON.stringify(presets || {}, null, 2);
+  renderNamePresets();
+  state.startupJSONDirty = false;
+  updateStartupJSONPreview();
+}
+
+function setPresetStatus(message, ok = null) {
+  const el = $("preset-status");
+  el.textContent = message || "";
+  el.classList.toggle("ok", ok === true);
+  el.classList.toggle("fail", ok === false);
+}
+
+function saveNamePresetFromForm() {
+  const presets = readNamePresetsForUI();
+  if (!presets) {
+    setPresetStatus("会话名预设 JSON 格式不正确，先修正后再添加会话名。", false);
+    return;
+  }
+  const name = $("preset-session-name").value.trim();
+  if (!name) {
+    setPresetStatus("请填写会话名。", false);
+    return;
+  }
+  if (presets[name]) {
+    setPresetStatus(`“${name}”已存在，可以直接在下方添加命令。`, null);
+    return;
+  }
+  presets[name] = { commands: [] };
+  writeNamePresetsFromUI(presets);
+  $("preset-session-name").value = "";
+  setPresetStatus(`已添加会话名“${name}”。`, true);
+}
+
+function clearNamePresetForm() {
+  $("preset-session-name").value = "";
+  state.editingPresetCommand = null;
+  renderNamePresets();
+  setPresetStatus("");
+}
+
+function addPresetCommand(name, command) {
+  const presets = readNamePresetsForUI();
+  if (!presets?.[name]) return;
+  const value = command.trim();
+  if (!value) {
+    setPresetStatus(`请填写“${name}”要添加的命令。`, false);
+    return;
+  }
+  if (!Array.isArray(presets[name].commands)) presets[name].commands = [];
+  presets[name].commands.push(value);
+  writeNamePresetsFromUI(presets);
+  setPresetStatus(`已为“${name}”添加命令。`, true);
+}
+
+function editPresetCommand(name, index) {
+  state.editingPresetCommand = { name, index };
+  renderNamePresets();
+  setPresetStatus(`正在编辑“${name}”第 ${index + 1} 条命令。`, null);
+}
+
+function updatePresetCommand(name, index, command) {
+  const presets = readNamePresetsForUI();
+  const commands = presets?.[name]?.commands;
+  if (!Array.isArray(commands)) return;
+  const value = command.trim();
+  if (!value) {
+    setPresetStatus("命令不能为空。", false);
+    return;
+  }
+  commands[index] = value;
+  state.editingPresetCommand = null;
+  writeNamePresetsFromUI(presets);
+  setPresetStatus(`已更新“${name}”第 ${index + 1} 条命令。`, true);
+}
+
+function cancelEditPresetCommand() {
+  state.editingPresetCommand = null;
+  renderNamePresets();
+  setPresetStatus("");
+}
+
+function addCommandRow(container, value = "", onChange) {
+  const row = document.createElement("div");
+  row.className = "preset-command-row";
+  row.innerHTML = `
+    <input class="preset-command-input" placeholder="codex">
+    <button class="preset-command-remove" type="button">删除</button>
+  `;
+  const input = row.querySelector(".preset-command-input");
+  input.value = value;
+  input.oninput = () => {
+    if (typeof onChange === "function") onChange();
+  };
+  row.querySelector(".preset-command-remove").onclick = () => {
+    row.remove();
+    if (typeof onChange === "function") onChange();
+    if (container.querySelectorAll(".preset-command-input").length === 0) {
+      addCommandRow(container, "", onChange);
+    }
+  };
+  container.appendChild(row);
+}
+
+function renderPreStartCommandRows() {
+  const commands = $("cfg-prestart-command").value.split("\n");
+  const list = $("prestart-command-list");
+  list.innerHTML = "";
+  const rows = commands.some((line) => line.trim()) ? commands : [""];
+  for (const command of rows) addCommandRow(list, command, syncPreStartCommandsFromRows);
+}
+
+function addPreStartCommandRow(value = "") {
+  addCommandRow($("prestart-command-list"), value, syncPreStartCommandsFromRows);
+  syncPreStartCommandsFromRows();
+}
+
+function syncPreStartCommandsFromRows() {
+  $("cfg-prestart-command").value = [...$("prestart-command-list").querySelectorAll(".preset-command-input")]
+    .map((input) => input.value.trim())
+    .filter(Boolean)
+    .join("\n");
+  state.startupJSONDirty = false;
+  updateStartupJSONPreview();
+}
+
+function deletePresetCommand(name, index) {
+  const presets = readNamePresetsForUI();
+  const commands = presets?.[name]?.commands;
+  if (!Array.isArray(commands)) return;
+  commands.splice(index, 1);
+  writeNamePresetsFromUI(presets);
+  setPresetStatus(`已删除“${name}”的第 ${index + 1} 条命令。`, true);
+}
+
+function deletePresetSession(name) {
+  const presets = readNamePresetsForUI();
+  if (!presets?.[name]) return;
+  delete presets[name];
+  if (state.editingPresetCommand?.name === name) state.editingPresetCommand = null;
+  writeNamePresetsFromUI(presets);
+  setPresetStatus(`已删除会话名“${name}”。`, true);
+}
+
+function renderNamePresets() {
+  const list = $("preset-list");
+  list.innerHTML = "";
+  const presets = readNamePresetsForUI();
+  if (!presets) {
+    setPresetStatus("会话名预设 JSON 格式不正确，列表无法同步。", false);
+    return;
+  }
+  const names = Object.keys(presets).sort((a, b) => a.localeCompare(b));
+  if (names.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preset-empty";
+    empty.textContent = "还没有会话名预设。";
+    list.appendChild(empty);
+    return;
+  }
+  for (const name of names) {
+    const commands = Array.isArray(presets[name]?.commands) ? presets[name].commands : [];
+    const item = document.createElement("article");
+    item.className = "preset-item";
+    const head = document.createElement("div");
+    head.className = "preset-item-head";
+    const title = document.createElement("strong");
+    title.textContent = name;
+    const deleteSession = document.createElement("button");
+    deleteSession.type = "button";
+    deleteSession.className = "preset-session-delete";
+    deleteSession.textContent = "删除会话名";
+    deleteSession.onclick = () => deletePresetSession(name);
+    head.appendChild(title);
+    head.appendChild(deleteSession);
+    item.appendChild(head);
+    const display = document.createElement("div");
+    display.className = "preset-command-display";
+    item.appendChild(display);
+    if (commands.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "preset-command-display-row";
+      empty.textContent = "未配置命令";
+      display.appendChild(empty);
+    }
+    commands.forEach((command, index) => {
+      const row = document.createElement("div");
+      row.className = "preset-command-display-row";
+      const editing = state.editingPresetCommand?.name === name && state.editingPresetCommand.index === index;
+      const commandEl = editing ? document.createElement("input") : document.createElement("code");
+      if (editing) {
+        commandEl.className = "preset-inline-command-input";
+        commandEl.value = command;
+      } else {
+        commandEl.textContent = command;
+      }
+      const actions = document.createElement("div");
+      actions.className = "preset-item-actions";
+      if (editing) {
+        const save = document.createElement("button");
+        save.type = "button";
+        save.textContent = "保存";
+        save.onclick = () => updatePresetCommand(name, index, commandEl.value);
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "取消";
+        cancel.onclick = cancelEditPresetCommand;
+        actions.appendChild(save);
+        actions.appendChild(cancel);
+      } else {
+        const edit = document.createElement("button");
+        edit.className = "preset-edit";
+        edit.type = "button";
+        edit.textContent = "编辑";
+        edit.onclick = () => editPresetCommand(name, index);
+        const remove = document.createElement("button");
+        remove.className = "preset-delete";
+        remove.type = "button";
+        remove.textContent = "删除";
+        remove.onclick = () => deletePresetCommand(name, index);
+        actions.appendChild(edit);
+        actions.appendChild(remove);
+      }
+      row.appendChild(commandEl);
+      row.appendChild(actions);
+      display.appendChild(row);
+    });
+    const addRow = document.createElement("div");
+    addRow.className = "preset-command-add-row";
+    const input = document.createElement("input");
+    input.className = "preset-new-command-input";
+    input.placeholder = `给“${name}”添加命令`;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "添加命令";
+    add.onclick = () => addPresetCommand(name, input.value);
+    addRow.appendChild(input);
+    addRow.appendChild(add);
+    item.appendChild(addRow);
+    list.appendChild(item);
+  }
+}
+
+function startupJSONValue() {
+  return {
+    session_pre_start_command: $("cfg-prestart-command").value,
+    session_name_presets: parseJSONObject($("cfg-session-name-presets").value || "{}", "会话名预设 JSON"),
+    session_start_presets: parseJSONObject($("cfg-session-start-presets").value || "{}", "开始命令后缀预设 JSON"),
+  };
+}
+
+function updateStartupJSONPreview() {
+  if (state.startupJSONDirty) return;
+  $("startup-json-preview").value = JSON.stringify(startupJSONValue(), null, 2);
+}
+
+function syncStartupJSONPreview(options = {}) {
+  const preview = $("startup-json-preview");
+  let value;
+  try {
+    value = JSON.parse(preview.value || "{}");
+  } catch (err) {
+    const msg = `启动配置 JSON 格式不正确：${err.message}`;
+    if (options.throwOnError) throw new Error(msg);
+    $("config-error").textContent = msg;
+    return false;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    const msg = "启动配置 JSON 必须是对象";
+    if (options.throwOnError) throw new Error(msg);
+    $("config-error").textContent = msg;
+    return false;
+  }
+  const preStart = value.session_pre_start_command ?? "";
+  if (typeof preStart !== "string") {
+    const msg = "session_pre_start_command 必须是字符串";
+    if (options.throwOnError) throw new Error(msg);
+    $("config-error").textContent = msg;
+    return false;
+  }
+  const namePresets = value.session_name_presets ?? {};
+  const startPresets = value.session_start_presets ?? {};
+  if (!namePresets || typeof namePresets !== "object" || Array.isArray(namePresets)) {
+    const msg = "session_name_presets 必须是对象";
+    if (options.throwOnError) throw new Error(msg);
+    $("config-error").textContent = msg;
+    return false;
+  }
+  if (!startPresets || typeof startPresets !== "object" || Array.isArray(startPresets)) {
+    const msg = "session_start_presets 必须是对象";
+    if (options.throwOnError) throw new Error(msg);
+    $("config-error").textContent = msg;
+    return false;
+  }
+  $("cfg-prestart-command").value = preStart;
+  $("cfg-session-name-presets").value = JSON.stringify(namePresets, null, 2);
+  $("cfg-session-start-presets").value = JSON.stringify(startPresets, null, 2);
+  state.startupJSONDirty = false;
+  renderPreStartCommandRows();
+  renderNamePresets();
+  $("config-error").textContent = "";
+  if (!options.keepText) updateStartupJSONPreview();
+  return true;
+}
+
+function toggleStartupJSONPreview() {
+  const preview = $("startup-json-preview");
+  const hidden = !preview.hidden;
+  preview.hidden = hidden;
+  preview.classList.toggle("hidden", hidden);
+  $("startup-json-toggle").textContent = hidden ? "查看启动配置 JSON" : "隐藏启动配置 JSON";
+  if (!hidden) updateStartupJSONPreview();
 }
 
 function renderQuick() {
@@ -305,12 +957,6 @@ async function setNotify(id, enabled) {
   await loadSessions();
 }
 
-async function finishSession(id) {
-  await api(`/api/sessions/${id}/finish`, { method: "POST" });
-  if (state.active === id) state.active = null;
-  await loadSessions();
-}
-
 async function deleteSession(id) {
   await api(`/api/sessions/${id}`, { method: "DELETE" });
   if (state.active === id) {
@@ -337,11 +983,6 @@ $("session-search").oninput = (ev) => {
   renderSessions();
 };
 
-$("show-ended").onchange = (ev) => {
-  state.showEnded = ev.target.checked;
-  renderSessions();
-};
-
 $("composer").onsubmit = (ev) => {
   ev.preventDefault();
   sendComposer();
@@ -358,7 +999,7 @@ function sendComposer() {
   const input = $("composer-input");
   const text = input.value;
   if (!text || !state.active) return;
-  sendWS({ type: "input", data: text + "\r" });
+  sendWS({ type: "submit", data: text });
   input.value = "";
   input.focus();
 }
@@ -378,15 +1019,16 @@ $("quick-cancel").onclick = () => $("quick-dialog").close();
 
 $("config-open").onclick = async () => {
   try {
-    if (!state.config) await loadConfig();
-    renderConfig();
-    $("config-dialog").showModal();
+    await openConfigDialog();
   } catch (err) {
     console.error(err);
   }
 };
 
-$("config-cancel").onclick = () => $("config-dialog").close();
+$("config-cancel").onclick = () => {
+  stopLarkRegistrationPolling();
+  $("config-dialog").close();
+};
 
 $("config-form").onsubmit = async (ev) => {
   ev.preventDefault();
@@ -398,21 +1040,179 @@ $("config-form").onsubmit = async (ev) => {
   }
 };
 
-document.addEventListener("paste", async (ev) => {
+$("lark-register-start").onclick = () => startLarkRegistration().catch((err) => {
+  $("lark-register-status").textContent = err.message || String(err);
+});
+
+$("lark-test-start").onclick = () => testLarkConfig().catch((err) => {
+  renderLarkTestResult({ steps: [{ name: "测试失败", ok: false, message: err.message || String(err) }] });
+  $("lark-test-start").disabled = false;
+});
+
+$("cfg-agent-preset").onchange = () => {
+  renderAgentPresetControls();
+  setAgentPresetStatus("");
+  ensureDefaultAgentPreset();
+};
+
+$("cfg-agent-custom-command").onchange = ensureDefaultAgentPreset;
+$("cfg-lark-default-session-name").onchange = ensureDefaultAgentPreset;
+
+$("preset-save").onclick = saveNamePresetFromForm;
+$("preset-clear").onclick = clearNamePresetForm;
+$("prestart-command-add").onclick = () => addPreStartCommandRow("");
+$("drop-rule-add").onclick = addDropRule;
+$("custom-shortcut-add").onclick = addCustomShortcut;
+$("startup-json-toggle").onclick = toggleStartupJSONPreview;
+$("startup-json-preview").oninput = () => {
+  state.startupJSONDirty = true;
+  syncStartupJSONPreview({ keepText: true });
+};
+$("cfg-session-name-presets").oninput = () => {
+  state.startupJSONDirty = false;
+  renderNamePresets();
+  updateStartupJSONPreview();
+};
+$("cfg-session-start-presets").oninput = () => {
+  state.startupJSONDirty = false;
+  updateStartupJSONPreview();
+};
+$("cfg-prestart-command").oninput = () => {
+  state.startupJSONDirty = false;
+  renderPreStartCommandRows();
+  updateStartupJSONPreview();
+};
+
+document.querySelectorAll(".config-tab").forEach((tab) => {
+  tab.onclick = () => {
+    setConfigTab(tab.dataset.configTarget);
+  };
+});
+
+$("onboarding-config").onclick = async () => {
+  markOnboardingSeen();
+  $("onboarding-dialog").close();
+  try {
+    await openConfigDialog("config-lark");
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+$("onboarding-later").onclick = () => {
+  markOnboardingSeen();
+  $("onboarding-dialog").close();
+};
+
+async function startLarkRegistration() {
+  stopLarkRegistrationPolling();
+  $("lark-register-start").disabled = true;
+  $("lark-register-panel").hidden = false;
+  $("lark-register-panel").classList.remove("hidden");
+  $("lark-register-status").textContent = "正在创建扫码任务...";
+  const reg = await api("/api/lark-app-registration", { method: "POST", body: JSON.stringify({ brand: "feishu" }) });
+  $("lark-register-code").textContent = reg.user_code;
+  $("lark-register-link").href = reg.verification_uri_complete;
+  $("lark-register-qr").src = `/api/lark-app-registration/qr?text=${encodeURIComponent(reg.verification_uri_complete)}`;
+  $("lark-register-status").textContent = "请用飞书扫码确认创建应用...";
+  $("lark-register-panel").hidden = false;
+  $("lark-register-panel").classList.remove("hidden");
+  pollLarkRegistration(reg);
+}
+
+function pollLarkRegistration(reg) {
+  const intervalMs = Math.max(Number(reg.interval || 5), 2) * 1000;
+  const startedAt = Date.now();
+  const expiresAt = startedAt + Math.max(Number(reg.expires_in || 3600), 60) * 1000;
+  const tick = async () => {
+    if (Date.now() >= expiresAt) {
+      $("lark-register-status").textContent = "二维码已过期，请重新开始。";
+      $("lark-register-start").disabled = false;
+      return;
+    }
+    try {
+      const result = await api("/api/lark-app-registration/poll", {
+        method: "POST",
+        body: JSON.stringify({ brand: reg.brand || "feishu", device_code: reg.device_code }),
+      });
+      if (result.pending) {
+        const left = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+        $("lark-register-status").textContent = `等待扫码确认，剩余 ${left} 秒...`;
+        state.larkRegistrationTimer = setTimeout(tick, intervalMs);
+        return;
+      }
+      applyLarkRegistrationResult(result);
+    } catch (err) {
+      $("lark-register-status").textContent = err.message || String(err);
+      $("lark-register-start").disabled = false;
+    }
+  };
+  state.larkRegistrationTimer = setTimeout(tick, intervalMs);
+}
+
+function applyLarkRegistrationResult(result) {
+  $("cfg-lark-app-id").value = result.app_id || "";
+  $("cfg-lark-app-secret").value = result.app_secret || "";
+  if (result.lark_notify_receive_id) $("cfg-lark-receive-id").value = result.lark_notify_receive_id;
+  $("lark-register-status").textContent = "扫码成功，已填入飞书应用配置。点击 Save 保存。";
+  $("lark-register-start").disabled = false;
+  stopLarkRegistrationPolling();
+}
+
+function stopLarkRegistrationPolling() {
+  if (state.larkRegistrationTimer) {
+    clearTimeout(state.larkRegistrationTimer);
+    state.larkRegistrationTimer = null;
+  }
+}
+
+$("help-open").onclick = () => $("help-dialog").showModal();
+$("help-close").onclick = () => $("help-dialog").close();
+
+document.querySelectorAll(".help-tab").forEach((tab) => {
+  tab.onclick = () => {
+    const targetID = tab.dataset.helpTarget;
+    document.querySelectorAll(".help-tab").forEach((item) => item.classList.toggle("active", item === tab));
+    document.querySelectorAll(".help-panel").forEach((panel) => panel.classList.toggle("active", panel.id === targetID));
+  };
+});
+
+function clipboardImageFile(ev) {
+  const files = [...(ev.clipboardData?.files || [])];
+  const fromFiles = files.find((f) => f.type.startsWith("image/"));
+  if (fromFiles) return fromFiles;
+  const items = [...(ev.clipboardData?.items || [])];
+  const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
+  return imageItem?.getAsFile?.() || null;
+}
+
+async function handleImagePaste(ev) {
+  if (ev.easyTerminalImagePasteHandled) return;
   if (!state.active) return;
-  const file = [...(ev.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
+  const file = clipboardImageFile(ev);
   if (!file) return;
+  ev.easyTerminalImagePasteHandled = true;
+  ev.preventDefault();
   const form = new FormData();
   form.append("file", file, file.name || "paste.png");
   form.append("mime_type", file.type);
   const res = await api(`/api/sessions/${state.active}/uploads`, { method: "POST", body: form });
-  $("composer-input").value += `${res.path}\n`;
-});
+  const target = ev.target;
+  if (target === $("composer-input")) {
+    $("composer-input").value += `${res.path}\n`;
+  } else {
+    sendWS({ type: "input", data: `${res.path} ` });
+    state.term?.focus?.();
+  }
+}
+
+$("terminal").addEventListener("paste", handleImagePaste, true);
+document.addEventListener("paste", handleImagePaste);
 
 setInterval(loadSessions, 3000);
 loadSessions().catch(console.error);
 loadQuick().catch(console.error);
-loadConfig().catch(console.error);
+loadConfig().then(() => setTimeout(maybeShowOnboarding, 250)).catch(console.error);
 
 if (typeof window !== "undefined") {
   window.easyTerminalApp = {
@@ -422,6 +1222,13 @@ if (typeof window !== "undefined") {
     setNotify,
     loadConfig,
     saveConfig,
+    testLarkConfig,
+    maybeShowOnboarding,
+    openConfigDialog,
+    ensureDefaultAgentPreset,
+    saveNamePresetFromForm,
+    renderNamePresets,
+    addPreStartCommandRow,
     visibleSessions,
   };
 }

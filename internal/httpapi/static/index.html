@@ -16,15 +16,15 @@
         <button title="New Session">New Session</button>
       </form>
       <input id="session-search" class="search" placeholder="Search sessions" autocomplete="off">
-      <label class="ended-toggle"><input id="show-ended" type="checkbox"> 显示已结束会话</label>
       <div id="sessions" class="sessions"></div>
       <div class="sidebar-footer">
-        <button id="config-open" class="settings-btn" type="button">配置</button>
+        <button id="config-open" class="settings-btn" type="button" title="配置" aria-label="配置">⚙</button>
       </div>
     </aside>
     <main class="main">
       <header class="topbar">
         <div id="active-title">No session</div>
+        <button id="help-open" class="help-btn" type="button">帮助</button>
       </header>
       <div class="terminal-shell">
         <div id="terminal"></div>
@@ -45,51 +45,139 @@
         </div>
       </form>
     </dialog>
+    <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title">
+      <div class="onboarding-body">
+        <div class="onboarding-kicker">首次使用</div>
+        <h2 id="onboarding-title">先完成本机配置</h2>
+        <p>启动服务后建议先进入配置页，完成飞书凭证、等待通知和启动预设。配置会保存到本机 conf/config.local.json。</p>
+        <div class="onboarding-actions">
+          <button id="onboarding-later" type="button">稍后</button>
+          <button id="onboarding-config" type="button">去配置</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="config-dialog" class="config-dialog">
       <form id="config-form" method="dialog">
         <div class="config-head">
           <div>
             <div class="dialog-title">配置</div>
-            <div class="config-subtitle">修改后会写入 conf/config.local.json</div>
+            <div class="config-subtitle">修改后保存到本机配置</div>
           </div>
         </div>
+        <nav class="config-tabs" aria-label="配置分组">
+          <button class="config-tab active" type="button" data-config-target="config-lark">飞书</button>
+          <button class="config-tab" type="button" data-config-target="config-notify">等待通知</button>
+          <button class="config-tab" type="button" data-config-target="config-startup">启动预设</button>
+        </nav>
         <div class="config-sections">
-          <section class="config-section">
+          <section id="config-lark" class="config-section config-panel active">
             <h2>飞书</h2>
+            <div class="lark-register">
+              <div>
+                <strong>扫码创建飞书应用</strong>
+                <p>无需公网和服务器。点击后用飞书扫码确认，本地会自动取回 App ID、App Secret 和 open_id。</p>
+              </div>
+              <button id="lark-register-start" type="button">扫码配置</button>
+            </div>
+            <div id="lark-register-panel" class="lark-register-panel hidden" hidden>
+              <div class="lark-register-qr">
+                <img id="lark-register-qr" alt="飞书应用创建二维码">
+              </div>
+              <div class="lark-register-info">
+                <div class="lark-register-status" id="lark-register-status">等待扫码确认...</div>
+                <div class="lark-register-code">用户码：<strong id="lark-register-code"></strong></div>
+                <a id="lark-register-link" target="_blank" rel="noreferrer">打不开二维码时，点击这里打开确认页面</a>
+                <p>扫码成功后会自动填入下方配置。确认后点击 Save 保存。</p>
+              </div>
+            </div>
             <div class="config-grid">
               <label><span>App ID</span><input id="cfg-lark-app-id"></label>
               <label><span>App Secret</span><input id="cfg-lark-app-secret" type="password"></label>
               <label><span>通知接收 ID</span><input id="cfg-lark-receive-id"></label>
               <label><span>默认会话名</span><input id="cfg-lark-default-session-name"></label>
+              <label><span>群聊前缀</span><input id="cfg-lark-session-chat-prefix"></label>
             </div>
             <label class="config-check"><input id="cfg-lark-mention-enabled" type="checkbox"><span>主通知卡片 @ 接收人</span></label>
+            <div class="lark-test">
+              <button id="lark-test-start" type="button">测试飞书配置</button>
+              <div id="lark-test-result" class="lark-test-result" aria-live="polite"></div>
+            </div>
           </section>
-          <section class="config-section">
+          <section id="config-notify" class="config-section config-panel">
             <h2>等待与通知</h2>
             <div class="config-grid">
-              <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="50"></label>
-              <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="50"></label>
-              <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="10"></label>
+              <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="1"></label>
+              <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="1"></label>
+              <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="1"></label>
             </div>
-            <label class="config-wide">
-              <span>通知过滤正则，每行一个</span>
-              <textarea id="cfg-drop-patterns" rows="4"></textarea>
-            </label>
+            <div class="drop-rule-editor">
+              <div>
+                <strong>通知过滤正则</strong>
+                <p>每条规则包含标题和正则表达式。匹配到的输出行不会出现在通知里。</p>
+              </div>
+              <div id="drop-rule-list" class="drop-rule-list"></div>
+              <button id="drop-rule-add" type="button">添加过滤规则</button>
+            </div>
+            <textarea id="cfg-drop-patterns" class="hidden" hidden spellcheck="false"></textarea>
+            <div class="custom-shortcut-editor">
+              <div>
+                <strong>飞书自定义快捷键</strong>
+                <p>显示在系统快捷键下一行。点击后会把对应指令提交到当前会话。</p>
+              </div>
+              <div id="custom-shortcut-list" class="custom-shortcut-list"></div>
+              <button id="custom-shortcut-add" type="button">添加快捷键</button>
+            </div>
+            <textarea id="cfg-lark-custom-shortcuts" class="hidden" hidden spellcheck="false"></textarea>
           </section>
-          <section class="config-section">
-            <h2>启动</h2>
-            <label class="config-wide">
-              <span>会话启动前命令</span>
-              <textarea id="cfg-prestart-command" rows="2"></textarea>
-            </label>
-            <label class="config-wide">
-              <span>按会话名匹配的启动预设(JSON)</span>
-              <textarea id="cfg-session-name-presets" rows="8" spellcheck="false"></textarea>
-            </label>
-            <label class="config-wide">
-              <span>按开始命令后缀匹配的启动预设(JSON)</span>
-              <textarea id="cfg-session-start-presets" rows="8" spellcheck="false"></textarea>
-            </label>
+          <section id="config-startup" class="config-section config-panel">
+            <div class="section-title-row">
+              <h2>启动</h2>
+              <button id="startup-json-toggle" type="button">查看启动配置 JSON</button>
+            </div>
+            <textarea id="startup-json-preview" class="preset-json-preview hidden" rows="10" spellcheck="false" hidden></textarea>
+            <div class="agent-preset">
+              <div>
+                <strong>当前常用 Agent</strong>
+                <p>选择后会检查“默认会话名”是否已有预设；已有则不覆盖，没有则自动补一条在当前目录启动 Agent 的预设。</p>
+              </div>
+              <div class="agent-preset-controls">
+                <select id="cfg-agent-preset">
+                  <option value="">选择常用 Agent</option>
+                  <option value="codex">Codex</option>
+                  <option value="claude">Claude Code</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="custom">自定义命令</option>
+                </select>
+                <input id="cfg-agent-custom-command" placeholder="agent command">
+              </div>
+              <div id="agent-preset-status" class="agent-preset-status" aria-live="polite"></div>
+            </div>
+            <div class="startup-command-editor">
+              <div>
+                <strong>会话启动前命令</strong>
+                <p>每个新终端会话创建后都会先执行这里的命令。每条命令单独一行，可逐条添加或删除。</p>
+              </div>
+              <div id="prestart-command-list" class="preset-command-list"></div>
+              <button id="prestart-command-add" type="button">添加一行</button>
+            </div>
+            <div class="name-preset-editor">
+              <div>
+                <strong>会话名预设</strong>
+                <p>为不同会话名配置启动命令。每个会话名下面可以有多条命令，飞书发送“开始 会话名”时会按顺序执行。</p>
+              </div>
+              <div class="name-preset-form">
+                <label><span>会话名</span><input id="preset-session-name" placeholder="例如：临时"></label>
+                <div class="name-preset-actions">
+                  <button id="preset-save" type="button">添加会话名</button>
+                  <button id="preset-clear" type="button">清空</button>
+                </div>
+              </div>
+              <div id="preset-status" class="preset-status" aria-live="polite"></div>
+              <div id="preset-list" class="preset-list"></div>
+            </div>
+            <textarea id="cfg-prestart-command" class="hidden" hidden></textarea>
+            <textarea id="cfg-session-name-presets" class="hidden" hidden spellcheck="false"></textarea>
+            <textarea id="cfg-session-start-presets" class="hidden" hidden spellcheck="false"></textarea>
           </section>
         </div>
         <div id="config-error" class="config-error"></div>
@@ -98,6 +186,134 @@
           <button value="default">Save</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="help-dialog" class="help-dialog">
+      <div class="help-head">
+        <div>
+          <div class="dialog-title">使用说明</div>
+          <div class="config-subtitle">从创建会话到飞书联动的完整操作指南</div>
+        </div>
+        <button id="help-close" class="help-close" type="button" aria-label="关闭使用说明">×</button>
+      </div>
+      <div class="help-layout">
+        <nav class="help-nav" aria-label="说明章节">
+          <button class="help-tab active" type="button" data-help-target="help-start">快速开始</button>
+          <button class="help-tab" type="button" data-help-target="help-terminal">网页终端</button>
+          <button class="help-tab" type="button" data-help-target="help-lark">飞书联动</button>
+          <button class="help-tab" type="button" data-help-target="help-notify">推送机制</button>
+          <button class="help-tab" type="button" data-help-target="help-config">配置说明</button>
+          <button class="help-tab" type="button" data-help-target="help-files">图片与文件</button>
+          <button class="help-tab" type="button" data-help-target="help-trouble">常见问题</button>
+        </nav>
+        <div class="help-content">
+          <section id="help-start" class="help-panel active">
+            <h2>快速开始</h2>
+            <p>easy_terminal 是一个可以在浏览器和飞书里共同操作本机终端会话的工具。一个会话对应一个真实终端，网页端负责查看和输入，飞书端负责手机上的消息路由和等待通知。</p>
+            <div class="help-flow" aria-label="基本工作流">
+              <div><span>1</span><strong>完成配置</strong><small>首次进入会弹出引导，也可以点左下角齿轮打开配置。</small></div>
+              <div><span>2</span><strong>创建会话</strong><small>填写 Session name，点击 New Session。</small></div>
+              <div><span>3</span><strong>运行命令</strong><small>在终端直接输入，或用下方输入框发送长文本。</small></div>
+              <div><span>4</span><strong>继续处理</strong><small>终端进入 waiting 后，从网页或飞书继续同一个会话。</small></div>
+            </div>
+            <div class="help-callout">
+              <strong>推荐习惯</strong>
+              <p>短命令直接在黑色终端里输入；长提示、带换行的文字、说明性任务放到下方输入框再发送。</p>
+            </div>
+          </section>
+          <section id="help-terminal" class="help-panel">
+            <h2>网页终端</h2>
+            <div class="help-grid">
+              <article><h3>会话列表</h3><p>左侧只显示当前活跃会话。点击会话卡片即可切换；不再保留已退出或失败的历史会话。</p></article>
+              <article><h3>终端区域</h3><p>黑色区域是 xterm 终端，支持常规键盘输入、复制粘贴、方向键和 TUI 程序操作。</p></article>
+              <article><h3>下方输入框</h3><p>适合发送多行文本。点击 Send 或按 Command/Ctrl + Enter，会把内容提交给终端并自动回车。</p></article>
+              <article><h3>快速命令</h3><p>下方横向命令条可以保存常用命令。点击 + 添加，点击命令片段会填入输入框，点击 × 删除。</p></article>
+            </div>
+          </section>
+          <section id="help-lark" class="help-panel">
+            <h2>飞书联动</h2>
+            <p>配置飞书应用后，可以通过机器人消息创建和继续终端会话。系统会为会话创建独立群聊，群名由“群聊前缀 + 会话名”组成。</p>
+            <div class="help-steps">
+              <p><strong>开始 会话名</strong>：创建一个会话，并按会话名匹配启动预设。</p>
+              <p><strong>开始 会话名 1</strong>：创建会话，并执行会话名后面数字对应的启动预设。</p>
+              <p><strong>直接在会话群聊发消息</strong>：消息会路由到绑定的终端会话。</p>
+              <p><strong>回复等待通知</strong>：如果没有独立群聊，也可以通过回复通知继续对应会话。</p>
+              <p><strong>/c</strong>：不写入终端，直接在飞书里返回当前轮内容。</p>
+            </div>
+            <div class="help-callout">
+              <strong>等待通知怎么判断</strong>
+              <p>终端在一段时间内没有新的输出后，会被认为进入 waiting。快速等待适合普通命令，保守等待适合 Codex/TUI 等输出节奏更复杂的场景。</p>
+            </div>
+          </section>
+          <section id="help-notify" class="help-panel">
+            <h2>飞书推送机制</h2>
+            <div class="help-grid">
+              <article><h3>什么时候推送</h3><p>会话开启“通知”后，每次输入会把状态切回 running；终端输出稳定一段时间后进入 waiting。达到快速等待或保守等待时间后，系统会准备一条飞书等待通知。</p></article>
+              <article><h3>推到哪里</h3><p>如果会话绑定了独立群聊，通知发到该群聊；否则发到“通知接收 ID”对应的用户。独立群聊标题由“群聊前缀 + 会话名”组成，例如 ET · demo。</p></article>
+              <article><h3>消息标题</h3><p>通知卡片标题默认是会话名。用户回复后终端重新运行时，会把同一张卡片标题临时改成“会话名（Running）”；本轮再次进入 waiting 后恢复会话名。</p></article>
+              <article><h3>消息正文</h3><p>正文是当前轮终端内容，不是完整历史。系统优先使用浏览器里 xterm 的可见快照；没有可用页面时，会尝试启动 headless 浏览器打开该会话获取快照。</p></article>
+              <article><h3>锚点规则</h3><p>每次提交输入时会记录“上次输入文本”和“输入前的可见快照”。推送时优先从可见快照里找到这次输入的回显，只截取它后面的回复；找不到输入回显时，会用本轮原始输出作为兜底，避免把上一轮内容推出来。</p></article>
+              <article><h3>更新规则</h3><p>同一轮第一次 waiting 会新发主卡片；后续内容变化会 Patch 更新同一张卡片，并在卡片里追加“已更新-N”。每次内容更新后，还会回复一条极简提示卡片“已更新-N”，用于提醒用户有新内容；快捷键和“刷新消息”按钮会继续锚定当前卡片。</p></article>
+              <article><h3>快捷键</h3><p>系统快捷键固定显示在第一行。自定义快捷键显示在下一行，每个按钮对应一条配置的指令，点击后会提交到当前会话。</p></article>
+              <article><h3>内容清理</h3><p>推送前会清理终端控制字符、重复行、空白分隔、Codex/TUI 临时状态行，并按“通知过滤正则”删除匹配行。邮箱样式文本会被替换成 [email]。</p></article>
+              <article><h3>长度限制</h3><p>正文最多保留“通知最大行数”里的尾部内容，同时还有总字符保护。超过限制时会带 [truncated] 前缀，表示前面的内容已被裁剪。</p></article>
+            </div>
+          </section>
+          <section id="help-config" class="help-panel">
+            <h2>配置说明</h2>
+            <div class="help-table">
+              <div><strong>首次引导</strong><span>首次进入 Web 端会提示去配置；关闭后不会再次自动弹出，配置入口始终在左下角齿轮。</span></div>
+              <div><strong>扫码配置</strong><span>用飞书扫码创建应用，本地会自动填入 App ID、App Secret 和 open_id，保存后生效。</span></div>
+              <div><strong>测试飞书配置</strong><span>保存前可发送测试卡片，确认凭证和通知接收 ID 可用。</span></div>
+              <div><strong>App ID / App Secret</strong><span>飞书应用凭证，用于接收事件、发通知、创建群聊。</span></div>
+              <div><strong>通知接收 ID</strong><span>接收主通知的用户 open_id。</span></div>
+              <div><strong>默认会话名</strong><span>发送“开始”但没有写会话名时使用，默认是“临时”。</span></div>
+              <div><strong>群聊前缀</strong><span>新建飞书会话群的名称前缀，默认是“ET · ”。</span></div>
+              <div><strong>快速等待(ms)</strong><span>普通输出稳定后进入 waiting 的时间，默认 1000。</span></div>
+              <div><strong>保守等待(ms)</strong><span>复杂交互场景进入 waiting 的时间，默认 3000。</span></div>
+              <div><strong>通知最大行数</strong><span>飞书通知中最多保留多少行终端内容，默认 100。</span></div>
+              <div><strong>通知过滤正则</strong><span>每行一个正则，匹配到的输出行不会出现在通知里。</span></div>
+              <div><strong>飞书自定义快捷键</strong><span>配置按钮名称和指令。按钮会显示在系统快捷键下一行，点击后提交该指令。</span></div>
+              <div><strong>常用 Agent</strong><span>选择 Codex、Claude Code、OpenCode 或自定义命令后，会给默认会话名补一条启动预设。</span></div>
+              <div><strong>启动预设</strong><span>可以用可视化编辑器维护，也可以切到 JSON 查看和编辑。</span></div>
+            </div>
+          </section>
+          <section id="help-files" class="help-panel">
+            <h2>图片与文件</h2>
+            <div class="help-grid">
+              <article><h3>网页粘贴图片</h3><p>在终端区域粘贴图片，会上传到当前会话目录，并把图片路径写入终端。粘贴到下方输入框时，会把路径插入输入框。</p></article>
+              <article><h3>飞书图片</h3><p>从飞书发送图片时，图片会下载到 data/uploads/{session_id}/lark/，再把本地路径交给终端使用。</p></article>
+              <article><h3>路径用途</h3><p>路径是给本机命令或终端程序读取图片用的。如果要分析图片，可以在路径后补充“请分析这张图”。</p></article>
+              <article><h3>清理规则</h3><p>删除会话时，会同步删除该会话的上传目录。</p></article>
+              <article><h3>数据库辅助文件</h3><p>easy_terminal.db-wal 和 easy_terminal.db-shm 是 SQLite 运行时文件。-wal 保存追加写入日志，-shm 保存共享索引和锁信息；服务运行时出现是正常的，不需要手动配置。</p></article>
+            </div>
+          </section>
+          <section id="help-trouble" class="help-panel">
+            <h2>常见问题</h2>
+            <div class="help-qa">
+              <article>
+                <h3>问题：配置保存时提示数值无效</h3>
+                <p><strong>解决：</strong>检查快速等待、保守等待、通知最大行数是否为空或小于 1。它们都是正整数，单位分别是毫秒和行数。</p>
+              </article>
+              <article>
+                <h3>问题：飞书发送消息后没有响应</h3>
+                <p><strong>解决：</strong>确认 App ID、App Secret、事件订阅、机器人权限和接收 ID 都已配置。修改飞书凭证后，建议重新打开飞书事件连接所在的服务进程。</p>
+              </article>
+              <article>
+                <h3>问题：飞书通知内容太长</h3>
+                <p><strong>解决：</strong>调小通知最大行数，或在“通知过滤正则”里加入噪声输出的匹配规则，每行一个正则。</p>
+              </article>
+              <article>
+                <h3>问题：终端尺寸或显示不正常</h3>
+                <p><strong>解决：</strong>刷新页面后重新选择会话。页面加载和窗口变化时会自动适配终端列数和行数。</p>
+              </article>
+              <article>
+                <h3>问题：粘贴图片后没有看到路径</h3>
+                <p><strong>解决：</strong>确认当前选中的是在线会话。粘贴到终端区域会把路径写入终端；粘贴到下方输入框会把路径插入输入框。</p>
+              </article>
+            </div>
+          </section>
+        </div>
+      </div>
     </dialog>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>

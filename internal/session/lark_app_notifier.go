@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -15,14 +16,16 @@ import (
 )
 
 type LarkAppNotifier struct {
-	appID     string
-	appSecret string
-	client    *lark.Client
-	receiveID string
-	mention   bool
-	tipMu     sync.Mutex
-	tipSent   map[string]map[int]bool
-	tipSender func(string, int) error
+	appID            string
+	appSecret        string
+	client           *lark.Client
+	receiveID        string
+	mention          bool
+	customShortcutMu sync.RWMutex
+	customShortcuts  []LarkCustomShortcut
+	tipMu            sync.Mutex
+	tipSent          map[string]map[int]bool
+	tipSender        func(string, string, int) error
 }
 
 func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkAppNotifier {
@@ -43,11 +46,28 @@ func (n *LarkAppNotifier) Available() bool {
 	return n != nil && n.client != nil
 }
 
+func (n *LarkAppNotifier) SetCustomShortcuts(shortcuts []LarkCustomShortcut) {
+	if n == nil {
+		return
+	}
+	n.customShortcutMu.Lock()
+	defer n.customShortcutMu.Unlock()
+	n.customShortcuts = normalizeLarkCustomShortcuts(shortcuts)
+}
+
+func (n *LarkAppNotifier) customShortcutSnapshot() []LarkCustomShortcut {
+	n.customShortcutMu.RLock()
+	defer n.customShortcutMu.RUnlock()
+	cp := make([]LarkCustomShortcut, len(n.customShortcuts))
+	copy(cp, n.customShortcuts)
+	return cp
+}
+
 func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
 	if !n.Available() {
 		return WaitingNotificationResult{}, errors.New("lark notifier is not configured")
 	}
-	content, err := larkNotificationCardContent(note, n.receiveID, n.mention)
+	content, err := larkNotificationCardContent(note, n.receiveID, n.mention, n.customShortcutSnapshot()...)
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
@@ -57,27 +77,158 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotifi
 	return n.createWaiting(note, content)
 }
 
-func larkNotificationCardContent(note WaitingNotification, receiveID string, mention bool) (string, error) {
-	elements := []map[string]any{
-		{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": note.Content}},
-	}
-	if note.UpdateNo > 0 {
-		elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", note.UpdateNo)}}})
-	}
-	elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": note.SessionID}}})
+func larkNotificationCardContent(note WaitingNotification, receiveID string, mention bool, customShortcuts ...LarkCustomShortcut) (string, error) {
+	elements := []map[string]any{}
 	if mention {
-		elements = append([]map[string]any{{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": "<at id=" + receiveID + "></at>"}}}, elements...)
+		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + receiveID + "></at>"})
+	}
+	elements = append(elements, map[string]any{"tag": "markdown", "content": note.Content})
+	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
+	elements = append(elements, larkShortcutActionElement(note.SessionID))
+	if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
+		elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
 	}
 	card := map[string]any{
+		"schema": "2.0",
 		"config": map[string]any{"wide_screen_mode": true, "update_multi": true},
 		"header": map[string]any{
 			"template": "blue",
 			"title":    map[string]any{"tag": "plain_text", "content": larkNotificationTitle(note)},
 		},
-		"elements": elements,
+		"body": map[string]any{"elements": elements},
 	}
 	b, err := json.Marshal(card)
 	return string(b), err
+}
+
+func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomShortcut {
+	out := make([]LarkCustomShortcut, 0, len(shortcuts))
+	for _, shortcut := range shortcuts {
+		label := strings.TrimSpace(shortcut.Label)
+		command := strings.TrimSpace(shortcut.Command)
+		if label == "" || command == "" {
+			continue
+		}
+		out = append(out, LarkCustomShortcut{Label: label, Command: command})
+	}
+	return out
+}
+
+func larkShortcutActionElement(sessionID string) map[string]any {
+	return map[string]any{
+		"tag":                "column_set",
+		"flex_mode":          "none",
+		"horizontal_align":   "left",
+		"horizontal_spacing": "4px",
+		"columns": []map[string]any{
+			larkRefreshButtonColumn(sessionID),
+			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
+			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
+			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
+		},
+	}
+}
+
+func larkShortcutButtonColumn(label, buttonType, sessionID, key string) map[string]any {
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			larkShortcutButton(label, buttonType, sessionID, key),
+		},
+	}
+}
+
+func larkShortcutButton(label, buttonType, sessionID, key string) map[string]any {
+	return map[string]any{
+		"tag":   "button",
+		"type":  buttonType,
+		"size":  "tiny",
+		"width": "default",
+		"text":  map[string]any{"tag": "plain_text", "content": label},
+		"behaviors": []map[string]any{
+			{
+				"type": "callback",
+				"value": map[string]any{
+					"easy_terminal_action": "shortcut",
+					"session_id":           sessionID,
+					"key":                  key,
+				},
+			},
+		},
+	}
+}
+
+func larkRefreshButtonColumn(sessionID string) map[string]any {
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":   "button",
+				"type":  "primary",
+				"size":  "tiny",
+				"width": "default",
+				"text":  map[string]any{"tag": "plain_text", "content": "刷新消息"},
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "refresh",
+							"session_id":           sessionID,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func larkCustomShortcutActionElement(sessionID string, shortcuts []LarkCustomShortcut) map[string]any {
+	columns := make([]map[string]any, 0, len(shortcuts))
+	for _, shortcut := range shortcuts {
+		columns = append(columns, larkCustomShortcutButtonColumn(sessionID, shortcut))
+	}
+	return map[string]any{
+		"tag":                "column_set",
+		"flex_mode":          "none",
+		"horizontal_align":   "left",
+		"horizontal_spacing": "4px",
+		"columns":            columns,
+	}
+}
+
+func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcut) map[string]any {
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":              "interactive_container",
+				"width":            "auto",
+				"height":           "auto",
+				"background_style": "green",
+				"corner_radius":    "4px",
+				"padding":          "4px 8px",
+				"elements": []map[string]any{
+					{"tag": "markdown", "content": shortcut.Label},
+				},
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "custom_shortcut",
+							"session_id":           sessionID,
+							"command":              shortcut.Command,
+						},
+					},
+				},
+			},
+		},
+	}
 }
 
 func larkNotificationTitle(note WaitingNotification) string {
@@ -85,6 +236,17 @@ func larkNotificationTitle(note WaitingNotification) string {
 		return note.Name + "（Running）"
 	}
 	return note.Name
+}
+
+func larkNotificationStatusLine(note WaitingNotification) string {
+	prefix := ""
+	if note.UpdateNo > 0 {
+		prefix = fmt.Sprintf("已更新-%d · ", note.UpdateNo)
+	}
+	if note.Running {
+		return prefix + `状态：<font color="red">Running</font>`
+	}
+	return prefix + "状态：Not Running"
 }
 
 func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
@@ -156,8 +318,8 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 		return WaitingNotificationResult{}, fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	tipSent := false
-	if note.UpdateNo > 0 {
-		if err := n.sendUpdateTipOnce(note.MessageID, note.UpdateNo); err == nil {
+	if note.UpdateNo > 0 && !note.SuppressUpdateTip {
+		if err := n.sendUpdateTipOnce(note.MessageID, note.ChatID, note.UpdateNo); err == nil {
 			tipSent = true
 		}
 	}
@@ -170,7 +332,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 		return nil
 	}
 	note.Running = running
-	content, err := larkNotificationCardContent(note, n.receiveID, n.mention)
+	content, err := larkNotificationCardContent(note, n.receiveID, n.mention, n.customShortcutSnapshot()...)
 	if err != nil {
 		return err
 	}
@@ -191,7 +353,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) error {
+func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, updateNo int) error {
 	if messageID == "" || updateNo <= 0 {
 		return nil
 	}
@@ -214,7 +376,7 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) erro
 	if n.tipSender != nil {
 		send = n.tipSender
 	}
-	if err := send(messageID, updateNo); err != nil {
+	if err := send(messageID, chatID, updateNo); err != nil {
 		return err
 	}
 
@@ -229,28 +391,34 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, updateNo int) erro
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTip(messageID string, updateNo int) error {
-	if messageID == "" {
-		return nil
-	}
+func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateNo int) error {
 	content, err := larkUpdateTipCardContent(updateNo)
 	if err != nil {
 		return err
 	}
-	req := larkim.NewReplyMessageReqBuilder().
-		MessageId(messageID).
-		Body(larkim.NewReplyMessageReqBodyBuilder().
+	receiveID := strings.TrimSpace(chatID)
+	receiveIDType := "chat_id"
+	if receiveID == "" {
+		receiveID = strings.TrimSpace(n.receiveID)
+		receiveIDType = "open_id"
+	}
+	if receiveID == "" {
+		return nil
+	}
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(receiveIDType).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(receiveID).
 			MsgType("interactive").
 			Content(content).
-			ReplyInThread(false).
 			Build()).
 		Build()
-	resp, err := n.client.Im.V1.Message.Reply(context.Background(), req)
+	resp, err := n.client.Im.V1.Message.Create(context.Background(), req)
 	if err != nil {
 		return err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("lark update tip reply API returned code %d: %s", resp.Code, resp.Msg)
+		return fmt.Errorf("lark update tip message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
 }

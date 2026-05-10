@@ -80,6 +80,10 @@ try {
   await keydownComposer({ key: "Enter", metaKey: true, ctrlKey: false });
   await waitForOutput("BROWSER_CMD_ENTER_E2E");
 
+  await pasteImageIntoTerminal();
+  await waitForOutput("/data/uploads/");
+  await waitForOutput(".png");
+
   await openQuickDialogAndAdd("pwd");
   assert.equal(await evalExpr("document.querySelectorAll('.quick-chip').length"), 1, "quick command chip should be added");
   assert.equal(await evalExpr("document.querySelector('.quick-chip span').textContent"), "pwd", "quick command chip should display command text");
@@ -135,6 +139,33 @@ async function keydownComposer(event) {
       cancelable: true
     }));
     true
+  `);
+}
+
+async function pasteImageIntoTerminal() {
+  await evalExpr(`
+    (() => {
+      const png = Uint8Array.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+        0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41,
+        0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+        0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+        0x42, 0x60, 0x82
+      ]);
+      const file = new File([png], "paste.png", { type: "image/png" });
+      const data = new DataTransfer();
+      data.items.add(file);
+      document.querySelector("#terminal").dispatchEvent(new ClipboardEvent("paste", {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true
+      }));
+      return true;
+    })()
   `);
 }
 

@@ -50,6 +50,20 @@ func (r *LarkMessageRegistry) lookupChat(chatID string) (string, bool) {
 	return sessionID, ok
 }
 
+func (r *LarkMessageRegistry) forgetChat(chatID string, sessionID string) {
+	if chatID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.chatToSession == nil {
+		return
+	}
+	if current, ok := r.chatToSession[chatID]; ok && (sessionID == "" || current == sessionID) {
+		delete(r.chatToSession, chatID)
+	}
+}
+
 func (r *LarkMessageRegistry) lookup(messageIDs ...string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

@@ -15,8 +15,8 @@ import (
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
-	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
 
 type LarkReplyBridge struct {
@@ -24,12 +24,13 @@ type LarkReplyBridge struct {
 	appSecret               string
 	manager                 *Manager
 	apiClient               *lark.Client
-	wsClient                *larkws.Client
-	agent                   *CommandAgent
+	wsClient                *larkBridgeWSClient
 	uploadsDir              string
 	defaultStartSessionName string
+	sessionChatPrefix       string
 	startPresets            map[string]SessionStartPreset
 	namePresets             map[string]SessionStartPreset
+	customShortcuts         []LarkCustomShortcut
 	mu                      sync.Mutex
 	seenMessages            map[string]time.Time
 	pendingFiles            map[string][]pendingLarkAttachment
@@ -47,6 +48,7 @@ var structuredInputPostEnterCleanupDelay = 50 * time.Millisecond
 var structuredInputPostEnterCleanupSequence = "\x7f"
 
 const larkProcessingReactionEmoji = "THINKING"
+const defaultLarkSessionChatPrefix = "ET · "
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
@@ -61,10 +63,11 @@ type larkRouteContext struct {
 	SenderOpenID string
 }
 
-func NewLarkReplyBridge(appID, appSecret string, manager *Manager, agentCfg *CommandAgentConfig, uploadsDir string) *LarkReplyBridge {
+func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir string) *LarkReplyBridge {
 	b := &LarkReplyBridge{
-		appID: appID, appSecret: appSecret, manager: manager, agent: NewCommandAgent(agentCfg), uploadsDir: uploadsDir,
-		seenMessages: make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]string),
+		appID: appID, appSecret: appSecret, manager: manager, uploadsDir: uploadsDir,
+		sessionChatPrefix: defaultLarkSessionChatPrefix,
+		seenMessages:      make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]string),
 	}
 	if manager != nil {
 		manager.SetNotificationSentHook(b.OnNotificationSent)
@@ -92,10 +95,25 @@ func (b *LarkReplyBridge) SetNamePresets(presets map[string]SessionStartPreset) 
 	b.namePresets = copySessionStartPresets(presets)
 }
 
+func (b *LarkReplyBridge) SetCustomShortcuts(shortcuts []LarkCustomShortcut) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.customShortcuts = normalizeLarkCustomShortcuts(shortcuts)
+}
+
 func (b *LarkReplyBridge) SetDefaultStartSessionName(name string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.defaultStartSessionName = strings.TrimSpace(name)
+}
+
+func (b *LarkReplyBridge) SetSessionChatPrefix(prefix string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sessionChatPrefix = strings.TrimSpace(prefix)
+	if b.sessionChatPrefix == "" {
+		b.sessionChatPrefix = defaultLarkSessionChatPrefix
+	}
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -113,6 +131,9 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		OnP1MessageReceiveV1(func(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
 			return b.HandleP1MessageReceive(ctx, event)
 		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+			return b.HandleCardActionTrigger(ctx, event)
+		}).
 		OnP2MessageReactionCreatedV1(func(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
 			return nil
 		}).
@@ -125,9 +146,165 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		OnP1MessageReadV1(func(ctx context.Context, event *larkim.P1MessageReadV1) error {
 			return nil
 		})
-	b.wsClient = larkws.NewClient(b.appID, b.appSecret, larkws.WithEventHandler(handler))
+	b.wsClient = newLarkBridgeWSClient(b.appID, b.appSecret, handler, b.handleCardActionPayload)
 	log.Printf("lark reply bridge listening for incoming messages")
 	return b.wsClient.Start(ctx)
+}
+
+func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload []byte) (*callback.CardActionTriggerResponse, error) {
+	var event callback.CardActionTriggerEvent
+	if err := json.Unmarshal(payload, &event); err == nil && event.Event != nil {
+		return b.HandleCardActionTrigger(ctx, &event)
+	}
+	var action struct {
+		OpenMessageID string `json:"open_message_id"`
+		Action        *struct {
+			Value map[string]interface{} `json:"value"`
+		} `json:"action"`
+	}
+	if err := json.Unmarshal(payload, &action); err != nil {
+		return larkCardToast("warning", "无效操作"), nil
+	}
+	value := map[string]interface{}{}
+	if action.Action != nil {
+		value = action.Action.Value
+	}
+	return b.handleCardAction(ctx, value, action.OpenMessageID)
+}
+
+func (b *LarkReplyBridge) HandleCardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil || event.Event.Action == nil {
+		return larkCardToast("warning", "无效操作"), nil
+	}
+	value := event.Event.Action.Value
+	openMessageID := ""
+	if event.Event.Context != nil {
+		openMessageID = event.Event.Context.OpenMessageID
+	}
+	return b.handleCardAction(ctx, value, openMessageID)
+}
+
+func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	switch fmt.Sprint(value["easy_terminal_action"]) {
+	case "shortcut":
+		return b.handleCardShortcut(ctx, value, openMessageID)
+	case "custom_shortcut":
+		return b.handleCardCustomShortcut(ctx, value, openMessageID)
+	case "refresh":
+		return b.handleCardRefresh(ctx, value, openMessageID)
+	default:
+		return larkCardToast("warning", "未知操作"), nil
+	}
+}
+
+func (b *LarkReplyBridge) handleCardCustomShortcut(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
+	if sessionID == "" && openMessageID != "" {
+		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
+			sessionID = id
+		}
+	}
+	command := strings.TrimSpace(fmt.Sprint(value["command"]))
+	if command == "" {
+		return larkCardToast("warning", "指令为空"), nil
+	}
+	if sessionID == "" {
+		return larkCardToast("warning", "未找到会话"), nil
+	}
+	if b.manager == nil {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	rt, exists := b.manager.GetRuntime(sessionID)
+	if !exists {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	b.manager.EnsureBrowser(sessionID)
+	if err := SubmitStructuredInput(rt, command); err != nil {
+		return nil, err
+	}
+	rt.NotifyInputRunning()
+	log.Printf("lark card custom shortcut session=%s message=%s command_len=%d", sessionID, openMessageID, len(command))
+	return nil, nil
+}
+
+func (b *LarkReplyBridge) handleCardShortcut(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
+	if sessionID == "" && openMessageID != "" {
+		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
+			sessionID = id
+		}
+	}
+	key := strings.TrimSpace(fmt.Sprint(value["key"]))
+	seq, _, ok := larkShortcutInputSequence(key)
+	if !ok {
+		return larkCardToast("warning", "不支持的快捷键"), nil
+	}
+	if sessionID == "" {
+		return larkCardToast("warning", "未找到会话"), nil
+	}
+	if b.manager == nil {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	rt, exists := b.manager.GetRuntime(sessionID)
+	if !exists {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	if err := rt.WriteInput(seq); err != nil {
+		return nil, err
+	}
+	log.Printf("lark card shortcut action session=%s key=%s message=%s", sessionID, key, openMessageID)
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	rt.NotifyInputRunningOnMessage(openMessageID)
+	return nil, nil
+}
+
+func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
+	if sessionID == "" && openMessageID != "" {
+		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
+			sessionID = id
+		}
+	}
+	if sessionID == "" {
+		return larkCardToast("warning", "未找到会话"), nil
+	}
+	if b.manager == nil {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	rt, exists := b.manager.GetRuntime(sessionID)
+	if !exists {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	go func() {
+		if err := rt.RefreshNotificationMessage(openMessageID); err != nil {
+			log.Printf("lark card manual refresh failed session=%s message=%s: %v", sessionID, openMessageID, err)
+			return
+		}
+		log.Printf("lark card manual refresh session=%s message=%s", sessionID, openMessageID)
+	}()
+	return larkCardToast("info", "刷新成功"), nil
+}
+
+func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {
+	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: kind, Content: content}}
+}
+
+func larkShortcutInputSequence(key string) (string, string, bool) {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "ctrl_c", "ctrl-c", "control_c", "control-c":
+		return "\x03", "Ctrl-C", true
+	case "esc", "escape":
+		return "\x1b", "Esc", true
+	case "enter", "return":
+		return "\r", "Enter", true
+	default:
+		return "", "", false
+	}
 }
 
 func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -250,6 +427,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		}
 		b.clearPendingFiles(sessionID)
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		b.notifyInputRunning(sessionID)
 		return sessionID, nil
 	}
 	if name, presetCodes, ok := b.parseLarkStartCommand(text); ok {
@@ -263,6 +441,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 				log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
 			}
 			b.enqueuePipeline(s.ID, parts[1:])
+			b.notifyInputRunning(s.ID)
 		}
 		return s.ID, err
 	}
@@ -285,6 +464,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 			return sessionID, err
 		}
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		b.notifyInputRunning(sessionID)
 		return sessionID, nil
 	}
 	if isCurrentRoundCommand(text) {
@@ -327,19 +507,13 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		sessionID = s.ID
 		rt, _ = b.manager.GetRuntime(sessionID)
 	}
-	if strings.HasPrefix(text, "$") {
-		cmd, err := b.agent.Translate(ctx, strings.TrimSpace(strings.TrimPrefix(text, "$")))
-		if err != nil {
-			return sessionID, err
-		}
-		text = cmd
-	}
 	b.manager.EnsureBrowser(sessionID)
 	b.enqueuePipeline(sessionID, parts[1:])
 	if err := SubmitStructuredInput(rt, text); err != nil {
 		return sessionID, err
 	}
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+	b.notifyInputRunning(sessionID)
 	return sessionID, nil
 }
 
@@ -409,6 +583,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	}
 	b.clearPendingFiles(sessionID)
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+	b.notifyInputRunning(sessionID)
 	return sessionID, nil
 }
 
@@ -694,6 +869,18 @@ func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
 	if err := SubmitStructuredInput(rt, next); err != nil {
 		log.Printf("lark reply bridge failed to continue pipeline for %s: %v", sessionID, err)
 	}
+	rt.NotifyInputRunning()
+}
+
+func (b *LarkReplyBridge) notifyInputRunning(sessionID string) {
+	if b == nil || b.manager == nil || sessionID == "" {
+		return
+	}
+	rt, ok := b.manager.GetRuntime(sessionID)
+	if !ok {
+		return
+	}
+	rt.NotifyInputRunning()
 }
 
 func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string) {
@@ -801,7 +988,7 @@ func (b *LarkReplyBridge) createLarkChat(ctx context.Context, sessionID, session
 	if b.apiClient == nil {
 		return "", nil
 	}
-	name := larkSessionChatName(sessionName)
+	name := b.larkSessionChatName(sessionName)
 	body := larkim.NewCreateChatReqBodyBuilder().
 		Name(name).
 		UserIdList([]string{ownerOpenID}).
@@ -813,7 +1000,7 @@ func (b *LarkReplyBridge) createLarkChat(ctx context.Context, sessionID, session
 		Build()
 	req := larkim.NewCreateChatReqBuilder().
 		UserIdType("open_id").
-		Uuid("easy-terminal-" + sessionID).
+		Uuid(larkCreateChatUUID(sessionID)).
 		Body(body).
 		Build()
 	resp, err := b.apiClient.Im.V1.Chat.Create(ctx, req)
@@ -829,12 +1016,21 @@ func (b *LarkReplyBridge) createLarkChat(ctx context.Context, sessionID, session
 	return *resp.Data.ChatId, nil
 }
 
-func larkSessionChatName(sessionName string) string {
+func larkCreateChatUUID(sessionID string) string {
+	return fmt.Sprintf("easy-terminal-%s-%d", strings.TrimSpace(sessionID), time.Now().UnixNano())
+}
+
+func (b *LarkReplyBridge) larkSessionChatName(sessionName string) string {
 	sessionName = strings.TrimSpace(sessionName)
 	if sessionName == "" {
 		sessionName = "session"
 	}
-	const prefix = "ET · "
+	b.mu.Lock()
+	prefix := b.sessionChatPrefix
+	b.mu.Unlock()
+	if strings.TrimSpace(prefix) == "" {
+		prefix = defaultLarkSessionChatPrefix
+	}
 	rs := []rune(sessionName)
 	if len(rs) > 40 {
 		sessionName = string(rs[:40])
@@ -906,7 +1102,11 @@ func (b *LarkReplyBridge) duplicate(messageID string) bool {
 
 func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, rootID, chatID, chatType string) string {
 	if id, ok := defaultLarkMessageRegistry.lookupChat(chatID); ok {
-		return id
+		if b.sessionIsActive(ctx, id) {
+			return id
+		}
+		defaultLarkMessageRegistry.forgetChat(chatID, id)
+		log.Printf("lark reply bridge ignored stale chat route chat=%s session=%s", chatID, id)
 	}
 	if b.manager != nil && chatID != "" {
 		if s, ok, err := b.manager.FindSessionByLarkChatID(ctx, chatID); err == nil && ok && s.Live && s.Status != StatusExited && s.Status != StatusFailed {
@@ -924,6 +1124,14 @@ func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, 
 		return ""
 	}
 	return defaultLarkMessageRegistry.latestNotifiedSessionID()
+}
+
+func (b *LarkReplyBridge) sessionIsActive(ctx context.Context, sessionID string) bool {
+	if b == nil || b.manager == nil || sessionID == "" {
+		return false
+	}
+	s, ok, err := b.manager.GetSession(ctx, sessionID)
+	return err == nil && ok && s.Live && s.Status != StatusExited && s.Status != StatusFailed
 }
 
 func larkSenderOpenID(sender *larkim.EventSender) string {

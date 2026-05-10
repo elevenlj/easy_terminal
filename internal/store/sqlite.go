@@ -178,8 +178,20 @@ func (s *SQLite) Output(ctx context.Context, sessionID string) ([]byte, error) {
 	return out, rows.Err()
 }
 
-func (s *SQLite) MarkAllNonTerminalSessionsExited(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET status=?, live=0, updated_at=? WHERE status IN (?,?)`, session.StatusExited, time.Now().UTC(), session.StatusRunning, session.StatusWaiting)
+func (s *SQLite) DeleteAllSessions(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_output_chunks`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	err = tx.Commit()
 	return err
 }
 

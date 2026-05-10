@@ -37,14 +37,26 @@ func SetLarkNotifyMaxLines(lines int) {
 }
 
 func SetLarkNotifyDropLinePatterns(patterns []string) error {
-	compiled := make([]larkNotifyDropLinePattern, 0, len(patterns))
+	rules := make([]LarkNotifyDropLineRule, 0, len(patterns))
 	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
+		rules = append(rules, LarkNotifyDropLineRule{Pattern: pattern})
+	}
+	return SetLarkNotifyDropLineRules(rules)
+}
+
+func SetLarkNotifyDropLineRules(rules []LarkNotifyDropLineRule) error {
+	compiled := make([]larkNotifyDropLinePattern, 0, len(rules))
+	for _, rule := range rules {
+		pattern := strings.TrimSpace(rule.Pattern)
 		if pattern == "" {
 			continue
 		}
 		re, err := regexp.Compile(pattern)
 		if err != nil {
+			title := strings.TrimSpace(rule.Title)
+			if title != "" {
+				return fmt.Errorf("invalid lark notify drop line pattern %q (%s): %w", pattern, title, err)
+			}
 			return fmt.Errorf("invalid lark notify drop line pattern %q: %w", pattern, err)
 		}
 		compiled = append(compiled, larkNotifyDropLinePattern{re: re})

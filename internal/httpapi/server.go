@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -19,14 +20,25 @@ import (
 var staticFiles embed.FS
 
 type Server struct {
-	manager    *session.Manager
-	uploadsDir string
-	config     ConfigService
-	mux        *http.ServeMux
+	manager             *session.Manager
+	uploadsDir          string
+	config              ConfigService
+	larkAppRegistration interface {
+		Begin(context.Context, string) (LarkAppRegistrationBegin, error)
+		Poll(context.Context, string, string) (LarkAppRegistrationResult, error)
+	}
+	larkConfigTester LarkConfigTester
+	mux              *http.ServeMux
 }
 
 func NewServer(manager *session.Manager, uploadsDir string, config ...ConfigService) *Server {
-	s := &Server{manager: manager, uploadsDir: uploadsDir, mux: http.NewServeMux()}
+	s := &Server{
+		manager:             manager,
+		uploadsDir:          uploadsDir,
+		larkAppRegistration: newLarkAppRegistrationClient(),
+		larkConfigTester:    realLarkConfigTester{},
+		mux:                 http.NewServeMux(),
+	}
 	if len(config) > 0 {
 		s.config = config[0]
 	}
@@ -43,6 +55,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/quick-commands", s.handleQuickCommands)
 	s.mux.HandleFunc("/api/quick-commands/", s.handleQuickCommandByID)
 	s.mux.HandleFunc("/api/config", s.handleConfig)
+	s.mux.HandleFunc("/api/config/lark-test", s.handleLarkConfigTest)
+	s.mux.HandleFunc("/api/lark-app-registration", s.handleLarkAppRegistration)
+	s.mux.HandleFunc("/api/lark-app-registration/poll", s.handleLarkAppRegistrationPoll)
+	s.mux.HandleFunc("/api/lark-app-registration/qr", s.handleLarkAppRegistrationQR)
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
@@ -130,21 +146,6 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
-	case "finish":
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		ok, err := s.manager.MarkFinished(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
 	case "output":
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)

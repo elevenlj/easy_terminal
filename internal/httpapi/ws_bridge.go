@@ -65,6 +65,8 @@ func (b *wsBridge) readClient() {
 			if len(filtered) > 0 {
 				_ = b.rt.WriteInput(string(filtered))
 			}
+		case "submit":
+			_ = session.SubmitStructuredInput(b.rt, msg.Data)
 		case "resize":
 			_ = b.rt.Resize(msg.Cols, msg.Rows)
 		case "snapshot":

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -52,7 +53,7 @@ func TestLarkReplyBridgeAddsProcessingReactionForP2Message(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var reactions []string
 	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
 		reactions = append(reactions, messageID+":"+emoji)
@@ -77,7 +78,7 @@ func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.addReaction = func(context.Context, string, string) error {
 		return errors.New("missing reaction permission")
 	}
@@ -97,7 +98,7 @@ func TestLarkReplyBridgeStartCreatesDedicatedChat(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.createChat = func(_ context.Context, sessionID, name, ownerOpenID string) (string, error) {
 		if sessionID != "sess-1" || name != "手机会话" || ownerOpenID != "ou-user" {
 			t.Fatalf("unexpected create chat args: session=%q name=%q owner=%q", sessionID, name, ownerOpenID)
@@ -129,11 +130,32 @@ func TestLarkReplyBridgeStartCreatesDedicatedChat(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeUsesConfiguredChatPrefix(t *testing.T) {
+	bridge := NewLarkReplyBridge("app", "secret", NewManager(nil, &recordingLauncher{}), t.TempDir())
+	bridge.SetSessionChatPrefix("DEV ·")
+
+	if got := bridge.larkSessionChatName("手机会话"); got != "DEV ·手机会话" {
+		t.Fatalf("chat name = %q", got)
+	}
+}
+
+func TestLarkCreateChatUUIDIsUniqueAcrossSameSessionID(t *testing.T) {
+	first := larkCreateChatUUID("sess-1")
+	time.Sleep(time.Nanosecond)
+	second := larkCreateChatUUID("sess-1")
+	if first == second {
+		t.Fatalf("chat create uuid should be unique across reused session ids, got %q", first)
+	}
+	if !strings.HasPrefix(first, "easy-terminal-sess-1-") || !strings.HasPrefix(second, "easy-terminal-sess-1-") {
+		t.Fatalf("unexpected chat create uuid format: %q %q", first, second)
+	}
+}
+
 func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	sess, err := manager.CreateSession(context.Background(), "A")
 	if err != nil {
 		t.Fatal(err)
@@ -154,11 +176,42 @@ func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeIgnoresStaleDedicatedChatRegistry(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-chat-a"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime not found")
+	}
+	rt.markTerminal(StatusExited, 0)
+	defaultLarkMessageRegistry.rememberChat("oc-chat-a", sess.ID)
+
+	err = bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-chat-stale", "", "", "text", `{"text":"pwd"}`, "group", "oc-chat-a", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); strings.Contains(got, "pwd\r") {
+		t.Fatalf("stale dedicated chat should not route to exited terminal, got %q", got)
+	}
+	if got, ok := defaultLarkMessageRegistry.lookupChat("oc-chat-a"); ok && got == sess.ID {
+		t.Fatalf("stale chat mapping should be cleared, got %q", got)
+	}
+}
+
 func TestLarkReplyBridgeRoutesP1ByDedicatedChatID(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	sess, err := manager.CreateSession(context.Background(), "P1A")
 	if err != nil {
 		t.Fatal(err)
@@ -206,7 +259,7 @@ func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
 		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/lark-image.png"}, nil
 	}
@@ -341,7 +394,7 @@ func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	paths := map[string]string{"img_a": "/tmp/a.png", "img_b": "/tmp/b.png"}
 	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
 		return pendingLarkAttachment{Kind: ref.Kind, Path: paths[ref.Key]}, nil
@@ -369,7 +422,7 @@ func TestLarkReplyBridgeImageMessageWithTextSubmitsImmediately(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
 		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/a.png"}, nil
 	}
@@ -395,7 +448,7 @@ func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) 
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	paths := map[string]string{"old_img": "/tmp/old.png", "new_img": "/tmp/new.png"}
 	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
 		return pendingLarkAttachment{Kind: ref.Kind, Path: paths[ref.Key]}, nil
@@ -425,7 +478,7 @@ func TestLarkReplyBridgeFileWaitsForTextBeforeEnter(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.downloadFile = func(_ context.Context, _ string, _ string, ref larkAttachmentRef) (pendingLarkAttachment, error) {
 		return pendingLarkAttachment{Kind: ref.Kind, Path: "/tmp/report.pdf"}, nil
 	}
@@ -450,7 +503,7 @@ func TestLarkReplyBridgeIgnoresInteractiveCards(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-card", "", "", "interactive", `{"title":"测试","elements":[{"tag":"div"}]}`))
 	if err != nil {
@@ -465,7 +518,7 @@ func TestLarkReplyBridgeIgnoresNonUserSender(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithSender("m-app", "", "", "text", `{"text":"开始 测试"}`, "app"))
 	if err != nil {
@@ -486,7 +539,7 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 		defer browserMu.Unlock()
 		browserRequests = append(browserRequests, sessionID)
 	}))
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start", "", "", "text", `{"text":"开始 飞书会话"}`))
 	if err != nil {
@@ -522,11 +575,200 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 	waitForBrowserRequest(t, &browserMu, &browserRequests, "sess-1")
 }
 
+func TestLarkReplyBridgeFollowupCreatesRunningCard(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-running"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-running", "", "", "text", `{"text":"开始 Running会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow-running", "m-start-running", "", "text", `{"text":"echo from lark"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) == 0 {
+		t.Fatal("expected an immediate running card")
+	}
+	got := notes[len(notes)-1]
+	if got.Content != RunningNotificationPlaceholder || !got.Running {
+		t.Fatalf("running card = %#v", got)
+	}
+	if got.SessionID == "" {
+		t.Fatalf("running card should include session id: %#v", got)
+	}
+}
+
+func TestLarkReplyBridgeCardShortcutSendsCtrlC(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "shortcut",
+			"session_id":           sess.ID,
+			"key":                  "ctrl_c",
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != nil {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) == 0 || parts[len(parts)-1] != "\x03" {
+		t.Fatalf("shortcut should send Ctrl-C to terminal, got %#v", parts)
+	}
+	notes := notifier.notes()
+	if len(notes) != 0 {
+		t.Fatalf("shortcut should not overwrite clicked card with placeholder, got %#v", notes)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime not found")
+	}
+	if rt.lastNotifiedMessageID != "bot-card" {
+		t.Fatalf("shortcut should keep clicked card as notification anchor, got %q", rt.lastNotifiedMessageID)
+	}
+}
+
+func TestLarkReplyBridgeLegacyCardPayloadSendsCtrlC(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"open_message_id":"bot-card","action":{"value":{"easy_terminal_action":"shortcut","session_id":"` + sess.ID + `","key":"ctrl_c"}}}`)
+
+	resp, err := bridge.handleCardActionPayload(context.Background(), payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != nil {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) == 0 || parts[len(parts)-1] != "\x03" {
+		t.Fatalf("legacy card payload should send Ctrl-C to terminal, got %#v", parts)
+	}
+}
+
+func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := manager.GetRuntime(sess.ID)
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "refresh",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "刷新成功" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+		t.Fatalf("manual refresh should patch clicked card, got %#v", notes)
+	}
+}
+
+func waitForNotifierNotes(t *testing.T, notifier *recordingNotifier, want int) []WaitingNotification {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		notes := notifier.notes()
+		if len(notes) >= want {
+			return notes
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return notifier.notes()
+}
+
+func TestLarkReplyBridgeCardCustomShortcutSubmitsCommand(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "new-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "custom_shortcut",
+			"session_id":           sess.ID,
+			"command":              "git status",
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != nil {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	writes := launcher.terminals[0].writes()
+	if !strings.Contains(writes, "git status") {
+		t.Fatalf("custom shortcut should submit command, writes=%q", writes)
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].MessageID != "" || !notes[0].Running {
+		t.Fatalf("custom shortcut should create a new running card instead of updating clicked card, got %#v", notes)
+	}
+	if rt, ok := manager.GetRuntime(sess.ID); !ok || rt.lastInputText != "git status" {
+		t.Fatalf("custom shortcut should be recorded as user input, runtime=%v input=%q", ok, rt.lastInputText)
+	}
+}
+
 func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetStartPresets(map[string]SessionStartPreset{
 		"12": {Commands: []string{"mkdir -p {{session_name}}", "cd {{session_name}}", "codex"}},
 	})
@@ -557,7 +799,7 @@ func TestLarkReplyBridgeStartUsesConfiguredDefaultName(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetDefaultStartSessionName("临时")
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-default", "", "", "text", `{"text":"开始"}`)); err != nil {
@@ -576,7 +818,7 @@ func TestLarkReplyBridgeStartWithoutDefaultKeepsFallbackBehavior(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-no-default", "", "", "text", `{"text":"开始"}`)); err != nil {
 		t.Fatal(err)
@@ -598,7 +840,7 @@ func TestLarkReplyBridgeStartRunsNamePresetOnExactMatch(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
 		"会话 A": {Commands: []string{"cd sessions/a", "echo {{session_name_raw}}"}},
 	})
@@ -622,7 +864,7 @@ func TestLarkReplyBridgeStartNamePresetRequiresExactMatch(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
 		"会话 A": {Commands: []string{"cd sessions/a"}},
 	})
@@ -640,7 +882,7 @@ func TestLarkReplyBridgeStartRunsNamePresetBeforeCodePresets(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetNamePresets(map[string]SessionStartPreset{
 		"会话 A": {Commands: []string{"name-one", "name-two"}},
 	})
@@ -674,7 +916,7 @@ func TestLarkReplyBridgeStartRunsHyphenSeparatedPresetCodes(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetStartPresets(map[string]SessionStartPreset{
 		"1":   {Commands: []string{"one"}},
 		"23":  {Commands: []string{"twenty-three"}},
@@ -707,7 +949,7 @@ func TestLarkReplyBridgeStartPresetQuotesVariables(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetStartPresets(map[string]SessionStartPreset{
 		"1": {Commands: []string{"mkdir -p {{session_name}}", "echo {{session_name_raw}}"}},
 	})
@@ -731,7 +973,7 @@ func TestLarkReplyBridgePipelineRunsNextCommandAfterNotification(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-pipe", "", "", "text", `{"text":"开始 Pipe会话"}`)); err != nil {
 		t.Fatal(err)
@@ -793,7 +1035,7 @@ func TestLarkReplyBridgeStartPipelineWithFullWidthPipe(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-wide-pipe", "", "", "text", `{"text":"开始 测试 ｜ pwd"}`)); err != nil {
 		t.Fatal(err)
@@ -820,7 +1062,7 @@ func TestLarkReplyBridgeRoutesP1Start(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var reactions []string
 	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
 		reactions = append(reactions, messageID+":"+emoji)
@@ -855,7 +1097,7 @@ func TestLarkReplyBridgeFallbackSessionEnablesNotifications(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-fallback", "", "", "text", `{"text":"echo no explicit session"}`)); err != nil {
 		t.Fatal(err)
@@ -873,7 +1115,7 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var replies []string
 	bridge.replyText = func(_ context.Context, messageID string, text string) error {
 		replies = append(replies, messageID+":"+text)
@@ -912,7 +1154,7 @@ func TestLarkReplyBridgeStopCommandSendsCtrlC(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-stop", "", "", "text", `{"text":"开始 Stop会话"}`)); err != nil {
 		t.Fatal(err)
@@ -933,7 +1175,7 @@ func TestLarkReplyBridgeStopCommandWithoutSessionDoesNotCreateTerminal(t *testin
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var reply string
 	bridge.replyText = func(_ context.Context, _ string, text string) error {
 		reply = text
@@ -955,7 +1197,7 @@ func TestLarkReplyBridgeCurrentRoundCommandUsesRepliedNotificationSession(t *tes
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var reply string
 	bridge.replyText = func(_ context.Context, _ string, text string) error {
 		reply = text
@@ -995,7 +1237,7 @@ func TestLarkReplyBridgeCurrentRoundCommandWithoutSessionDoesNotCreateTerminal(t
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
-	bridge := NewLarkReplyBridge("app", "secret", manager, &CommandAgentConfig{}, t.TempDir())
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	var reply string
 	bridge.replyText = func(_ context.Context, _ string, text string) error {
 		reply = text

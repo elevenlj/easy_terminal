@@ -1,5 +1,4 @@
 conf/config.local.json
-conf/command_agent.json
 data/
 log/
 easy_terminal
@@ -7,3 +6,7 @@ easy_terminal.db
 *.db
 *.db-wal
 *.db-shm
+promo/*.mp4
+promo/*.wav
+promo/*.png
+promo/slides/

@@ -13,6 +13,7 @@ class FakeElement {
     this.className = "";
     this.title = "";
     this.type = "";
+    this.dataset = {};
     this.onclick = null;
     this.onchange = null;
     this.oninput = null;
@@ -20,6 +21,35 @@ class FakeElement {
     this.onsubmit = null;
     this.parent = null;
     this._bySelector = new Map();
+    this._listeners = new Map();
+    this._hidden = false;
+    this.classList = {
+      add: (name) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        classes.add(name);
+        if (name === "hidden") this.hidden = true;
+        this.className = [...classes].join(" ");
+      },
+      remove: (name) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        classes.delete(name);
+        if (name === "hidden") this.hidden = false;
+        this.className = [...classes].join(" ");
+      },
+      toggle: (name, force) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+      const enabled = force === undefined ? !classes.has(name) : Boolean(force);
+        if (enabled) {
+          classes.add(name);
+          if (name === "hidden") this.hidden = true;
+        } else {
+          classes.delete(name);
+          if (name === "hidden") this.hidden = false;
+        }
+        this.className = [...classes].join(" ");
+        return enabled;
+      },
+    };
   }
 
   set innerHTML(value) {
@@ -31,7 +61,6 @@ class FakeElement {
         ".session-name",
         ".notify-input",
         ".notify-state",
-        ".finish-btn",
         ".delete-btn",
         ".notify-row",
         ".start-btn",
@@ -48,20 +77,65 @@ class FakeElement {
       this._bySelector.set("span", span);
       this._bySelector.set(".chip-close", close);
     }
+    if (value.includes("<strong")) {
+      this._bySelector.set("strong", new FakeElement("", "strong"));
+      this._bySelector.set("span", new FakeElement("", "span"));
+    }
+    if (value.includes("<code")) {
+      this._bySelector.set("code", new FakeElement("", "code"));
+    }
+    if (value.includes("preset-edit")) {
+      this._bySelector.set(".preset-edit", new FakeElement("", "button"));
+      this._bySelector.set(".preset-delete", new FakeElement("", "button"));
+    }
+    if (value.includes("preset-command-input")) {
+      const input = new FakeElement("", "input");
+      input.className = "preset-command-input";
+      const remove = new FakeElement("", "button");
+      remove.className = "preset-command-remove";
+      this._bySelector.set(".preset-command-input", input);
+      this._bySelector.set(".preset-command-remove", remove);
+    }
   }
 
   get innerHTML() {
     return this._innerHTML || "";
   }
 
+  set hidden(value) {
+    this._hidden = Boolean(value);
+  }
+
+  get hidden() {
+    return Boolean(this._hidden);
+  }
+
   querySelector(selector) {
     return this._bySelector.get(selector) || null;
+  }
+
+  querySelectorAll(selector) {
+    const out = [];
+    const visit = (node) => {
+      if (selector.startsWith(".") && node.className.split(/\s+/).includes(selector.slice(1))) out.push(node);
+      for (const child of node.children || []) visit(child);
+      for (const child of node._bySelector?.values?.() || []) visit(child);
+    };
+    visit(this);
+    return out;
   }
 
   appendChild(child) {
     child.parent = this;
     this.children.push(child);
     return child;
+  }
+
+  remove() {
+    if (!this.parent) return;
+    const index = this.parent.children.indexOf(this);
+    if (index >= 0) this.parent.children.splice(index, 1);
+    this.parent = null;
   }
 
   focus() {
@@ -83,6 +157,19 @@ class FakeElement {
   close() {
     this.open = false;
   }
+
+  addEventListener(type, listener) {
+    const listeners = this._listeners.get(type) || [];
+    listeners.push(listener);
+    this._listeners.set(type, listeners);
+  }
+
+  async dispatchEvent(event) {
+    event.target ||= this;
+    for (const listener of this._listeners.get(event.type) || []) {
+      await listener(event);
+    }
+  }
 }
 
 const ids = [
@@ -93,16 +180,29 @@ const ids = [
   "new-session",
   "session-name",
   "session-search",
-  "show-ended",
   "quick-form",
   "quick-text",
   "quick-dialog",
   "quick-cancel",
+  "onboarding-dialog",
+  "onboarding-config",
+  "onboarding-later",
   "config-open",
   "config-dialog",
   "config-form",
   "config-cancel",
   "config-error",
+  "help-open",
+  "help-dialog",
+  "help-close",
+  "lark-register-start",
+  "lark-register-panel",
+  "lark-register-status",
+  "lark-register-code",
+  "lark-register-link",
+  "lark-register-qr",
+  "lark-test-start",
+  "lark-test-result",
   "cfg-fast-waiting",
   "cfg-conservative-waiting",
   "cfg-lark-max-lines",
@@ -110,18 +210,61 @@ const ids = [
   "cfg-lark-app-secret",
   "cfg-lark-receive-id",
   "cfg-lark-default-session-name",
+  "cfg-lark-session-chat-prefix",
   "cfg-lark-mention-enabled",
   "cfg-prestart-command",
   "cfg-drop-patterns",
+  "drop-rule-list",
+  "drop-rule-add",
+  "cfg-lark-custom-shortcuts",
+  "custom-shortcut-list",
+  "custom-shortcut-add",
   "cfg-session-name-presets",
   "cfg-session-start-presets",
+  "cfg-agent-preset",
+  "cfg-agent-custom-command",
+  "agent-preset-status",
+  "preset-session-name",
+  "preset-save",
+  "preset-clear",
+  "preset-status",
+  "preset-list",
+  "prestart-command-list",
+  "prestart-command-add",
+  "startup-json-toggle",
+  "startup-json-preview",
   "active-title",
   "terminal",
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement(id)]));
+elements["lark-register-panel"].hidden = true;
+elements["startup-json-preview"].hidden = true;
+const helpTabs = ["help-start", "help-terminal"].map((targetID, index) => {
+  const tab = new FakeElement("", "button");
+  tab.dataset.helpTarget = targetID;
+  tab.className = index === 0 ? "help-tab active" : "help-tab";
+  return tab;
+});
+const configTabs = ["config-lark", "config-notify", "config-startup"].map((targetID, index) => {
+  const tab = new FakeElement("", "button");
+  tab.dataset.configTarget = targetID;
+  tab.className = index === 0 ? "config-tab active" : "config-tab";
+  return tab;
+});
+const configPanels = ["config-lark", "config-notify", "config-startup"].map((id, index) => {
+  const panel = new FakeElement(id, "section");
+  panel.className = index === 0 ? "config-panel active" : "config-panel";
+  return panel;
+});
+const helpPanels = ["help-start", "help-terminal"].map((id, index) => {
+  const panel = new FakeElement(id, "section");
+  panel.className = index === 0 ? "help-panel active" : "help-panel";
+  return panel;
+});
 
 const fetchCalls = [];
 const sentMessages = [];
+const localStorageData = new Map();
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -133,7 +276,10 @@ const context = {
   clearTimeout,
   setTimeout,
   TextDecoder,
-  FormData: class {},
+  URLSearchParams,
+  FormData: class {
+    append() {}
+  },
   WebSocket: FakeWebSocket,
   Terminal: class {
     loadAddon() {}
@@ -155,11 +301,26 @@ const context = {
     createElement(tag) {
       return new FakeElement("", tag);
     },
+    querySelectorAll(selector) {
+      if (selector === ".help-tab") return helpTabs;
+      if (selector === ".help-panel") return helpPanels;
+      if (selector === ".config-tab") return configTabs;
+      if (selector === ".config-panel") return configPanels;
+      return [];
+    },
     addEventListener() {},
   },
   window: {
     addEventListener() {},
     removeEventListener() {},
+    localStorage: {
+      getItem(key) {
+        return localStorageData.get(key) || null;
+      },
+      setItem(key, value) {
+        localStorageData.set(key, String(value));
+      },
+    },
   },
   fetch: async (path, options = {}) => {
     fetchCalls.push({ path, options });
@@ -179,11 +340,35 @@ const context = {
         lark_notify_receive_id: "ou_1",
         lark_mention_enabled: true,
         lark_default_session_name: "临时",
+        lark_session_chat_prefix: "ET · ",
         session_pre_start_command: "",
         lark_notify_drop_line_patterns: [],
+        lark_custom_shortcuts: [],
         session_name_presets: {},
         session_start_presets: {},
       });
+    }
+    if (path === "/api/lark-app-registration" && options.method === "POST") {
+      return jsonResponse({
+        device_code: "dev-1",
+        user_code: "USER-1",
+        verification_uri_complete: "https://open.feishu.cn/page/cli?user_code=USER-1",
+        expires_in: 3600,
+        interval: 5,
+        brand: "feishu",
+      });
+    }
+    if (path === "/api/config/lark-test" && options.method === "POST") {
+      return jsonResponse({
+        ok: true,
+        steps: [
+          { name: "配置完整性", ok: true, message: "必填项已填写" },
+          { name: "发送测试通知", ok: true, message: "已发送" },
+        ],
+      });
+    }
+    if (path === "/api/sessions/sess-1/uploads" && options.method === "POST") {
+      return jsonResponse({ path: "/tmp/easy-terminal-test/paste.png" }, 201);
     }
     return jsonResponse({}, 200);
   },
@@ -206,6 +391,16 @@ await Promise.resolve();
 const app = context.window.easyTerminalApp;
 assert.ok(app, "app test API is exposed");
 
+app.maybeShowOnboarding();
+assert.equal(elements["onboarding-dialog"].open, true, "first visit should show onboarding");
+await Promise.resolve(elements["onboarding-config"].onclick());
+assert.equal(elements["onboarding-dialog"].open, false, "onboarding should close before opening config");
+assert.equal(elements["config-dialog"].open, true, "onboarding config action should open config dialog");
+assert.equal(localStorageData.get("easy_terminal.onboarding_seen.v1"), "1", "onboarding should be marked as seen");
+elements["config-dialog"].close();
+app.maybeShowOnboarding();
+assert.equal(elements["onboarding-dialog"].open, false, "seen onboarding should not reopen");
+
 app.state.active = "sess-1";
 app.state.socket = {
   readyState: FakeWebSocket.OPEN,
@@ -216,8 +411,23 @@ app.state.socket = {
 
 elements["composer-input"].value = "echo button";
 elements.composer.requestSubmit();
-assert.deepEqual(sentMessages.pop(), { type: "input", data: "echo button\r" });
+assert.deepEqual(sentMessages.pop(), { type: "submit", data: "echo button" });
 assert.equal(elements["composer-input"].value, "");
+
+elements["help-open"].onclick();
+assert.equal(elements["help-dialog"].open, true, "help dialog should open from topbar button");
+helpTabs[1].onclick();
+assert.ok(helpTabs[1].className.includes("active"), "clicked help tab should become active");
+assert.ok(helpPanels[1].className.includes("active"), "target help panel should become active");
+elements["help-close"].onclick();
+assert.equal(elements["help-dialog"].open, false, "help dialog should close");
+
+await Promise.resolve(elements["lark-register-start"].onclick());
+await Promise.resolve();
+assert.equal(elements["lark-register-panel"].hidden, false, "lark registration panel should show");
+assert.equal(elements["lark-register-code"].textContent, "USER-1");
+assert.equal(elements["lark-register-link"].href, "https://open.feishu.cn/page/cli?user_code=USER-1");
+assert.ok(elements["lark-register-qr"].src.includes("/api/lark-app-registration/qr?text="));
 
 elements["composer-input"].value = "line one";
 let prevented = false;
@@ -241,7 +451,28 @@ elements["composer-input"].onkeydown({
     prevented = true;
   },
 });
-assert.deepEqual(sentMessages.pop(), { type: "input", data: "echo command-enter\r" });
+assert.deepEqual(sentMessages.pop(), { type: "submit", data: "echo command-enter" });
+
+let pastePrevented = false;
+await elements.terminal.dispatchEvent({
+  type: "paste",
+  clipboardData: {
+    files: [],
+    items: [{
+      kind: "file",
+      type: "image/png",
+      getAsFile() {
+        return { name: "paste.png", type: "image/png" };
+      },
+    }],
+  },
+  preventDefault() {
+    pastePrevented = true;
+  },
+});
+await Promise.resolve();
+assert.equal(pastePrevented, true, "terminal image paste should prevent default paste handling");
+assert.deepEqual(sentMessages.pop(), { type: "input", data: "/tmp/easy-terminal-test/paste.png " });
 
 app.state.sessions = [{
   id: "sess-1",
@@ -268,11 +499,84 @@ elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-app-secret"].value = "new-secret";
 elements["cfg-lark-receive-id"].value = "ou_new";
 elements["cfg-lark-default-session-name"].value = "临时";
+elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-prestart-command"].value = "source ~/.zshrc";
-elements["cfg-drop-patterns"].value = "noise\ndebug";
+elements["drop-rule-add"].onclick();
+let dropRuleRow = elements["drop-rule-list"].children.find((node) => node.className === "drop-rule-row");
+dropRuleRow.children[0].value = "噪声";
+dropRuleRow.children[0].oninput();
+dropRuleRow.children[1].value = "noise";
+dropRuleRow.children[1].oninput();
+elements["drop-rule-add"].onclick();
+dropRuleRow = elements["drop-rule-list"].children.filter((node) => node.className === "drop-rule-row")[1];
+dropRuleRow.children[0].value = "调试";
+dropRuleRow.children[0].oninput();
+dropRuleRow.children[1].value = "debug";
+dropRuleRow.children[1].oninput();
+assert.deepEqual(JSON.parse(elements["cfg-drop-patterns"].value), [
+  { title: "噪声", pattern: "noise" },
+  { title: "调试", pattern: "debug" },
+], "drop rule editor should write JSON");
+elements["custom-shortcut-add"].onclick();
+const shortcutRow = elements["custom-shortcut-list"].children.find((node) => node.className === "custom-shortcut-row");
+shortcutRow.children[0].value = "状态";
+shortcutRow.children[0].oninput();
+shortcutRow.children[1].value = "git status";
+shortcutRow.children[1].oninput();
+assert.deepEqual(JSON.parse(elements["cfg-lark-custom-shortcuts"].value), [{ label: "状态", command: "git status" }], "custom shortcut editor should write JSON");
 elements["cfg-session-name-presets"].value = JSON.stringify({ "会话 A": { commands: ["pwd"] } });
 elements["cfg-session-start-presets"].value = JSON.stringify({ "1": { commands: ["codex"] } });
+app.renderNamePresets();
+assert.equal(elements["preset-list"].children.length, 1, "name preset list should mirror JSON");
+elements["prestart-command-list"].children[0].querySelector(".preset-command-input").value = "source ~/.zshrc";
+elements["prestart-command-list"].children[0].querySelector(".preset-command-input").oninput();
+assert.equal(elements["cfg-prestart-command"].value, "source ~/.zshrc", "prestart row editor should sync textarea");
+elements["preset-session-name"].value = "开发";
+app.saveNamePresetFromForm();
+let devPreset = elements["preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "开发");
+let devAddRow = devPreset.children.find((node) => node.className === "preset-command-add-row");
+devAddRow.children[0].value = "cd project/dev";
+devAddRow.children[1].onclick();
+devPreset = elements["preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "开发");
+devAddRow = devPreset.children.find((node) => node.className === "preset-command-add-row");
+devAddRow.children[0].value = "codex";
+devAddRow.children[1].onclick();
+let editedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
+assert.deepEqual(editedNamePresets["开发"], { commands: ["cd project/dev", "codex"] }, "visual preset editor should write JSON");
+elements["startup-json-toggle"].onclick();
+assert.equal(elements["startup-json-preview"].hidden, false, "json preview should open");
+assert.ok(elements["startup-json-preview"].value.includes('"开发"'), "json preview should show current presets");
+elements["startup-json-preview"].value = JSON.stringify({
+  session_pre_start_command: "source ~/.zshrc\nexport A=1",
+  session_name_presets: { "JSON会话": { commands: ["pwd"] } },
+  session_start_presets: { "2": { commands: ["opencode"] } },
+}, null, 2);
+elements["startup-json-preview"].oninput();
+assert.equal(elements["cfg-prestart-command"].value, "source ~/.zshrc\nexport A=1", "json editor should sync prestart command");
+assert.deepEqual(JSON.parse(elements["cfg-session-name-presets"].value), { "JSON会话": { commands: ["pwd"] } }, "json editor should sync name presets");
+assert.deepEqual(JSON.parse(elements["cfg-session-start-presets"].value), { "2": { commands: ["opencode"] } }, "json editor should sync start presets");
+elements["startup-json-preview"].value = "{";
+elements["startup-json-preview"].oninput();
+await assert.rejects(() => app.saveConfig(), /启动配置 JSON 格式不正确/, "invalid startup json should block save");
+elements["startup-json-preview"].value = JSON.stringify({
+  session_pre_start_command: "source ~/.zshrc",
+  session_name_presets: { "开发": { commands: ["cd project/dev", "codex"] } },
+  session_start_presets: { "1": { commands: ["codex"] } },
+}, null, 2);
+elements["startup-json-preview"].oninput();
+elements["cfg-agent-preset"].value = "codex";
+elements["cfg-agent-preset"].onchange();
+let generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
+assert.deepEqual(generatedNamePresets["临时"], { commands: ["codex"] }, "agent preset should generate default session name preset");
+elements["cfg-lark-default-session-name"].value = "Claude 会话";
+elements["cfg-agent-preset"].value = "claude";
+elements["cfg-agent-preset"].onchange();
+generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
+assert.deepEqual(generatedNamePresets["Claude 会话"], { commands: ["claude"] }, "claude preset should use claude command");
+await app.testLarkConfig();
+assert.ok(fetchCalls.some((call) => call.path === "/api/config/lark-test" && call.options.method === "POST"), "lark config test should POST /api/config/lark-test");
+assert.equal(elements["lark-test-result"].children.length, 2, "lark test result should render steps");
 await app.saveConfig();
 const configPatch = fetchCalls.find((call) => call.path === "/api/config" && call.options.method === "PATCH");
 assert.ok(configPatch, "config form should PATCH /api/config");
@@ -280,7 +584,12 @@ const patchedConfig = JSON.parse(configPatch.options.body);
 assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);
-assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, ["noise", "debug"]);
+assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");
+assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
+  { title: "噪声", pattern: "noise" },
+  { title: "调试", pattern: "debug" },
+]);
+assert.deepEqual(patchedConfig.lark_custom_shortcuts, [{ label: "状态", command: "git status" }]);
 assert.deepEqual(patchedConfig.session_start_presets, { "1": { commands: ["codex"] } });
 
 console.log("frontend e2e ok");

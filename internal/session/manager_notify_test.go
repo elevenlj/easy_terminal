@@ -1,11 +1,16 @@
 package session
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
 
 func TestWaitingNotificationRequiresReplyContent(t *testing.T) {
@@ -305,7 +310,7 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 	}
 }
 
-func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
+func TestOutputAfterNotificationPatchesRunningTitleOnWaitingToRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -322,19 +327,165 @@ func TestOutputAfterNotificationMarksSameRoundMessageRunning(t *testing.T) {
 	rt.notifyIfStillWaiting(version)
 	rt.HandleOutput([]byte("more output"))
 
-	running := notifier.runningNotes()
-	if len(running) != 1 {
-		t.Fatalf("expected one running marker update, got %#v", running)
-	}
-	if running[0].MessageID != "msg-1" || !running[0].Running || running[0].Name != "A" {
-		t.Fatalf("unexpected running marker note: %#v", running[0])
-	}
-	if running[0].Content != "> 今天天气怎么样\n• 你想查哪个城市的天气？" {
-		t.Fatalf("running marker should keep last notified content, got %q", running[0].Content)
+	running := waitForRunningNotes(t, notifier, 1)
+	if len(running) != 1 || running[0].MessageID != "msg-1" || !running[0].Running {
+		t.Fatalf("terminal output should patch the card title to running, got %#v", running)
 	}
 }
 
-func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
+func TestNotifyInputRunningUsesClickedMessageAnchorWithoutPlaceholderPatch(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+
+	rt.NotifyInputRunningOnMessage("bot-card")
+
+	notes := notifier.notes()
+	if len(notes) != 0 {
+		t.Fatalf("running card should not overwrite clicked message with placeholder, got %#v", notes)
+	}
+	if rt.lastNotifiedMessageID != "bot-card" {
+		t.Fatalf("runtime anchor = %q, want bot-card", rt.lastNotifiedMessageID)
+	}
+}
+
+func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.mu.Unlock()
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	if notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" || notes[0].Running {
+		t.Fatalf("manual refresh should patch clicked card with current round, got %#v", notes[0])
+	}
+}
+
+func TestRefreshNotificationMessagePreventsStaleRunningPlaceholderOverwrite(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	rt.notificationPatchMu.Lock()
+	runningDone := make(chan struct{})
+	go func() {
+		rt.NotifyInputRunningOnMessage("bot-card")
+		close(runningDone)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- rt.RefreshNotificationMessage("bot-card")
+	}()
+	time.Sleep(50 * time.Millisecond)
+	rt.notificationPatchMu.Unlock()
+
+	select {
+	case <-runningDone:
+	case <-time.After(time.Second):
+		t.Fatal("stale running update did not return")
+	}
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("refresh update did not return")
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("refresh should be the only card patch, got %#v", notes)
+	}
+	if notes[0].Content == RunningNotificationPlaceholder || notes[0].Content != "$ echo hello\nhello\n$" {
+		t.Fatalf("stale running placeholder should not overwrite refresh content, got %#v", notes[0])
+	}
+}
+
+func TestNotifyInputRunningDoesNotPatchExistingCard(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+		lastNotifiedContent:   "$ echo hello\nhello\n$",
+	}
+
+	rt.NotifyInputRunningOnMessage("bot-card")
+
+	notes := notifier.notes()
+	if len(notes) != 0 {
+		t.Fatalf("running update should not patch existing card, got %#v", notes)
+	}
+}
+
+func TestNotifyInputRunningDoesNotPatchExistingCardFromCurrentSnapshot(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.lastNotifiedMessageID = "bot-card"
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	rt.NotifyInputRunningOnMessage("bot-card")
+
+	notes := notifier.notes()
+	if len(notes) != 0 {
+		t.Fatalf("running update should not patch existing card from current snapshot, got %#v", notes)
+	}
+}
+
+func TestOutputPatchesRunningTitleFromCurrentRoundOnWaitingToRunning(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.lastNotifiedMessageID = "bot-card"
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.mu.Unlock()
+
+	rt.HandleOutput([]byte("still running\n"))
+
+	running := waitForRunningNotes(t, notifier, 1)
+	if len(running) != 1 || running[0].MessageID != "bot-card" || running[0].Content != "$ echo hello\nhello\n$" || !running[0].Running {
+		t.Fatalf("terminal output should patch current round title as running, got %#v", running)
+	}
+}
+
+func TestOutputAfterNotificationDoesNotPatchWhenAlreadyRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -355,11 +506,110 @@ func TestOutputAfterNotificationMarksRunningEvenIfAlreadyRunning(t *testing.T) {
 	rt.HandleOutput([]byte("more output"))
 
 	running := notifier.runningNotes()
-	if len(running) != 1 {
-		t.Fatalf("expected running marker even when session was already running, got %#v", running)
+	if len(running) != 0 {
+		t.Fatalf("running output should not re-patch card when session is already running, got %#v", running)
 	}
-	if running[0].MessageID != "msg-1" || !running[0].Running {
-		t.Fatalf("unexpected running marker note: %#v", running[0])
+}
+
+func TestManualRefreshAllowsWaitingToRunningTitleMarker(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.lastNotifiedMessageID = "bot-card"
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.mu.Unlock()
+	rt.HandleOutput([]byte("late output\n"))
+
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+		t.Fatalf("manual refresh should patch current content, got %#v", notes)
+	}
+	if running := waitForRunningNotes(t, notifier, 1); len(running) != 1 || running[0].MessageID != "bot-card" || !running[0].Running {
+		t.Fatalf("waiting-to-running output should patch running title after manual refresh, got %#v", running)
+	}
+}
+
+func TestManualRefreshWithConcurrentOutputPatchesRunningTitleAfterRefresh(t *testing.T) {
+	notifier := newBlockingRefreshNotifier("bot-card")
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+		lastNotifiedContent:   "$ echo hello\nhello\n$",
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.lastNotifiedMessageID = "bot-card"
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- rt.RefreshNotificationMessage("bot-card")
+	}()
+	select {
+	case <-notifier.notifyStarted:
+	case <-time.After(time.Second):
+		t.Fatal("manual refresh did not start")
+	}
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.mu.Unlock()
+	rt.HandleOutput([]byte("late output\n"))
+	close(notifier.releaseNotify)
+	select {
+	case err := <-refreshDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("manual refresh did not finish")
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+		t.Fatalf("manual refresh should patch current content, got %#v", notes)
+	}
+	if running := waitForBlockingRunningNotes(t, notifier, 1); len(running) != 1 || running[0].MessageID != "bot-card" || !running[0].Running {
+		t.Fatalf("concurrent waiting-to-running output should patch running title after refresh, got %#v", running)
+	}
+}
+
+func TestManualRefreshKeepsRunningStatus(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.lastNotifiedMessageID = "bot-card"
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	if !notes[0].Running {
+		t.Fatalf("manual refresh should keep running status, got %#v", notes[0])
+	}
+	if !rt.notificationRunning {
+		t.Fatalf("manual refresh should keep runtime notification state as running")
 	}
 }
 
@@ -397,7 +647,7 @@ func TestWaitingTransitionKeepsRunningTitleUntilFinalNotification(t *testing.T) 
 	}
 }
 
-func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
+func TestOutputDuringInFlightWaitingPatchPatchesRunningTitleAfterWaitingPatch(t *testing.T) {
 	notifier := newSequencingNotifier("msg-1")
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -434,8 +684,13 @@ func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	select {
 	case <-notifier.runningStarted:
-		t.Fatal("running title update should wait for in-flight waiting patch")
+		t.Fatal("terminal output should not patch running title")
 	default:
+	}
+	select {
+	case <-outputDone:
+	case <-time.After(time.Second):
+		t.Fatal("output handling should not wait for waiting patch")
 	}
 
 	close(notifier.releaseNotify)
@@ -447,20 +702,21 @@ func TestRunningTitleUpdateWaitsForInFlightWaitingPatch(t *testing.T) {
 	select {
 	case <-notifier.runningStarted:
 	case <-time.After(time.Second):
-		t.Fatal("running title update did not run after waiting patch")
+		t.Fatal("terminal output should patch running title after waiting patch")
 	}
+
 	select {
 	case <-outputDone:
 	case <-time.After(time.Second):
-		t.Fatal("output handling did not finish")
+		t.Fatal("output handling should finish after running title patch")
 	}
 
 	events := notifier.events()
 	if len(events) != 2 {
-		t.Fatalf("expected waiting patch then running patch, got %#v", events)
+		t.Fatalf("expected waiting patch then running title patch, got %#v", events)
 	}
 	if events[0] != "notify:false" || events[1] != "running:true" {
-		t.Fatalf("running title patch should happen after waiting patch, got %#v", events)
+		t.Fatalf("unexpected events: %#v", events)
 	}
 }
 
@@ -575,6 +831,9 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	if !strings.Contains(content, "已更新-2") {
 		t.Fatalf("card content should include update marker, got %s", content)
 	}
+	if !strings.Contains(content, "状态：Not Running") {
+		t.Fatalf("card content should include non-running status marker, got %s", content)
+	}
 }
 
 func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
@@ -589,6 +848,80 @@ func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	}
 	if !strings.Contains(content, "A（Running）") {
 		t.Fatalf("card content should include running title suffix, got %s", content)
+	}
+	if !strings.Contains(content, `状态：\u003cfont color=\"red\"\u003eRunning\u003c/font\u003e`) {
+		t.Fatalf("running card should include red running status text, got %s", content)
+	}
+	if !strings.Contains(content, `"template":"blue"`) || strings.Contains(content, `"background_style"`) {
+		t.Fatalf("running card should use default header and no body background, got %s", content)
+	}
+	stopped, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "done",
+		Running:   false,
+	}, "ou_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stopped, "状态：Not Running") || !strings.Contains(stopped, `"template":"blue"`) || strings.Contains(stopped, `"background_style"`) {
+		t.Fatalf("non-running card should use default header, no body background, and status text, got %s", stopped)
+	}
+}
+
+func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   RunningNotificationPlaceholder,
+		Running:   true,
+	}, "ou_1", false, LarkCustomShortcut{Label: "状态", Command: "git status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "Ctrl-C") || !strings.Contains(content, "ctrl_c") || !strings.Contains(content, "sess-1") {
+		t.Fatalf("card content should include shortcut buttons, got %s", content)
+	}
+	if strings.Contains(content, `"content":"sess-1"`) {
+		t.Fatalf("card content should not show session id as visible text, got %s", content)
+	}
+	if strings.Contains(content, "Ctrl-D") || strings.Contains(content, "ctrl_d") {
+		t.Fatalf("card content should not include Ctrl-D, got %s", content)
+	}
+	if !strings.Contains(content, "刷新消息") || !strings.Contains(content, `"easy_terminal_action":"refresh"`) {
+		t.Fatalf("card content should include manual refresh button, got %s", content)
+	}
+	if !(strings.Index(content, `"content":"刷新消息"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
+		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"Esc"`) &&
+		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
+		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"content":"状态"`)) {
+		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
+	}
+	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
+		t.Fatalf("card content should include custom shortcut row, got %s", content)
+	}
+	for _, label := range []string{"刷新消息", "Ctrl-C", "Esc", "Enter"} {
+		if !strings.Contains(content, `"content":"`+label+`"`) {
+			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
+		}
+	}
+	if strings.Count(content, `"type":"primary"`) < 4 {
+		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
+	}
+	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"background_style":"green"`) {
+		t.Fatalf("custom shortcut actions should use green clickable containers, got %s", content)
+	}
+	if strings.Contains(content, `"tag":"plain_text","content":"状态"`) {
+		t.Fatalf("custom shortcut container text should use a card-supported element, got %s", content)
+	}
+	if !strings.Contains(content, `"content":"状态"`) {
+		t.Fatalf("card content should include custom shortcut button, got %s", content)
+	}
+	if !strings.Contains(content, `"size":"tiny"`) {
+		t.Fatalf("card shortcut buttons should be small, got %s", content)
+	}
+	if !strings.Contains(content, `"schema":"2.0"`) || !strings.Contains(content, `"behaviors"`) || !strings.Contains(content, `"callback"`) {
+		t.Fatalf("card shortcut buttons should use card 2.0 callback behavior, got %s", content)
 	}
 }
 
@@ -611,25 +944,25 @@ func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
 func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
 	notifier := &LarkAppNotifier{}
 	var sent []string
-	notifier.tipSender = func(messageID string, updateNo int) error {
-		sent = append(sent, fmt.Sprintf("%s:%d", messageID, updateNo))
+	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
+		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
 		return nil
 	}
 
-	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-1", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-1", 2); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 2); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-2", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-2", "oc_2", 1); err != nil {
 		t.Fatal(err)
 	}
 
-	want := []string{"msg-1:1", "msg-1:2", "msg-2:1"}
+	want := []string{"msg-1:oc_1:1", "msg-1:oc_1:2", "msg-2:oc_2:1"}
 	if len(sent) != len(want) {
 		t.Fatalf("sent tips = %#v, want %#v", sent, want)
 	}
@@ -638,6 +971,79 @@ func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
 			t.Fatalf("sent tip %d = %q, want %q; all=%#v", i, sent[i], want[i], sent)
 		}
 	}
+}
+
+func TestLarkUpdateWaitingSendsUpdateTip(t *testing.T) {
+	notifier := &LarkAppNotifier{}
+	notifier.client = fakeLarkSuccessClient(t)
+	var sent []string
+	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
+		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
+		return nil
+	}
+
+	result, err := notifier.updateWaiting(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "updated",
+		MessageID: "msg-1",
+		ChatID:    "oc_1",
+		UpdateNo:  2,
+	}, "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.TipSent {
+		t.Fatalf("expected update tip to be sent, got %#v", result)
+	}
+	if len(sent) != 1 || sent[0] != "msg-1:oc_1:2" {
+		t.Fatalf("sent tips = %#v", sent)
+	}
+}
+
+func TestLarkUpdateWaitingSuppressesManualRefreshTip(t *testing.T) {
+	notifier := &LarkAppNotifier{}
+	notifier.client = fakeLarkSuccessClient(t)
+	var sent []string
+	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
+		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
+		return nil
+	}
+
+	result, err := notifier.updateWaiting(WaitingNotification{
+		SessionID:         "sess-1",
+		Name:              "A",
+		Content:           "updated",
+		MessageID:         "msg-1",
+		UpdateNo:          2,
+		SuppressUpdateTip: true,
+	}, "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TipSent {
+		t.Fatalf("manual refresh should suppress update tip, got %#v", result)
+	}
+	if len(sent) != 0 {
+		t.Fatalf("manual refresh should not send tip messages, got %#v", sent)
+	}
+}
+
+type fakeLarkHTTPClient struct{}
+
+func (fakeLarkHTTPClient) Do(*http.Request) (*http.Response, error) {
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json; charset=utf-8")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     header,
+		Body:       io.NopCloser(bytes.NewBufferString(`{"code":0,"msg":"success","data":{}}`)),
+	}, nil
+}
+
+func fakeLarkSuccessClient(t *testing.T) *lark.Client {
+	t.Helper()
+	return lark.NewClient("app", "secret", lark.WithHttpClient(fakeLarkHTTPClient{}))
 }
 
 func TestNotifyAfterStableDoesNotSendWhenNotificationDisabled(t *testing.T) {
@@ -884,6 +1290,56 @@ func (n *recordingNotifier) runningNotes() []WaitingNotification {
 	cp := make([]WaitingNotification, len(n.runningItems))
 	copy(cp, n.runningItems)
 	return cp
+}
+
+type runningNoteRecorder interface {
+	runningNotes() []WaitingNotification
+}
+
+func waitForRunningNotes(t *testing.T, notifier runningNoteRecorder, want int) []WaitingNotification {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		notes := notifier.runningNotes()
+		if len(notes) >= want {
+			return notes
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return notifier.runningNotes()
+}
+
+func waitForBlockingRunningNotes(t *testing.T, notifier runningNoteRecorder, want int) []WaitingNotification {
+	t.Helper()
+	return waitForRunningNotes(t, notifier, want)
+}
+
+type blockingRefreshNotifier struct {
+	recordingNotifier
+	notifyOnce    sync.Once
+	notifyStarted chan struct{}
+	releaseNotify chan struct{}
+}
+
+func newBlockingRefreshNotifier(messageID string) *blockingRefreshNotifier {
+	return &blockingRefreshNotifier{
+		recordingNotifier: recordingNotifier{messageID: messageID},
+		notifyStarted:     make(chan struct{}),
+		releaseNotify:     make(chan struct{}),
+	}
+}
+
+func (n *blockingRefreshNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
+	n.mu.Lock()
+	n.items = append(n.items, note)
+	messageID := n.messageID
+	if messageID == "" {
+		messageID = "msg-recording"
+	}
+	n.mu.Unlock()
+	n.notifyOnce.Do(func() { close(n.notifyStarted) })
+	<-n.releaseNotify
+	return WaitingNotificationResult{MessageID: messageID, Updated: note.MessageID != ""}, nil
 }
 
 type advancingNotifier struct {

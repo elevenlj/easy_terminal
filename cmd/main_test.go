@@ -21,6 +21,38 @@ func TestEnvFallback(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
+	wd := t.TempDir()
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	})
+	t.Setenv("PORT", "")
+	t.Setenv("LARK_APP_ID", "")
+	t.Setenv("LARK_APP_SECRET", "")
+	t.Setenv("LARK_NOTIFY_RECEIVE_ID", "")
+	t.Setenv("LARK_DEFAULT_SESSION_NAME", "")
+	t.Setenv("LARK_SESSION_CHAT_PREFIX", "")
+	t.Setenv("SESSION_PRE_START_COMMAND", "")
+	t.Setenv("LARK_MENTION_ENABLED", "")
+
+	cfg := loadConfig()
+	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkNotifyMaxLines != 100 {
+		t.Fatalf("numeric defaults = %d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkNotifyMaxLines)
+	}
+	if cfg.LarkDefaultSessionName != "临时" || cfg.LarkSessionChatPrefix != "ET ·" {
+		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)
+	}
+}
+
 func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	cfg := Config{
@@ -43,10 +75,14 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		FastWaitingTransitionMs:         450,
 		ConservativeWaitingTransitionMs: 900,
 		LarkNotifyMaxLines:              120,
-		LarkNotifyDropLinePatterns:      []string{"noise", "debug"},
-		SessionPreStartCommand:          "source ~/.zshrc",
-		SessionStartPresets:             map[string]session.SessionStartPreset{"1": {Commands: []string{"codex"}}},
-		SessionNamePresets:              map[string]session.SessionStartPreset{"会话 A": {Commands: []string{"pwd"}}},
+		LarkNotifyDropLineRules: session.LarkNotifyDropLineRules{
+			{Title: "noise", Pattern: "noise"},
+			{Title: "debug", Pattern: "debug"},
+		},
+		LarkCustomShortcuts:    []session.LarkCustomShortcut{{Label: "状态", Command: "git status"}},
+		SessionPreStartCommand: "source ~/.zshrc",
+		SessionStartPresets:    map[string]session.SessionStartPreset{"1": {Commands: []string{"codex"}}},
+		SessionNamePresets:     map[string]session.SessionStartPreset{"会话 A": {Commands: []string{"pwd"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +101,11 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if saved.FastWaitingTransitionMs != 450 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
 		t.Fatalf("config file was not updated: %#v", saved)
 	}
-	if len(saved.LarkNotifyDropLinePatterns) != 2 || saved.LarkNotifyDropLinePatterns[0] != "noise" {
-		t.Fatalf("drop patterns were not persisted: %#v", saved.LarkNotifyDropLinePatterns)
+	if len(saved.LarkNotifyDropLineRules) != 2 || saved.LarkNotifyDropLineRules[0].Pattern != "noise" {
+		t.Fatalf("drop patterns were not persisted: %#v", saved.LarkNotifyDropLineRules)
+	}
+	if len(saved.LarkCustomShortcuts) != 1 || saved.LarkCustomShortcuts[0].Command != "git status" {
+		t.Fatalf("custom shortcuts were not persisted: %#v", saved.LarkCustomShortcuts)
 	}
 	if saved.SessionStartPresets["1"].Commands[0] != "codex" || saved.SessionNamePresets["会话 A"].Commands[0] != "pwd" {
 		t.Fatalf("presets were not persisted: start=%#v name=%#v", saved.SessionStartPresets, saved.SessionNamePresets)
