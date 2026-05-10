@@ -5,6 +5,7 @@ const state = {
   term: null,
   fit: null,
   quick: [],
+  config: null,
   search: "",
   showEnded: false,
 };
@@ -211,6 +212,66 @@ async function loadQuick() {
   renderQuick();
 }
 
+async function loadConfig() {
+  state.config = await api("/api/config");
+  renderConfig();
+}
+
+function renderConfig() {
+  const cfg = state.config;
+  if (!cfg) return;
+  $("cfg-fast-waiting").value = cfg.fast_waiting_transition_ms;
+  $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
+  $("cfg-lark-max-lines").value = cfg.lark_notify_max_lines;
+  $("cfg-lark-app-id").value = cfg.lark_app_id || "";
+  $("cfg-lark-app-secret").value = cfg.lark_app_secret || "";
+  $("cfg-lark-receive-id").value = cfg.lark_notify_receive_id || "";
+  $("cfg-lark-default-session-name").value = cfg.lark_default_session_name || "";
+  $("cfg-lark-mention-enabled").checked = Boolean(cfg.lark_mention_enabled);
+  $("cfg-prestart-command").value = cfg.session_pre_start_command || "";
+  $("cfg-drop-patterns").value = (cfg.lark_notify_drop_line_patterns || []).join("\n");
+  $("cfg-session-name-presets").value = JSON.stringify(cfg.session_name_presets || {}, null, 2);
+  $("cfg-session-start-presets").value = JSON.stringify(cfg.session_start_presets || {}, null, 2);
+  $("config-error").textContent = "";
+}
+
+function readNumber(id) {
+  const n = Number($(id).value);
+  if (!Number.isFinite(n)) throw new Error("配置里存在无效数字");
+  return Math.trunc(n);
+}
+
+function readConfigForm() {
+  let namePresets;
+  let startPresets;
+  try {
+    namePresets = JSON.parse($("cfg-session-name-presets").value || "{}");
+    startPresets = JSON.parse($("cfg-session-start-presets").value || "{}");
+  } catch {
+    throw new Error("启动预设必须是有效 JSON");
+  }
+  return {
+    lark_app_id: $("cfg-lark-app-id").value.trim(),
+    lark_app_secret: $("cfg-lark-app-secret").value,
+    lark_notify_receive_id: $("cfg-lark-receive-id").value.trim(),
+    lark_mention_enabled: $("cfg-lark-mention-enabled").checked,
+    lark_default_session_name: $("cfg-lark-default-session-name").value.trim(),
+    fast_waiting_transition_ms: readNumber("cfg-fast-waiting"),
+    conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting"),
+    lark_notify_max_lines: readNumber("cfg-lark-max-lines"),
+    session_pre_start_command: $("cfg-prestart-command").value,
+    lark_notify_drop_line_patterns: $("cfg-drop-patterns").value.split("\n").map((line) => line.trim()).filter(Boolean),
+    session_name_presets: namePresets,
+    session_start_presets: startPresets,
+  };
+}
+
+async function saveConfig() {
+  const cfg = readConfigForm();
+  state.config = await api("/api/config", { method: "PATCH", body: JSON.stringify(cfg) });
+  renderConfig();
+}
+
 function renderQuick() {
   $("quick-list").innerHTML = "";
   for (const q of state.quick) {
@@ -315,6 +376,28 @@ $("quick-form").onsubmit = async (ev) => {
 
 $("quick-cancel").onclick = () => $("quick-dialog").close();
 
+$("config-open").onclick = async () => {
+  try {
+    if (!state.config) await loadConfig();
+    renderConfig();
+    $("config-dialog").showModal();
+  } catch (err) {
+    console.error(err);
+  }
+};
+
+$("config-cancel").onclick = () => $("config-dialog").close();
+
+$("config-form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  try {
+    await saveConfig();
+    $("config-dialog").close();
+  } catch (err) {
+    $("config-error").textContent = err.message || String(err);
+  }
+};
+
 document.addEventListener("paste", async (ev) => {
   if (!state.active) return;
   const file = [...(ev.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
@@ -329,6 +412,7 @@ document.addEventListener("paste", async (ev) => {
 setInterval(loadSessions, 3000);
 loadSessions().catch(console.error);
 loadQuick().catch(console.error);
+loadConfig().catch(console.error);
 
 if (typeof window !== "undefined") {
   window.easyTerminalApp = {
@@ -336,6 +420,8 @@ if (typeof window !== "undefined") {
     sendComposer,
     renderSessions,
     setNotify,
+    loadConfig,
+    saveConfig,
     visibleSessions,
   };
 }

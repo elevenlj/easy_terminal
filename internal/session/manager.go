@@ -88,6 +88,12 @@ func WithNotifier(n WaitingNotifier) ManagerOption {
 	return func(m *Manager) { m.notifier = n }
 }
 
+func (m *Manager) SetNotifier(n WaitingNotifier) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notifier = n
+}
+
 func WithWaitingTransitionDelays(fast, conservative time.Duration) ManagerOption {
 	return func(m *Manager) {
 		if fast > 0 {
@@ -113,6 +119,23 @@ func WithBrowserNeeded(fn func(string)) ManagerOption {
 
 func WithPreStartCommand(command string) ManagerOption {
 	return func(m *Manager) { m.preStartCommand = strings.TrimSpace(command) }
+}
+
+func (m *Manager) SetWaitingTransitionDelays(fast, conservative time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if fast > 0 {
+		m.fastWaiting = fast
+	}
+	if conservative > 0 {
+		m.conservativeWaiting = conservative
+	}
+}
+
+func (m *Manager) SetPreStartCommand(command string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.preStartCommand = strings.TrimSpace(command)
 }
 
 func (m *Manager) EnsureBrowser(sessionID string) {

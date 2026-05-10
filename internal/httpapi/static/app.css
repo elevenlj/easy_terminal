@@ -88,6 +88,13 @@ textarea {
   margin-bottom: 16px;
 }
 
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 18px;
+  display: flex;
+  justify-content: flex-start;
+}
+
 .new-session {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 128px;
@@ -227,7 +234,8 @@ textarea {
 .topbar {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 #active-title {
@@ -235,6 +243,14 @@ textarea {
   font-size: 28px;
   color: #7e3435;
   overflow-wrap: anywhere;
+}
+
+.settings-btn {
+  padding: 7px 14px;
+  border-radius: 14px;
+  color: var(--accent-dark);
+  background: #f7f0e4;
+  font-size: 13px;
 }
 
 .terminal-shell {
@@ -335,6 +351,10 @@ dialog {
   box-shadow: 0 24px 60px rgba(31, 24, 18, 0.24);
 }
 
+.config-dialog {
+  width: min(980px, calc(100vw - 32px));
+}
+
 dialog::backdrop {
   background: rgba(40, 28, 18, 0.32);
 }
@@ -355,6 +375,84 @@ dialog::backdrop {
   gap: 10px;
 }
 
+.config-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.config-subtitle {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.config-sections {
+  max-height: min(70vh, 760px);
+  overflow: auto;
+  padding-right: 4px;
+  display: grid;
+  gap: 14px;
+}
+
+.config-section {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.28);
+  padding: 14px;
+}
+
+.config-section h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: var(--accent-dark);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.config-grid label,
+.config-wide,
+.config-check {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.config-grid input,
+.config-wide textarea {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.config-check {
+  width: fit-content;
+  margin-top: 12px;
+  grid-template-columns: 18px auto;
+  align-items: center;
+}
+
+.config-check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.config-wide {
+  margin-top: 12px;
+}
+
+.config-error {
+  min-height: 20px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
 @media (max-width: 840px) {
   body {
     grid-template-columns: 1fr;
@@ -366,10 +464,22 @@ dialog::backdrop {
     border-bottom: 1px solid var(--line);
   }
 
+  .sidebar-footer {
+    margin-top: 8px;
+  }
+
   .main {
     min-height: 72vh;
     padding: 18px;
     grid-template-rows: auto minmax(360px, 1fr) auto auto;
+  }
+
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .config-grid {
+    grid-template-columns: 1fr;
   }
 
   .composer {

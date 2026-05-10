@@ -11,15 +11,13 @@ import (
 var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
 
 const (
-	defaultMaxLarkTextLines           = 300
-	defaultCodexNoAnchorFallbackLines = 80
-	maxLarkTextRunes                  = 12000
-	larkTruncatedPrefix               = "[truncated]\n"
-	codexNoAnchorFallbackPrefix       = "[missing input anchor; showing tail]\n"
+	defaultMaxLarkTextLines     = 300
+	maxLarkTextRunes            = 12000
+	larkTruncatedPrefix         = "[truncated]\n"
+	codexNoAnchorFallbackPrefix = "[missing input anchor; showing tail]\n"
 )
 
 var larkNotifyMaxLines atomic.Int64
-var codexNoAnchorFallbackLines atomic.Int64
 var larkNotifyDropLinePatterns atomic.Value
 
 type larkNotifyDropLinePattern struct {
@@ -28,7 +26,6 @@ type larkNotifyDropLinePattern struct {
 
 func init() {
 	larkNotifyMaxLines.Store(defaultMaxLarkTextLines)
-	codexNoAnchorFallbackLines.Store(defaultCodexNoAnchorFallbackLines)
 	larkNotifyDropLinePatterns.Store([]larkNotifyDropLinePattern{})
 }
 
@@ -37,13 +34,6 @@ func SetLarkNotifyMaxLines(lines int) {
 		lines = defaultMaxLarkTextLines
 	}
 	larkNotifyMaxLines.Store(int64(lines))
-}
-
-func SetCodexNoAnchorFallbackLines(lines int) {
-	if lines <= 0 {
-		lines = defaultCodexNoAnchorFallbackLines
-	}
-	codexNoAnchorFallbackLines.Store(int64(lines))
 }
 
 func SetLarkNotifyDropLinePatterns(patterns []string) error {
@@ -301,7 +291,7 @@ func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string
 
 func codexNoAnchorFallbackText(text string) string {
 	text = codexTUISegment(text)
-	return truncateLinesFromTail(strings.TrimSpace(text), int(codexNoAnchorFallbackLines.Load()), codexNoAnchorFallbackPrefix)
+	return truncateLinesFromTail(strings.TrimSpace(text), int(larkNotifyMaxLines.Load()), codexNoAnchorFallbackPrefix)
 }
 
 func codexExitSegment(text string) string {

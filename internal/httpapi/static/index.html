@@ -18,6 +18,9 @@
       <input id="session-search" class="search" placeholder="Search sessions" autocomplete="off">
       <label class="ended-toggle"><input id="show-ended" type="checkbox"> 显示已结束会话</label>
       <div id="sessions" class="sessions"></div>
+      <div class="sidebar-footer">
+        <button id="config-open" class="settings-btn" type="button">配置</button>
+      </div>
     </aside>
     <main class="main">
       <header class="topbar">
@@ -39,6 +42,60 @@
         <div class="dialog-actions">
           <button value="cancel" type="button" id="quick-cancel">Cancel</button>
           <button value="default">Add</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="config-dialog" class="config-dialog">
+      <form id="config-form" method="dialog">
+        <div class="config-head">
+          <div>
+            <div class="dialog-title">配置</div>
+            <div class="config-subtitle">修改后会写入 conf/config.local.json</div>
+          </div>
+        </div>
+        <div class="config-sections">
+          <section class="config-section">
+            <h2>飞书</h2>
+            <div class="config-grid">
+              <label><span>App ID</span><input id="cfg-lark-app-id"></label>
+              <label><span>App Secret</span><input id="cfg-lark-app-secret" type="password"></label>
+              <label><span>通知接收 ID</span><input id="cfg-lark-receive-id"></label>
+              <label><span>默认会话名</span><input id="cfg-lark-default-session-name"></label>
+            </div>
+            <label class="config-check"><input id="cfg-lark-mention-enabled" type="checkbox"><span>主通知卡片 @ 接收人</span></label>
+          </section>
+          <section class="config-section">
+            <h2>等待与通知</h2>
+            <div class="config-grid">
+              <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="50"></label>
+              <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="50"></label>
+              <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="10"></label>
+            </div>
+            <label class="config-wide">
+              <span>通知过滤正则，每行一个</span>
+              <textarea id="cfg-drop-patterns" rows="4"></textarea>
+            </label>
+          </section>
+          <section class="config-section">
+            <h2>启动</h2>
+            <label class="config-wide">
+              <span>会话启动前命令</span>
+              <textarea id="cfg-prestart-command" rows="2"></textarea>
+            </label>
+            <label class="config-wide">
+              <span>按会话名匹配的启动预设(JSON)</span>
+              <textarea id="cfg-session-name-presets" rows="8" spellcheck="false"></textarea>
+            </label>
+            <label class="config-wide">
+              <span>按开始命令后缀匹配的启动预设(JSON)</span>
+              <textarea id="cfg-session-start-presets" rows="8" spellcheck="false"></textarea>
+            </label>
+          </section>
+        </div>
+        <div id="config-error" class="config-error"></div>
+        <div class="dialog-actions">
+          <button value="cancel" type="button" id="config-cancel">Cancel</button>
+          <button value="default">Save</button>
         </div>
       </form>
     </dialog>

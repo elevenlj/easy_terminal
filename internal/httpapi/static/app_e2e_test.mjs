@@ -98,6 +98,23 @@ const ids = [
   "quick-text",
   "quick-dialog",
   "quick-cancel",
+  "config-open",
+  "config-dialog",
+  "config-form",
+  "config-cancel",
+  "config-error",
+  "cfg-fast-waiting",
+  "cfg-conservative-waiting",
+  "cfg-lark-max-lines",
+  "cfg-lark-app-id",
+  "cfg-lark-app-secret",
+  "cfg-lark-receive-id",
+  "cfg-lark-default-session-name",
+  "cfg-lark-mention-enabled",
+  "cfg-prestart-command",
+  "cfg-drop-patterns",
+  "cfg-session-name-presets",
+  "cfg-session-start-presets",
   "active-title",
   "terminal",
 ];
@@ -151,6 +168,22 @@ const context = {
     }
     if (path === "/api/quick-commands" && !options.method) {
       return jsonResponse([]);
+    }
+    if (path === "/api/config" && !options.method) {
+      return jsonResponse({
+        fast_waiting_transition_ms: 300,
+        conservative_waiting_transition_ms: 700,
+        lark_notify_max_lines: 300,
+        lark_app_id: "app-id",
+        lark_app_secret: "secret",
+        lark_notify_receive_id: "ou_1",
+        lark_mention_enabled: true,
+        lark_default_session_name: "临时",
+        session_pre_start_command: "",
+        lark_notify_drop_line_patterns: [],
+        session_name_presets: {},
+        session_start_presets: {},
+      });
     }
     return jsonResponse({}, 200);
   },
@@ -226,5 +259,28 @@ const notify = card.querySelector(".notify-input");
 notify.checked = true;
 await notify.onchange({ stopPropagation() {}, target: notify });
 assert.ok(fetchCalls.some((call) => call.path === "/api/sessions/sess-1" && call.options.method === "PATCH" && call.options.body.includes('"notify_on_waiting":true')));
+
+await app.loadConfig();
+elements["cfg-fast-waiting"].value = "450";
+elements["cfg-conservative-waiting"].value = "900";
+elements["cfg-lark-max-lines"].value = "120";
+elements["cfg-lark-app-id"].value = "new-app";
+elements["cfg-lark-app-secret"].value = "new-secret";
+elements["cfg-lark-receive-id"].value = "ou_new";
+elements["cfg-lark-default-session-name"].value = "临时";
+elements["cfg-lark-mention-enabled"].checked = false;
+elements["cfg-prestart-command"].value = "source ~/.zshrc";
+elements["cfg-drop-patterns"].value = "noise\ndebug";
+elements["cfg-session-name-presets"].value = JSON.stringify({ "会话 A": { commands: ["pwd"] } });
+elements["cfg-session-start-presets"].value = JSON.stringify({ "1": { commands: ["codex"] } });
+await app.saveConfig();
+const configPatch = fetchCalls.find((call) => call.path === "/api/config" && call.options.method === "PATCH");
+assert.ok(configPatch, "config form should PATCH /api/config");
+const patchedConfig = JSON.parse(configPatch.options.body);
+assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
+assert.equal(patchedConfig.lark_app_id, "new-app");
+assert.equal(patchedConfig.lark_mention_enabled, false);
+assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, ["noise", "debug"]);
+assert.deepEqual(patchedConfig.session_start_presets, { "1": { commands: ["codex"] } });
 
 console.log("frontend e2e ok");

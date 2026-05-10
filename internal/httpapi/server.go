@@ -21,11 +21,15 @@ var staticFiles embed.FS
 type Server struct {
 	manager    *session.Manager
 	uploadsDir string
+	config     ConfigService
 	mux        *http.ServeMux
 }
 
-func NewServer(manager *session.Manager, uploadsDir string) *Server {
+func NewServer(manager *session.Manager, uploadsDir string, config ...ConfigService) *Server {
 	s := &Server{manager: manager, uploadsDir: uploadsDir, mux: http.NewServeMux()}
+	if len(config) > 0 {
+		s.config = config[0]
+	}
 	s.routes()
 	return s
 }
@@ -38,6 +42,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID)
 	s.mux.HandleFunc("/api/quick-commands", s.handleQuickCommands)
 	s.mux.HandleFunc("/api/quick-commands/", s.handleQuickCommandByID)
+	s.mux.HandleFunc("/api/config", s.handleConfig)
 }
 
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {

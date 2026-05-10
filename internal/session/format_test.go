@@ -177,8 +177,6 @@ func TestPickNotifyContentUsesCodexExitTailWhenSnapshotContainsHistory(t *testin
 }
 
 func TestNotifyContentWaitsWhenCodexInputAnchorAndRoundReplyAreMissing(t *testing.T) {
-	SetCodexNoAnchorFallbackLines(3)
-	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
 		"╭────────────────────────────╮",
 		"│ >_ OpenAI Codex (v0.128.0) │",
@@ -496,8 +494,6 @@ func TestNotifyContentNeedsMoreSnapshotForTransientOnlyRound(t *testing.T) {
 }
 
 func TestNotifyContentUsesRoundReplyWhenSnapshotAnchorIsMissing(t *testing.T) {
-	SetCodexNoAnchorFallbackLines(2)
-	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
 	visible := strings.Join([]string{
 		"╭────────────────────────────╮",
 		"│ >_ OpenAI Codex (v0.128.0) │",
@@ -653,14 +649,6 @@ func TestTruncateForLarkUsesConfiguredMaxLines(t *testing.T) {
 	want := "[truncated]\nthree\nfour\nfive"
 	if got != want {
 		t.Fatalf("truncateForLark() = %q, want %q", got, want)
-	}
-}
-
-func TestSetCodexNoAnchorFallbackLinesUsesDefaultForInvalidValue(t *testing.T) {
-	SetCodexNoAnchorFallbackLines(-1)
-	t.Cleanup(func() { SetCodexNoAnchorFallbackLines(defaultCodexNoAnchorFallbackLines) })
-	if got := codexNoAnchorFallbackLines.Load(); got != defaultCodexNoAnchorFallbackLines {
-		t.Fatalf("fallback lines = %d, want %d", got, defaultCodexNoAnchorFallbackLines)
 	}
 }
 

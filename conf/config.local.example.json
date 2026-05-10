@@ -12,7 +12,7 @@
     "LSP server '.+': command '.+' not found",
     "^\\s*agent mode \\(shift \\+ tab to toggle\\)\\s*$"
   ],
-  "codex_no_anchor_fallback_lines": 80,
+  "session_pre_start_command": "",
   "session_name_presets": {
     "会话 A": {
       "commands": [

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -30,7 +31,6 @@ type Config struct {
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
 	LarkNotifyDropLinePatterns      []string                              `json:"lark_notify_drop_line_patterns"`
-	CodexNoAnchorFallbackLines      int                                   `json:"codex_no_anchor_fallback_lines"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
 	SessionNamePresets              map[string]session.SessionStartPreset `json:"session_name_presets"`
@@ -44,6 +44,7 @@ func main() {
 
 func run() error {
 	cfg := loadConfig()
+	configPath := defaultConfigPath()
 	dbPath := env("AGENT_MONITOR_DB", "./easy_terminal.db")
 	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", "./data/uploads")
 	logDir := env("AGENT_MONITOR_LOG_DIR", "./log")
@@ -98,15 +99,22 @@ func run() error {
 		}()
 	}
 
-	srv := httpapi.NewServer(mgr, uploadsDir)
+	configSvc := &appConfigService{path: configPath, cfg: &cfg, manager: mgr, bridge: bridge}
+	srv := httpapi.NewServer(mgr, uploadsDir, configSvc)
 	addr := ":" + cfg.Port
 	log.Printf("easy_terminal listening on http://localhost%s", addr)
 	return http.ListenAndServe(addr, srv.Handler())
 }
 
 func loadConfig() Config {
-	cfg := Config{Port: "8080", LarkMentionEnabled: true, FastWaitingTransitionMs: 300, ConservativeWaitingTransitionMs: 700, LarkNotifyMaxLines: 300, CodexNoAnchorFallbackLines: 80}
-	if b, err := os.ReadFile(filepath.Join("conf", "config.local.json")); err == nil {
+	cfg := Config{
+		Port:                            "8080",
+		LarkMentionEnabled:              true,
+		FastWaitingTransitionMs:         300,
+		ConservativeWaitingTransitionMs: 700,
+		LarkNotifyMaxLines:              300,
+	}
+	if b, err := os.ReadFile(defaultConfigPath()); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
 	cfg.Port = env("PORT", cfg.Port)
@@ -129,15 +137,109 @@ func loadConfig() Config {
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = 300
 	}
-	if cfg.CodexNoAnchorFallbackLines <= 0 {
-		cfg.CodexNoAnchorFallbackLines = 80
-	}
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
 	if err := session.SetLarkNotifyDropLinePatterns(cfg.LarkNotifyDropLinePatterns); err != nil {
 		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
 	}
-	session.SetCodexNoAnchorFallbackLines(cfg.CodexNoAnchorFallbackLines)
 	return cfg
+}
+
+func defaultConfigPath() string {
+	return filepath.Join("conf", "config.local.json")
+}
+
+type appConfigService struct {
+	mu      sync.Mutex
+	path    string
+	cfg     *Config
+	manager *session.Manager
+	bridge  *session.LarkReplyBridge
+}
+
+func (s *appConfigService) RuntimeConfig() httpapi.RuntimeConfig {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return runtimeConfigFromConfig(*s.cfg)
+}
+
+func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpapi.RuntimeConfig, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg := *s.cfg
+	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkNotifyMaxLines <= 0 {
+		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
+	}
+	if req.SessionStartPresets == nil {
+		req.SessionStartPresets = map[string]session.SessionStartPreset{}
+	}
+	if req.SessionNamePresets == nil {
+		req.SessionNamePresets = map[string]session.SessionStartPreset{}
+	}
+	cfg.LarkAppID = req.LarkAppID
+	cfg.LarkAppSecret = req.LarkAppSecret
+	cfg.LarkNotifyReceiveID = req.LarkNotifyReceiveID
+	cfg.LarkMentionEnabled = req.LarkMentionEnabled
+	cfg.LarkDefaultSessionName = req.LarkDefaultSessionName
+	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
+	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
+	cfg.LarkNotifyMaxLines = req.LarkNotifyMaxLines
+	cfg.LarkNotifyDropLinePatterns = req.LarkNotifyDropLinePatterns
+	cfg.SessionPreStartCommand = req.SessionPreStartCommand
+	cfg.SessionStartPresets = req.SessionStartPresets
+	cfg.SessionNamePresets = req.SessionNamePresets
+	if err := applyRuntimeConfig(cfg, s.manager, s.bridge); err != nil {
+		return httpapi.RuntimeConfig{}, err
+	}
+	if err := writeConfigFile(s.path, cfg); err != nil {
+		return httpapi.RuntimeConfig{}, err
+	}
+	*s.cfg = cfg
+	return runtimeConfigFromConfig(cfg), nil
+}
+
+func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.LarkReplyBridge) error {
+	manager.SetWaitingTransitionDelays(time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond, time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond)
+	manager.SetPreStartCommand(cfg.SessionPreStartCommand)
+	manager.SetNotifier(session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled))
+	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	if err := session.SetLarkNotifyDropLinePatterns(cfg.LarkNotifyDropLinePatterns); err != nil {
+		return err
+	}
+	if bridge != nil {
+		bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
+		bridge.SetStartPresets(cfg.SessionStartPresets)
+		bridge.SetNamePresets(cfg.SessionNamePresets)
+	}
+	return nil
+}
+
+func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
+	return httpapi.RuntimeConfig{
+		FastWaitingTransitionMs:         cfg.FastWaitingTransitionMs,
+		ConservativeWaitingTransitionMs: cfg.ConservativeWaitingTransitionMs,
+		LarkNotifyMaxLines:              cfg.LarkNotifyMaxLines,
+		LarkNotifyDropLinePatterns:      cfg.LarkNotifyDropLinePatterns,
+		SessionPreStartCommand:          cfg.SessionPreStartCommand,
+		LarkAppID:                       cfg.LarkAppID,
+		LarkAppSecret:                   cfg.LarkAppSecret,
+		LarkNotifyReceiveID:             cfg.LarkNotifyReceiveID,
+		LarkMentionEnabled:              cfg.LarkMentionEnabled,
+		LarkDefaultSessionName:          cfg.LarkDefaultSessionName,
+		SessionStartPresets:             cfg.SessionStartPresets,
+		SessionNamePresets:              cfg.SessionNamePresets,
+	}
+}
+
+func writeConfigFile(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	return os.WriteFile(path, b, 0o600)
 }
 
 func env(key, fallback string) string {
