@@ -800,7 +800,7 @@ func TestLarkReplyBridgeStartUsesConfiguredDefaultName(t *testing.T) {
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
-	bridge.SetDefaultStartSessionName("临时")
+	bridge.SetDefaultStartSessionName("默认会话")
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-default", "", "", "text", `{"text":"开始"}`)); err != nil {
 		t.Fatal(err)
@@ -809,7 +809,7 @@ func TestLarkReplyBridgeStartUsesConfiguredDefaultName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0].Name != "临时" {
+	if len(sessions) != 1 || sessions[0].Name != "默认会话" {
 		t.Fatalf("start command should use configured default session name, got %#v", sessions)
 	}
 }

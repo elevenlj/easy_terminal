@@ -21,6 +21,24 @@ func TestEnvFallback(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsPort(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"--port", "9090"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Port != "9090" {
+		t.Fatalf("expected port override, got %q", opts.Port)
+	}
+
+	opts, err = parseStartupOptions([]string{"-p", "7070"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Port != "7070" {
+		t.Fatalf("expected short port override, got %q", opts.Port)
+	}
+}
+
 func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	wd := t.TempDir()
 	oldWd, err := os.Getwd()
@@ -48,7 +66,7 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkNotifyMaxLines != 100 {
 		t.Fatalf("numeric defaults = %d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkNotifyMaxLines)
 	}
-	if cfg.LarkDefaultSessionName != "临时" || cfg.LarkSessionChatPrefix != "ET ·" {
+	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
 		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)
 	}
 }
@@ -58,7 +76,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	cfg := Config{
 		Port:                            "8080",
 		LarkMentionEnabled:              true,
-		LarkDefaultSessionName:          "临时",
+		LarkDefaultSessionName:          "默认会话",
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
 		LarkNotifyMaxLines:              300,
@@ -80,6 +98,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 			{Title: "debug", Pattern: "debug"},
 		},
 		LarkCustomShortcuts:    []session.LarkCustomShortcut{{Label: "状态", Command: "git status"}},
+		OnboardingCompleted:    true,
 		SessionPreStartCommand: "source ~/.zshrc",
 		SessionStartPresets:    map[string]session.SessionStartPreset{"1": {Commands: []string{"codex"}}},
 		SessionNamePresets:     map[string]session.SessionStartPreset{"会话 A": {Commands: []string{"pwd"}}},
@@ -106,6 +125,9 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	}
 	if len(saved.LarkCustomShortcuts) != 1 || saved.LarkCustomShortcuts[0].Command != "git status" {
 		t.Fatalf("custom shortcuts were not persisted: %#v", saved.LarkCustomShortcuts)
+	}
+	if !saved.OnboardingCompleted {
+		t.Fatalf("onboarding completion was not persisted: %#v", saved)
 	}
 	if saved.SessionStartPresets["1"].Commands[0] != "codex" || saved.SessionNamePresets["会话 A"].Commands[0] != "pwd" {
 		t.Fatalf("presets were not persisted: start=%#v name=%#v", saved.SessionStartPresets, saved.SessionNamePresets)

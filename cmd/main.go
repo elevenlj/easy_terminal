@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"log"
 	"net/http"
@@ -22,7 +23,7 @@ import (
 )
 
 const (
-	defaultLarkDefaultSessionName          = "临时"
+	defaultLarkDefaultSessionName          = "默认会话"
 	defaultLarkSessionChatPrefix           = "ET · "
 	defaultFastWaitingTransitionMs         = 1000
 	defaultConservativeWaitingTransitionMs = 3000
@@ -46,6 +47,7 @@ type Config struct {
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
 	SessionNamePresets              map[string]session.SessionStartPreset `json:"session_name_presets"`
 	LarkCustomShortcuts             []session.LarkCustomShortcut          `json:"lark_custom_shortcuts"`
+	OnboardingCompleted             bool                                  `json:"onboarding_completed"`
 }
 
 func main() {
@@ -55,7 +57,14 @@ func main() {
 }
 
 func run() error {
+	opts, err := parseStartupOptions(os.Args[1:])
+	if err != nil {
+		return err
+	}
 	cfg := loadConfig()
+	if opts.Port != "" {
+		cfg.Port = opts.Port
+	}
 	configPath := defaultConfigPath()
 	dbPath := env("AGENT_MONITOR_DB", "./easy_terminal.db")
 	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", "./data/uploads")
@@ -120,6 +129,22 @@ func run() error {
 	addr := ":" + cfg.Port
 	log.Printf("easy_terminal listening on http://localhost%s", addr)
 	return http.ListenAndServe(addr, srv.Handler())
+}
+
+type startupOptions struct {
+	Port string
+}
+
+func parseStartupOptions(args []string) (startupOptions, error) {
+	var opts startupOptions
+	fs := flag.NewFlagSet("easy_terminal", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&opts.Port, "port", "", "HTTP listen port")
+	fs.StringVar(&opts.Port, "p", "", "HTTP listen port")
+	if err := fs.Parse(args); err != nil {
+		return startupOptions{}, err
+	}
+	return opts, nil
 }
 
 func loadConfig() Config {
@@ -209,6 +234,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.SessionStartPresets = req.SessionStartPresets
 	cfg.SessionNamePresets = req.SessionNamePresets
 	cfg.LarkCustomShortcuts = req.LarkCustomShortcuts
+	cfg.OnboardingCompleted = req.OnboardingCompleted
 	if err := applyRuntimeConfig(cfg, s.manager, s.bridge); err != nil {
 		return httpapi.RuntimeConfig{}, err
 	}
@@ -255,6 +281,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		SessionStartPresets:             cfg.SessionStartPresets,
 		SessionNamePresets:              cfg.SessionNamePresets,
 		LarkCustomShortcuts:             cfg.LarkCustomShortcuts,
+		OnboardingCompleted:             cfg.OnboardingCompleted,
 	}
 }
 

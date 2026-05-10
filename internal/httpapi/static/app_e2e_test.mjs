@@ -185,6 +185,9 @@ const ids = [
   "quick-dialog",
   "quick-cancel",
   "onboarding-dialog",
+  "onboarding-agent-preset",
+  "onboarding-agent-custom-command",
+  "onboarding-agent-status",
   "onboarding-config",
   "onboarding-later",
   "config-open",
@@ -339,14 +342,18 @@ const context = {
         lark_app_secret: "secret",
         lark_notify_receive_id: "ou_1",
         lark_mention_enabled: true,
-        lark_default_session_name: "临时",
+        lark_default_session_name: "默认会话",
         lark_session_chat_prefix: "ET · ",
+        onboarding_completed: false,
         session_pre_start_command: "",
         lark_notify_drop_line_patterns: [],
         lark_custom_shortcuts: [],
         session_name_presets: {},
         session_start_presets: {},
       });
+    }
+    if (path === "/api/config" && options.method === "PATCH") {
+      return jsonResponse(JSON.parse(options.body));
     }
     if (path === "/api/lark-app-registration" && options.method === "POST") {
       return jsonResponse({
@@ -391,15 +398,19 @@ await Promise.resolve();
 const app = context.window.easyTerminalApp;
 assert.ok(app, "app test API is exposed");
 
+await app.loadConfig();
 app.maybeShowOnboarding();
 assert.equal(elements["onboarding-dialog"].open, true, "first visit should show onboarding");
+elements["onboarding-agent-preset"].value = "codex";
 await Promise.resolve(elements["onboarding-config"].onclick());
-assert.equal(elements["onboarding-dialog"].open, false, "onboarding should close before opening config");
-assert.equal(elements["config-dialog"].open, true, "onboarding config action should open config dialog");
-assert.equal(localStorageData.get("easy_terminal.onboarding_seen.v1"), "1", "onboarding should be marked as seen");
-elements["config-dialog"].close();
+assert.equal(elements["onboarding-dialog"].open, false, "onboarding should close after saving");
+let onboardingPatch = fetchCalls.find((call) => call.path === "/api/config" && call.options.method === "PATCH");
+assert.ok(onboardingPatch, "onboarding should PATCH config");
+let onboardingConfig = JSON.parse(onboardingPatch.options.body);
+assert.equal(onboardingConfig.onboarding_completed, true, "onboarding should be marked as completed in config");
+assert.deepEqual(onboardingConfig.session_name_presets["默认会话"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] });
 app.maybeShowOnboarding();
-assert.equal(elements["onboarding-dialog"].open, false, "seen onboarding should not reopen");
+assert.equal(elements["onboarding-dialog"].open, false, "completed onboarding should not reopen");
 
 app.state.active = "sess-1";
 app.state.socket = {
@@ -498,7 +509,7 @@ elements["cfg-lark-max-lines"].value = "120";
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-app-secret"].value = "new-secret";
 elements["cfg-lark-receive-id"].value = "ou_new";
-elements["cfg-lark-default-session-name"].value = "临时";
+elements["cfg-lark-default-session-name"].value = "默认会话";
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-prestart-command"].value = "source ~/.zshrc";
@@ -568,17 +579,17 @@ elements["startup-json-preview"].oninput();
 elements["cfg-agent-preset"].value = "codex";
 elements["cfg-agent-preset"].onchange();
 let generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
-assert.deepEqual(generatedNamePresets["临时"], { commands: ["codex"] }, "agent preset should generate default session name preset");
+assert.deepEqual(generatedNamePresets["默认会话"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should generate default session name preset");
 elements["cfg-lark-default-session-name"].value = "Claude 会话";
 elements["cfg-agent-preset"].value = "claude";
 elements["cfg-agent-preset"].onchange();
 generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
-assert.deepEqual(generatedNamePresets["Claude 会话"], { commands: ["claude"] }, "claude preset should use claude command");
+assert.deepEqual(generatedNamePresets["Claude 会话"], { commands: ["claude --dangerously-skip-permissions"] }, "claude preset should use claude command");
 await app.testLarkConfig();
 assert.ok(fetchCalls.some((call) => call.path === "/api/config/lark-test" && call.options.method === "POST"), "lark config test should POST /api/config/lark-test");
 assert.equal(elements["lark-test-result"].children.length, 2, "lark test result should render steps");
 await app.saveConfig();
-const configPatch = fetchCalls.find((call) => call.path === "/api/config" && call.options.method === "PATCH");
+const configPatch = fetchCalls.filter((call) => call.path === "/api/config" && call.options.method === "PATCH").at(-1);
 assert.ok(configPatch, "config form should PATCH /api/config");
 const patchedConfig = JSON.parse(configPatch.options.body);
 assert.equal(patchedConfig.fast_waiting_transition_ms, 450);

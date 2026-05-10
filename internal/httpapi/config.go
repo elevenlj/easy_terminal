@@ -26,6 +26,7 @@ type RuntimeConfig struct {
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
 	SessionNamePresets              map[string]session.SessionStartPreset `json:"session_name_presets"`
 	LarkCustomShortcuts             []session.LarkCustomShortcut          `json:"lark_custom_shortcuts"`
+	OnboardingCompleted             bool                                  `json:"onboarding_completed"`
 }
 
 type ConfigService interface {

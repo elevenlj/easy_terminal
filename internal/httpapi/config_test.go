@@ -17,7 +17,8 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 		LarkAppSecret:                   "secret",
 		LarkNotifyReceiveID:             "ou_1",
 		LarkMentionEnabled:              true,
-		LarkDefaultSessionName:          "临时",
+		LarkDefaultSessionName:          "默认会话",
+		OnboardingCompleted:             false,
 		LarkSessionChatPrefix:           "ET · ",
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
@@ -35,7 +36,7 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 		t.Fatalf("GET status = %d", rec.Code)
 	}
 
-	body := `{"lark_app_id":"new-app","lark_app_secret":"new-secret","lark_notify_receive_id":"ou_new","lark_mention_enabled":false,"lark_default_session_name":"默认","lark_session_chat_prefix":"DEV ·","fast_waiting_transition_ms":450,"conservative_waiting_transition_ms":900,"lark_notify_max_lines":120,"lark_notify_drop_line_patterns":["noise"],"lark_custom_shortcuts":[{"label":"状态","command":"git status"}],"session_pre_start_command":"source ~/.zshrc","session_start_presets":{"1":{"commands":["codex"]}},"session_name_presets":{"会话 A":{"commands":["pwd"]}}}`
+	body := `{"lark_app_id":"new-app","lark_app_secret":"new-secret","lark_notify_receive_id":"ou_new","lark_mention_enabled":false,"lark_default_session_name":"默认","lark_session_chat_prefix":"DEV ·","fast_waiting_transition_ms":450,"conservative_waiting_transition_ms":900,"lark_notify_max_lines":120,"lark_notify_drop_line_patterns":["noise"],"lark_custom_shortcuts":[{"label":"状态","command":"git status"}],"onboarding_completed":true,"session_pre_start_command":"source ~/.zshrc","session_start_presets":{"1":{"commands":["codex"]}},"session_name_presets":{"会话 A":{"commands":["pwd"]}}}`
 	req = httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -54,6 +55,9 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 	}
 	if len(got.LarkCustomShortcuts) != 1 || got.LarkCustomShortcuts[0].Label != "状态" {
 		t.Fatalf("custom shortcuts = %#v", got.LarkCustomShortcuts)
+	}
+	if !got.OnboardingCompleted {
+		t.Fatalf("onboarding completion = %#v", got)
 	}
 	if svc.cfg.SessionPreStartCommand != "source ~/.zshrc" || svc.cfg.SessionStartPresets["1"].Commands[0] != "codex" {
 		t.Fatalf("service was not updated: %#v", svc.cfg)

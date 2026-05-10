@@ -16,16 +16,16 @@
    make run
    ```
 
-3. 打开 Web 页面，首次进入时会看到新手引导。点击“去配置”进入配置页面，优先完成飞书、等待通知和启动预设。
+3. 打开 Web 页面，首次进入时会看到新手引导。先选择默认会话 Agent，也可以跳过后再配置。
 
 4. 创建会话后即可在网页终端里输入命令；配置飞书后，也可以从飞书创建和继续会话。
 
 ## 首次配置引导
 
-首次进入 Web 端时，系统会弹出新手引导，提示先进入配置页面。这个提示只在当前浏览器出现一次：
+首次进入 Web 端时，系统会弹出新手引导，提示选择默认会话 Agent。这个状态会保存到 `conf/config.local.json`：
 
-- 点击“去配置”：关闭引导并打开配置页面。
-- 点击“稍后”：关闭引导，之后不再自动弹出。
+- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：为默认会话名补一条最大权限启动预设。
+- 点击“跳过”：不配置默认 Agent，只标记已完成引导。
 - 配置入口始终在左下角齿轮按钮。
 
 建议首次配置顺序：
@@ -33,7 +33,7 @@
 1. 在“飞书”页签中填写或扫码生成 App ID、App Secret、通知接收 ID。
 2. 点击“测试飞书配置”，确认可以发送测试通知。
 3. 在“等待通知”页签里调整通知最大行数、过滤正则和自定义快捷键。
-4. 在“启动预设”页签里选择常用 Agent，或手动维护会话启动命令。
+4. 在“启动预设”页签里选择默认会话 Agent，或手动维护会话启动命令。
 5. 点击 Save 保存到 `conf/config.local.json`。
 
 ## 网页终端
@@ -192,6 +192,7 @@ cp conf/config.local.example.json conf/config.local.json
 | `lark_notify_max_lines` | 飞书通知最多保留尾部行数 |
 | `lark_notify_drop_line_patterns` | 飞书通知按行删除规则；每项包含 `title` 和 `pattern` |
 | `lark_custom_shortcuts` | 飞书通知卡片上的自定义快捷键 |
+| `onboarding_completed` | 是否已经完成首次引导 |
 | `session_pre_start_command` | 每个新终端会话创建后自动执行的命令 |
 | `session_name_presets` | 按会话名精确匹配的启动预设 |
 | `session_start_presets` | 按飞书开始命令中会话名后面的数字匹配的启动预设 |

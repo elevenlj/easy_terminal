@@ -20,6 +20,8 @@ make run
 
 ```sh
 PORT=9090 make run
+go run ./cmd --port 9090
+go run ./cmd -p 9090
 ```
 
 构建二进制：
@@ -27,7 +29,11 @@ PORT=9090 make run
 ```sh
 make build
 ./easy_terminal
+./easy_terminal --port 9090
+./easy_terminal -p 9090
 ```
+
+端口配置优先级为：启动参数 `--port` / `-p` > 环境变量 `PORT` > 配置文件 > 默认端口 `8080`。
 
 ## 查看帮助文档
 
@@ -49,12 +55,30 @@ make test-all     # Go 测试 + 浏览器 E2E
 make tidy         # go mod tidy
 ```
 
-## 运行要求
+## 运行环境
+
+必需环境：
 
 - Go 1.25 或兼容版本
-- Node.js，用于 `make test-browser`
-- Chrome、Chromium 或 Microsoft Edge，用于 headless 终端快照和浏览器测试
-- macOS/Linux shell 环境；默认 shell 为 `/bin/zsh -i`
+- macOS 或 Linux shell 环境
+- 可交互 shell；默认使用 `/bin/zsh -i`
+
+可选环境：
+
+- Chrome、Chromium 或 Microsoft Edge：用于生成终端快照
+
+飞书联动需要：
+
+- 一个飞书自建应用
+- 应用的 `app_id` 和 `app_secret`
+- 已启用机器人能力或消息发送能力
+- 飞书应用信息、消息权限和事件/长连接配置可在 Web 端通过扫码一键配置
+
+本地 Agent 需要：
+
+- 先在当前机器安装对应 CLI 工具，例如 `opencode`、`codex`、`claude`、`gemini` 等
+- 确保这些命令可以在默认 shell 中直接执行
+- 如果 Agent 依赖 API Key 或本地模型，请提前在本机环境变量或对应工具配置中完成设置
 
 ## 运行数据
 

@@ -17,7 +17,7 @@ const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 20;
 const DEFAULT_TERMINAL_COLS = 120;
 const DEFAULT_TERMINAL_ROWS = 36;
-const ONBOARDING_SEEN_KEY = "easy_terminal.onboarding_seen.v1";
+const DEFAULT_SESSION_NAME = "默认会话";
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -229,7 +229,7 @@ function renderConfig() {
   $("cfg-agent-preset").value = "";
   $("cfg-agent-custom-command").value = "";
   renderAgentPresetControls();
-  setAgentPresetStatus("选择常用 Agent 后，会自动补默认会话预设。");
+  setAgentPresetStatus("选择默认会话 Agent 后，会自动补默认会话预设；已有会话名预设时不会覆盖。");
   $("preset-session-name").value = "";
   state.editingPresetCommand = null;
   setPresetStatus("");
@@ -269,24 +269,14 @@ async function openConfigDialog(targetID = "config-lark") {
   $("config-dialog").showModal();
 }
 
-function onboardingSeen() {
-  try {
-    return window.localStorage?.getItem(ONBOARDING_SEEN_KEY) === "1";
-  } catch {
-    return true;
-  }
-}
-
-function markOnboardingSeen() {
-  try {
-    window.localStorage?.setItem(ONBOARDING_SEEN_KEY, "1");
-  } catch {}
-}
-
 function maybeShowOnboarding() {
-  if (onboardingSeen()) return;
+  if (!state.config || state.config.onboarding_completed) return;
   const dialog = $("onboarding-dialog");
   if (!dialog || $("config-dialog").open || $("help-dialog").open) return;
+  $("onboarding-agent-preset").value = "";
+  $("onboarding-agent-custom-command").value = "";
+  renderOnboardingAgentControls();
+  setOnboardingAgentStatus("");
   dialog.showModal();
 }
 
@@ -325,6 +315,7 @@ function readConfigForm() {
     session_pre_start_command: $("cfg-prestart-command").value,
     lark_notify_drop_line_patterns: dropRules,
     lark_custom_shortcuts: customShortcuts,
+    onboarding_completed: Boolean(state.config?.onboarding_completed),
     session_name_presets: namePresets,
     session_start_presets: startPresets,
   };
@@ -556,12 +547,16 @@ function renderLarkTestResult(result) {
 }
 
 function agentPresetCommand() {
-  const preset = $("cfg-agent-preset").value;
-  if (preset === "custom") return $("cfg-agent-custom-command").value.trim();
+  return agentCommandForPreset($("cfg-agent-preset").value, $("cfg-agent-custom-command").value);
+}
+
+function agentCommandForPreset(preset, customCommand = "") {
+  if (preset === "custom") return customCommand.trim();
   return {
-    codex: "codex",
-    claude: "claude",
-    opencode: "opencode",
+    codex: "codex --dangerously-bypass-approvals-and-sandbox",
+    opencode: "opencode --dangerously-skip-permissions",
+    claude: "claude --dangerously-skip-permissions",
+    gemini: "gemini --yolo",
   }[preset] || "";
 }
 
@@ -584,7 +579,7 @@ function ensureDefaultAgentPreset() {
     setAgentPresetStatus("会话名预设 JSON 格式不正确，先修正后再生成。", false);
     return;
   }
-  const sessionName = $("cfg-lark-default-session-name").value.trim() || "临时";
+  const sessionName = $("cfg-lark-default-session-name").value.trim() || DEFAULT_SESSION_NAME;
   if (presets[sessionName]) {
     setAgentPresetStatus(`“${sessionName}”已有预设，未覆盖。`, null);
     return;
@@ -597,6 +592,44 @@ function ensureDefaultAgentPreset() {
   presets[sessionName] = { commands: [command] };
   writeNamePresetsFromUI(presets);
   setAgentPresetStatus(`已为“${sessionName}”补充预设：${command}`, true);
+}
+
+function renderOnboardingAgentControls() {
+  const custom = $("onboarding-agent-preset").value === "custom";
+  $("onboarding-agent-custom-command").hidden = !custom;
+  $("onboarding-agent-custom-command").classList.toggle("hidden", !custom);
+}
+
+function setOnboardingAgentStatus(message, ok = null) {
+  const el = $("onboarding-agent-status");
+  el.textContent = message || "";
+  el.classList.toggle("ok", ok === true);
+  el.classList.toggle("fail", ok === false);
+}
+
+function setDefaultAgentPresetInConfig(cfg, preset, customCommand) {
+  const command = agentCommandForPreset(preset, customCommand);
+  const sessionName = (cfg.lark_default_session_name || DEFAULT_SESSION_NAME).trim() || DEFAULT_SESSION_NAME;
+  const presets = cfg.session_name_presets && typeof cfg.session_name_presets === "object" && !Array.isArray(cfg.session_name_presets)
+    ? { ...cfg.session_name_presets }
+    : {};
+  if (command && !presets[sessionName]) {
+    presets[sessionName] = { commands: [command] };
+  }
+  return { ...cfg, lark_default_session_name: sessionName, session_name_presets: presets, onboarding_completed: true };
+}
+
+async function completeOnboarding(options = {}) {
+  if (!state.config) await loadConfig();
+  const preset = options.skip ? "" : $("onboarding-agent-preset").value;
+  const customCommand = $("onboarding-agent-custom-command").value.trim();
+  if (preset === "custom" && !customCommand) {
+    setOnboardingAgentStatus("请填写自定义 Agent 启动命令，或选择跳过。", false);
+    return;
+  }
+  state.config = setDefaultAgentPresetInConfig(state.config, preset, customCommand);
+  state.config = await api("/api/config", { method: "PATCH", body: JSON.stringify(state.config) });
+  $("onboarding-dialog").close();
 }
 
 function readNamePresetsForUI() {
@@ -1089,19 +1122,25 @@ document.querySelectorAll(".config-tab").forEach((tab) => {
   };
 });
 
+$("onboarding-agent-preset").onchange = () => {
+  renderOnboardingAgentControls();
+  setOnboardingAgentStatus("");
+};
+
 $("onboarding-config").onclick = async () => {
-  markOnboardingSeen();
-  $("onboarding-dialog").close();
   try {
-    await openConfigDialog("config-lark");
+    await completeOnboarding();
   } catch (err) {
-    console.error(err);
+    setOnboardingAgentStatus(err.message || String(err), false);
   }
 };
 
-$("onboarding-later").onclick = () => {
-  markOnboardingSeen();
-  $("onboarding-dialog").close();
+$("onboarding-later").onclick = async () => {
+  try {
+    await completeOnboarding({ skip: true });
+  } catch (err) {
+    setOnboardingAgentStatus(err.message || String(err), false);
+  }
 };
 
 async function startLarkRegistration() {
