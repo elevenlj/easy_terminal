@@ -823,13 +823,13 @@ func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 	}
 }
 
-func TestLarkReplyBridgeStartWithoutCodesOnlyEntersWorkspace(t *testing.T) {
+func TestLarkReplyBridgeStartWithoutCodesUsesDefaultAgentPreset(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	bridge.SetStartPresets(map[string]SessionStartPreset{
-		"0": {Commands: []string{"codex --dangerously-bypass-approvals-and-sandbox"}},
+		"999999": {Commands: []string{"codex --dangerously-bypass-approvals-and-sandbox"}},
 	})
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-no-code", "", "", "text", `{"text":"开始 测试"}`)); err != nil {
@@ -839,6 +839,7 @@ func TestLarkReplyBridgeStartWithoutCodesOnlyEntersWorkspace(t *testing.T) {
 	want := []string{
 		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
 		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"codex --dangerously-bypass-approvals-and-sandbox\r",
 	}
 	if len(parts) != len(want) {
 		t.Fatalf("default workspace writes = %#v, want %#v", parts, want)

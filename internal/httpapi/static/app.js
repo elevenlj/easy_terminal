@@ -230,7 +230,7 @@ function renderConfig() {
   $("lark-test-result").innerHTML = "";
   renderDefaultAgentPresetFromStartPreset(cfg.session_start_presets || {});
   renderAgentPresetControls();
-  setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 号启动预设；发送“开始 会话名 ${DEFAULT_AGENT_PRESET_CODE}”可启动它。0 号表示仅进入目录。`);
+  setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 号启动预设；发送“开始 会话名”会默认启动它。0 号表示仅进入目录。`);
   $("preset-session-name").value = "";
   state.editingPresetCommand = null;
   setPresetStatus("");

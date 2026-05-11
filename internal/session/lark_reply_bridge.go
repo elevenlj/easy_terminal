@@ -509,6 +509,9 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 				if workspaceErr := b.runDefaultWorkspacePreset(s); workspaceErr != nil {
 					log.Printf("lark default workspace preset failed session=%s name=%q: %v", s.ID, s.Name, workspaceErr)
 				}
+				if strings.TrimSpace(presetCodes) == "" {
+					presetCodes = "999999"
+				}
 				if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
 					log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
 				}
