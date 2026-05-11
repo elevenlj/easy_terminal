@@ -212,6 +212,7 @@ const ids = [
   "lark-test-result",
   "cfg-fast-waiting",
   "cfg-conservative-waiting",
+  "cfg-auto-refresh-interval",
   "cfg-lark-max-lines",
   "cfg-lark-app-id",
   "cfg-lark-app-secret",
@@ -341,6 +342,7 @@ const context = {
       return jsonResponse({
         fast_waiting_transition_ms: 300,
         conservative_waiting_transition_ms: 700,
+        lark_auto_refresh_interval_ms: 5000,
         lark_notify_max_lines: 300,
         lark_app_id: "app-id",
         lark_app_secret: "secret",
@@ -609,6 +611,7 @@ elements["startup-json-preview"].value = JSON.stringify({
 }, null, 2);
 elements["startup-json-preview"].oninput();
 elements["cfg-fast-waiting"].value = "450";
+elements["cfg-auto-refresh-interval"].value = "6000";
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
@@ -630,6 +633,7 @@ const configPatch = fetchCalls.filter((call) => call.path === "/api/config" && c
 assert.ok(configPatch, "config form should PATCH /api/config");
 const patchedConfig = JSON.parse(configPatch.options.body);
 assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
+assert.equal(patchedConfig.lark_auto_refresh_interval_ms, 6000);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);
 assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");

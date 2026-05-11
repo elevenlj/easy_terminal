@@ -256,6 +256,8 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string
 		return b.handleCardCustomShortcut(ctx, value, openMessageID)
 	case "refresh":
 		return b.handleCardRefresh(ctx, value, openMessageID)
+	case "toggle_auto_refresh":
+		return b.handleCardToggleAutoRefresh(ctx, value, openMessageID)
 	default:
 		return larkCardToast("warning", "未知操作"), nil
 	}
@@ -353,6 +355,44 @@ func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[strin
 		log.Printf("lark card manual refresh session=%s message=%s", sessionID, openMessageID)
 	}()
 	return larkCardToast("info", "刷新成功"), nil
+}
+
+func (b *LarkReplyBridge) handleCardToggleAutoRefresh(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
+	if sessionID == "" && openMessageID != "" {
+		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
+			sessionID = id
+		}
+	}
+	if sessionID == "" {
+		return larkCardToast("warning", "未找到会话"), nil
+	}
+	if b.manager == nil {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	rt, exists := b.manager.GetRuntime(sessionID)
+	if !exists {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	updateNo, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value["update_no"])))
+	enabled, err := rt.ToggleAutoRefresh(openMessageID)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
+			log.Printf("lark card auto refresh toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, enabled, err)
+			return
+		}
+		log.Printf("lark card auto refresh toggled session=%s message=%s enabled=%v", sessionID, openMessageID, enabled)
+	}()
+	if enabled {
+		return larkCardToast("info", "已开启自动刷新"), nil
+	}
+	return larkCardToast("info", "已关闭自动刷新"), nil
 }
 
 func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {

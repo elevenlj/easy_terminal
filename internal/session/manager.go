@@ -21,6 +21,7 @@ const (
 	maxRoundBytes                        = 64 * 1024
 	defaultFastWaitingTransition         = 300 * time.Millisecond
 	defaultConservativeWaitingTransition = 700 * time.Millisecond
+	defaultAutoRefreshInterval           = 5 * time.Second
 	defaultNotificationUpdateCoalesce    = 0
 	defaultNotifyRetryDelay              = time.Second
 	defaultNotifySnapshotTimeout         = 1200 * time.Millisecond
@@ -59,6 +60,7 @@ type Manager struct {
 	idCounter           atomic.Int64
 	fastWaiting         time.Duration
 	conservativeWaiting time.Duration
+	autoRefreshInterval time.Duration
 	updateCoalesce      time.Duration
 	preStartCommand     string
 	sessions            map[string]*RuntimeSession
@@ -75,6 +77,7 @@ func NewManager(store Store, launcher Launcher, opts ...ManagerOption) *Manager 
 		launcher:            launcher,
 		fastWaiting:         defaultFastWaitingTransition,
 		conservativeWaiting: defaultConservativeWaitingTransition,
+		autoRefreshInterval: defaultAutoRefreshInterval,
 		updateCoalesce:      defaultNotificationUpdateCoalesce,
 		sessions:            make(map[string]*RuntimeSession),
 	}
@@ -116,6 +119,14 @@ func WithNotificationUpdateCoalesce(delay time.Duration) ManagerOption {
 	}
 }
 
+func WithAutoRefreshInterval(interval time.Duration) ManagerOption {
+	return func(m *Manager) {
+		if interval > 0 {
+			m.autoRefreshInterval = interval
+		}
+	}
+}
+
 func WithBrowserNeeded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onBrowserNeeded = fn }
 }
@@ -137,6 +148,23 @@ func (m *Manager) SetWaitingTransitionDelays(fast, conservative time.Duration) {
 	if conservative > 0 {
 		m.conservativeWaiting = conservative
 	}
+}
+
+func (m *Manager) SetAutoRefreshInterval(interval time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if interval > 0 {
+		m.autoRefreshInterval = interval
+	}
+}
+
+func (m *Manager) autoRefreshDelay() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.autoRefreshInterval <= 0 {
+		return defaultAutoRefreshInterval
+	}
+	return m.autoRefreshInterval
 }
 
 func (m *Manager) SetPreStartCommand(command string) {
@@ -451,6 +479,9 @@ type RuntimeSession struct {
 	notificationRunning      bool
 	suppressRunningMarker    bool
 	notificationPatchVersion int64
+	autoRefreshEnabled       bool
+	autoRefreshMessageID     string
+	autoRefreshStop          chan struct{}
 	startupNotifyMode        startupNotifyMode
 	subscribers              map[chan RuntimeEvent]struct{}
 	snapshotWaiters          []chan struct{}
@@ -681,11 +712,12 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		ChatID:              rt.session.LarkChatID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
+		AutoRefreshEnabled:  rt.autoRefreshEnabled,
 		NotificationVersion: patchVersion,
 	}
-	log.Printf("lark card write queued source=%s action=running_create session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", source, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 	rt.notificationRunning = true
 	rt.mu.Unlock()
+	log.Printf("lark card write queued source=%s action=running_create session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", source, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 
 	rt.notificationPatchMu.Lock()
 	rt.mu.Lock()
@@ -714,6 +746,7 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 	if rt.notificationPatchVersion == n.NotificationVersion {
 		if result.MessageID != "" {
 			rt.lastNotifiedMessageID = result.MessageID
+			rt.bindAutoRefreshMessageLocked(result.MessageID)
 		}
 		rt.lastNotifiedContent = n.Content
 		rt.notificationRunning = true
@@ -760,12 +793,13 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveU
 		ChatID:              rt.session.LarkChatID,
 		UpdateNo:            updateNo,
 		Running:             running,
+		AutoRefreshEnabled:  rt.autoRefreshEnabled,
 		SuppressUpdateTip:   true,
 		NotificationVersion: patchVersion,
 	}
-	log.Printf("lark card write queued source=manual_refresh action=patch session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 	rt.notificationRunning = n.Running
 	rt.mu.Unlock()
+	log.Printf("lark card write queued source=manual_refresh action=patch session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 
 	rt.notificationPatchMu.Lock()
 	result, err := rt.manager.notifier.NotifyWaiting(n)
@@ -777,8 +811,10 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveU
 	if rt.notificationPatchVersion == n.NotificationVersion {
 		if result.MessageID != "" {
 			rt.lastNotifiedMessageID = result.MessageID
+			rt.bindAutoRefreshMessageLocked(result.MessageID)
 		} else {
 			rt.lastNotifiedMessageID = messageID
+			rt.bindAutoRefreshMessageLocked(messageID)
 		}
 		rt.lastNotifiedContent = content
 		rt.lastNotifiedRoundHash = contentHash
@@ -791,6 +827,83 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveU
 	defaultLarkMessageRegistry.remember(rt.session.ID, messageID)
 	defaultLarkMessageRegistry.rememberLatest(rt.session.ID)
 	return nil
+}
+
+func (rt *RuntimeSession) bindAutoRefreshMessageLocked(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if rt.autoRefreshEnabled && messageID != "" {
+		rt.autoRefreshMessageID = messageID
+	}
+}
+
+func (rt *RuntimeSession) ToggleAutoRefresh(messageID string) (bool, error) {
+	if rt == nil {
+		return false, errors.New("session is not available")
+	}
+	messageID = strings.TrimSpace(messageID)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.session.Live || !rt.session.NotifyOnWaiting {
+		return false, errors.New("notification is not enabled")
+	}
+	if messageID == "" {
+		messageID = rt.lastNotifiedMessageID
+	}
+	if messageID == "" {
+		return false, errors.New("notification message is not available")
+	}
+	if rt.autoRefreshEnabled {
+		rt.stopAutoRefreshLocked()
+		return false, nil
+	}
+	rt.autoRefreshEnabled = true
+	rt.autoRefreshMessageID = messageID
+	stop := make(chan struct{})
+	rt.autoRefreshStop = stop
+	go rt.autoRefreshLoop(stop)
+	return true, nil
+}
+
+func (rt *RuntimeSession) stopAutoRefreshLocked() {
+	if rt.autoRefreshStop != nil {
+		close(rt.autoRefreshStop)
+		rt.autoRefreshStop = nil
+	}
+	rt.autoRefreshEnabled = false
+	rt.autoRefreshMessageID = ""
+}
+
+func (rt *RuntimeSession) autoRefreshLoop(stop <-chan struct{}) {
+	timer := time.NewTimer(rt.manager.autoRefreshDelay())
+	defer timer.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+		}
+		rt.mu.Lock()
+		if !rt.autoRefreshEnabled || rt.autoRefreshStop != stop {
+			rt.mu.Unlock()
+			return
+		}
+		if !rt.session.Live || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
+			rt.stopAutoRefreshLocked()
+			rt.mu.Unlock()
+			return
+		}
+		messageID := rt.autoRefreshMessageID
+		updateNo := rt.notificationUpdateNo
+		running := rt.session.Status == StatusRunning
+		sessionID := rt.session.ID
+		rt.mu.Unlock()
+		if running && messageID != "" {
+			if err := rt.RefreshNotificationMessage(messageID, updateNo); err != nil {
+				log.Printf("lark card auto refresh failed session=%s message=%s: %v", sessionID, messageID, err)
+			}
+		}
+		timer.Reset(rt.manager.autoRefreshDelay())
+	}
 }
 
 func (rt *RuntimeSession) recordInputLocked(data string) bool {
@@ -935,6 +1048,7 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 
 func (rt *RuntimeSession) Close() {
 	rt.mu.Lock()
+	rt.stopAutoRefreshLocked()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.stopStartupNotifyTimerLocked()
@@ -979,6 +1093,7 @@ func (rt *RuntimeSession) waitForExit() {
 
 func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.mu.Lock()
+	rt.stopAutoRefreshLocked()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.stopStartupNotifyTimerLocked()
@@ -1104,6 +1219,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		n.UpdateNo = rt.notificationUpdateNo + 1
 		n.Running = false
 	}
+	n.AutoRefreshEnabled = rt.autoRefreshEnabled
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion
 	roundInput := rt.lastInputText
@@ -1158,6 +1274,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 			rt.lastNotifiedRoundHash = contentHash
 			if result.MessageID != "" {
 				rt.lastNotifiedMessageID = result.MessageID
+				rt.bindAutoRefreshMessageLocked(result.MessageID)
 			}
 			rt.lastNotifiedContent = n.Content
 			if result.Updated {
@@ -1167,6 +1284,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		}
 	} else if result.MessageID != "" && !result.Updated && sameRound && rt.lastNotifiedMessageID == "" {
 		rt.lastNotifiedMessageID = result.MessageID
+		rt.bindAutoRefreshMessageLocked(result.MessageID)
 		rt.lastNotifiedContent = n.Content
 		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
@@ -1224,6 +1342,7 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		ChatID:              rt.session.LarkChatID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
+		AutoRefreshEnabled:  rt.autoRefreshEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
 	}, true
 }
@@ -1250,6 +1369,7 @@ func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, 
 		ChatID:              rt.session.LarkChatID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             false,
+		AutoRefreshEnabled:  rt.autoRefreshEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
 	}, true
 }

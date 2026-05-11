@@ -183,6 +183,7 @@ func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roun
 		}
 	}
 	body = cleanupLarkNotifyText(body, lastInputText)
+	body = restoreWrappedInputEcho(body, lastInputText)
 	body = dropConfiguredLarkNotifyLines(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
@@ -608,6 +609,73 @@ func cleanupLarkNotifyText(text string, lastInputText string) string {
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func restoreWrappedInputEcho(text string, lastInputText string) string {
+	input := strings.TrimSpace(lastInputText)
+	if strings.TrimSpace(text) == "" || input == "" {
+		return text
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		if restored, end, ok := restoredWrappedInputEchoAt(lines, i, input); ok {
+			out = append(out, restored)
+			i = end
+			continue
+		}
+		out = append(out, lines[i])
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func restoredWrappedInputEchoAt(lines []string, i int, input string) (string, int, bool) {
+	text, ok := inputEchoText(lines[i])
+	if !ok {
+		return "", i, false
+	}
+	target := compactAnchorText(input)
+	current := compactAnchorText(text)
+	if target == "" || current == "" || current == target || !strings.HasPrefix(target, current) {
+		return "", i, false
+	}
+	for j := i + 1; j < len(lines) && j <= i+6; j++ {
+		trimmed := strings.TrimSpace(lines[j])
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := inputEchoText(trimmed); ok {
+			return "", i, false
+		}
+		if strings.HasPrefix(trimmed, "• ") || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
+			return "", i, false
+		}
+		current += compactAnchorText(trimmed)
+		if current == target || strings.HasPrefix(current, target) {
+			return inputEchoPrefix(lines[i]) + input, j, true
+		}
+		if !strings.HasPrefix(target, current) {
+			return "", i, false
+		}
+	}
+	return "", i, false
+}
+
+func inputEchoPrefix(line string) string {
+	trimmed := strings.TrimSpace(line)
+	for _, prompt := range []string{"›", ">", "%", "$", "#"} {
+		if trimmed == prompt {
+			return prompt + " "
+		}
+		if strings.HasPrefix(trimmed, prompt+" ") {
+			return prompt + " "
+		}
+		marker := " " + prompt + " "
+		if idx := strings.LastIndex(trimmed, marker); idx >= 0 {
+			return strings.TrimSpace(trimmed[:idx+len(marker)])
+		}
+	}
+	return ""
 }
 
 func isPureHorizontalRuleLine(line string) bool {

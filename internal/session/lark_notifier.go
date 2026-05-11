@@ -29,15 +29,16 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 	if n.MentionAll {
 		content = "<at id=all></at>\n" + content
 	}
+	elements := []map[string]any{
+		{"tag": "markdown", "content": content},
+	}
+	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
 	payload := map[string]any{
 		"msg_type": "interactive",
 		"card": map[string]any{
 			"schema": "2.0",
 			"header": map[string]any{"template": "blue", "title": map[string]any{"tag": "plain_text", "content": note.Name}},
-			"body": map[string]any{"elements": []map[string]any{
-				{"tag": "markdown", "content": content},
-				larkShortcutActionElement(note.SessionID, note.UpdateNo),
-			}},
+			"body":   map[string]any{"elements": elements},
 		},
 	}
 	b, _ := json.Marshal(payload)

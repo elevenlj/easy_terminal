@@ -245,8 +245,22 @@ func TestPickNotifyContentAnchorsOnWrappedCodexInput(t *testing.T) {
 	if strings.Contains(got, "旧回复") || strings.Contains(got, "OpenAI Codex") {
 		t.Fatalf("wrapped input anchor did not trim previous codex history: %q", got)
 	}
-	if !strings.Contains(got, "› 它应该有默认音色吧") || !strings.Contains(got, "段测试") || !strings.Contains(got, "这是当前轮回复") {
+	if !strings.Contains(got, "› "+input) || strings.Contains(got, "生成一\n段测试") || !strings.Contains(got, "这是当前轮回复") {
 		t.Fatalf("wrapped input anchored content missing expected current round: %q", got)
+	}
+}
+
+func TestPickNotifyContentRestoresWrappedInputEcho(t *testing.T) {
+	input := "记住我的要求。因为你最终输出的信息是会通过飞书让用户看见，而不是在终端看见。所以你的输出一定要控制好格式。首先，不要输出你的思考过程，不要显示代码修改的内容。你只输出你做了什么就够了，而且尽量保持是中文。明白吗？反正就要保证你的输出够友好"
+	visible := strings.Join([]string{
+		"› 记住我的要求。因为你最终输出的信息是会通过飞书让用户看见，而不是在终端看见。所以你的输",
+		"出一定要控制好格式。首先，不要输出你的思考过程，不要显示代码修改的内容。你只输出你做",
+		"了什么就够了，而且尽量保持是中文。明白吗？反正就要保证你的输出够友好",
+		"• 明白。",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, input)
+	if !strings.Contains(got, "› "+input) || strings.Contains(got, "你的输\n出") || strings.Contains(got, "你做\n了") {
+		t.Fatalf("wrapped input echo was not restored: %q", got)
 	}
 }
 

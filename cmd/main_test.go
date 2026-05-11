@@ -63,8 +63,8 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("LARK_MENTION_ENABLED", "")
 
 	cfg := loadConfig()
-	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkNotifyMaxLines != 100 {
-		t.Fatalf("numeric defaults = %d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkNotifyMaxLines)
+	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 100 {
+		t.Fatalf("numeric defaults = %d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines)
 	}
 	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
 		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)
@@ -79,6 +79,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkDefaultSessionName:          "默认会话",
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
+		LarkAutoRefreshIntervalMs:       5000,
 		LarkNotifyMaxLines:              300,
 	}
 	mgr := session.NewManager(nil, nil)
@@ -92,6 +93,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkDefaultSessionName:          "默认",
 		FastWaitingTransitionMs:         450,
 		ConservativeWaitingTransitionMs: 900,
+		LarkAutoRefreshIntervalMs:       6000,
 		LarkNotifyMaxLines:              120,
 		LarkNotifyDropLineRules: session.LarkNotifyDropLineRules{
 			{Title: "noise", Pattern: "noise"},
@@ -106,7 +108,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FastWaitingTransitionMs != 450 || got.LarkAppID != "app" {
+	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" {
 		t.Fatalf("unexpected runtime config: %#v", got)
 	}
 	b, err := os.ReadFile(path)
@@ -117,7 +119,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err := json.Unmarshal(b, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.FastWaitingTransitionMs != 450 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
+	if saved.FastWaitingTransitionMs != 450 || saved.LarkAutoRefreshIntervalMs != 6000 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
 		t.Fatalf("config file was not updated: %#v", saved)
 	}
 	if len(saved.LarkNotifyDropLineRules) != 2 || saved.LarkNotifyDropLineRules[0].Pattern != "noise" {

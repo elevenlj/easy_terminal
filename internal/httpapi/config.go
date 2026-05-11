@@ -20,6 +20,7 @@ type RuntimeConfig struct {
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
+	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
 	LarkNotifyDropLineRules         session.LarkNotifyDropLineRules       `json:"lark_notify_drop_line_patterns"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`

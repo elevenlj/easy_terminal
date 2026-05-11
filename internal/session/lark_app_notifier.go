@@ -84,7 +84,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	}
 	elements = append(elements, map[string]any{"tag": "markdown", "content": note.Content})
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
-	elements = append(elements, larkShortcutActionElement(note.SessionID, note.UpdateNo))
+	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
 	if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 		elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
 	}
@@ -114,18 +114,58 @@ func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomSh
 	return out
 }
 
-func larkShortcutActionElement(sessionID string, updateNo int) map[string]any {
+func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool) []map[string]any {
+	return []map[string]any{
+		larkShortcutActionElement(
+			larkRefreshButtonColumn(sessionID, updateNo),
+			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
+		),
+		larkShortcutActionElement(
+			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
+			larkShortcutButtonColumn("退出", "primary", sessionID, "exit_agent"),
+			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
+			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
+		),
+	}
+}
+
+func larkShortcutActionElement(columns ...map[string]any) map[string]any {
 	return map[string]any{
 		"tag":                "column_set",
 		"flex_mode":          "none",
 		"horizontal_align":   "left",
 		"horizontal_spacing": "4px",
-		"columns": []map[string]any{
-			larkRefreshButtonColumn(sessionID, updateNo),
-			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
-			larkShortcutButtonColumn("退出 Agent", "primary", sessionID, "exit_agent"),
-			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
-			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
+		"columns":            columns,
+	}
+}
+
+func larkAutoRefreshButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
+	label := "自动刷新"
+	if enabled {
+		label = "停自动"
+	}
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":   "button",
+				"type":  "primary",
+				"size":  "tiny",
+				"width": "default",
+				"text":  map[string]any{"tag": "plain_text", "content": label},
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "toggle_auto_refresh",
+							"session_id":           sessionID,
+							"update_no":            updateNo,
+						},
+					},
+				},
+			},
 		},
 	}
 }
@@ -172,7 +212,7 @@ func larkRefreshButtonColumn(sessionID string, updateNo int) map[string]any {
 				"type":  "primary",
 				"size":  "tiny",
 				"width": "default",
-				"text":  map[string]any{"tag": "plain_text", "content": "刷新消息"},
+				"text":  map[string]any{"tag": "plain_text", "content": "刷新"},
 				"behaviors": []map[string]any{
 					{
 						"type": "callback",
@@ -212,6 +252,7 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 				"tag":           "interactive_container",
 				"width":         "auto",
 				"height":        "auto",
+				"has_border":    true,
 				"border_color":  "green",
 				"corner_radius": "4px",
 				"padding":       "4px 8px",

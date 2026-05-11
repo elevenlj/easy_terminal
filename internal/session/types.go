@@ -44,6 +44,7 @@ type WaitingNotification struct {
 	ChatID              string
 	UpdateNo            int
 	Running             bool
+	AutoRefreshEnabled  bool
 	SuppressUpdateTip   bool
 	NotificationVersion int64
 }

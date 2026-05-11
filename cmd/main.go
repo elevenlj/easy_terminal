@@ -27,6 +27,7 @@ const (
 	defaultLarkSessionChatPrefix           = "ET · "
 	defaultFastWaitingTransitionMs         = 1000
 	defaultConservativeWaitingTransitionMs = 3000
+	defaultLarkAutoRefreshIntervalMs       = 5000
 	defaultLarkNotifyMaxLines              = 100
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
 )
@@ -41,6 +42,7 @@ type Config struct {
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
+	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
 	LarkNotifyDropLineRules         session.LarkNotifyDropLineRules       `json:"lark_notify_drop_line_patterns"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
@@ -103,6 +105,7 @@ func run() error {
 			time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond,
 			time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond,
 		),
+		session.WithAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs)*time.Millisecond),
 		session.WithBrowserNeeded(headless.Ensure),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 		session.WithSessionEnded(func(sessionID string) {
@@ -155,6 +158,7 @@ func loadConfig() Config {
 		LarkSessionChatPrefix:           defaultLarkSessionChatPrefix,
 		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
+		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
 	}
 	if b, err := os.ReadFile(defaultConfigPath()); err == nil {
@@ -177,6 +181,9 @@ func loadConfig() Config {
 	}
 	if cfg.ConservativeWaitingTransitionMs <= 0 {
 		cfg.ConservativeWaitingTransitionMs = defaultConservativeWaitingTransitionMs
+	}
+	if cfg.LarkAutoRefreshIntervalMs <= 0 {
+		cfg.LarkAutoRefreshIntervalMs = defaultLarkAutoRefreshIntervalMs
 	}
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = defaultLarkNotifyMaxLines
@@ -212,7 +219,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	defer s.mu.Unlock()
 	oldCfg := *s.cfg
 	cfg := *s.cfg
-	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkNotifyMaxLines <= 0 {
+	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.LarkNotifyMaxLines <= 0 {
 		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
 	}
 	if req.SessionStartPresets == nil {
@@ -229,6 +236,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(req.LarkSessionChatPrefix)
 	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
+	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
 	cfg.LarkNotifyMaxLines = req.LarkNotifyMaxLines
 	cfg.LarkNotifyDropLineRules = req.LarkNotifyDropLineRules
 	cfg.SessionPreStartCommand = req.SessionPreStartCommand
@@ -249,6 +257,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 
 func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.LarkReplyBridge, reconnectLark bool) error {
 	manager.SetWaitingTransitionDelays(time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond, time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond)
+	manager.SetAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs) * time.Millisecond)
 	manager.SetPreStartCommand(cfg.SessionPreStartCommand)
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -282,6 +291,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 	return httpapi.RuntimeConfig{
 		FastWaitingTransitionMs:         cfg.FastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: cfg.ConservativeWaitingTransitionMs,
+		LarkAutoRefreshIntervalMs:       cfg.LarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              cfg.LarkNotifyMaxLines,
 		LarkNotifyDropLineRules:         cfg.LarkNotifyDropLineRules.Rules(),
 		SessionPreStartCommand:          cfg.SessionPreStartCommand,

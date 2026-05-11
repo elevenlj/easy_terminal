@@ -731,6 +731,55 @@ func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeCardToggleAutoRefreshPatchesClickedMessage(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier), WithAutoRefreshInterval(time.Hour))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := manager.GetRuntime(sess.ID)
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "toggle_auto_refresh",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已开启自动刷新" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].AutoRefreshEnabled || !notes[0].SuppressUpdateTip {
+		t.Fatalf("toggle should patch clicked card as auto refresh enabled, got %#v", notes)
+	}
+
+	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已关闭自动刷新" {
+		t.Fatalf("unexpected close response: %#v", resp)
+	}
+	notes = waitForNotifierNotes(t, notifier, 2)
+	if len(notes) < 2 || notes[1].AutoRefreshEnabled {
+		t.Fatalf("toggle close should patch clicked card as auto refresh disabled, got %#v", notes)
+	}
+}
+
 func waitForNotifierNotes(t *testing.T, notifier *recordingNotifier, want int) []WaitingNotification {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

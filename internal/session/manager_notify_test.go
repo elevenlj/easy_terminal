@@ -416,6 +416,32 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 }
 
+func TestAutoRefreshRebindsToNewRunningCard(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "new-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithAutoRefreshInterval(time.Hour))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	if enabled, err := rt.ToggleAutoRefresh("old-card"); err != nil || !enabled {
+		t.Fatalf("toggle auto refresh = %v, %v", enabled, err)
+	}
+
+	rt.MarkInputActivity("echo hello\r")
+	rt.NotifyInputRunning()
+
+	rt.mu.Lock()
+	messageID := rt.autoRefreshMessageID
+	rt.mu.Unlock()
+	if messageID != "new-card" {
+		t.Fatalf("auto refresh should follow the new running card, got %q", messageID)
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].MessageID != "" || !notes[0].AutoRefreshEnabled {
+		t.Fatalf("running notification should create a new auto-refresh-enabled card, got %#v", notes)
+	}
+}
+
 func TestRefreshNotificationMessagePreventsStaleRunningPlaceholderOverwrite(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
@@ -929,15 +955,19 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if strings.Contains(content, "Ctrl-D") || strings.Contains(content, "ctrl_d") {
 		t.Fatalf("card content should not include Ctrl-D, got %s", content)
 	}
-	if !strings.Contains(content, "退出 Agent") || !strings.Contains(content, "exit_agent") {
+	if !strings.Contains(content, "退出") || !strings.Contains(content, "exit_agent") {
 		t.Fatalf("card content should include exit agent shortcut, got %s", content)
 	}
-	if !strings.Contains(content, "刷新消息") || !strings.Contains(content, `"easy_terminal_action":"refresh"`) {
+	if !strings.Contains(content, "刷新") || !strings.Contains(content, `"easy_terminal_action":"refresh"`) {
 		t.Fatalf("card content should include manual refresh button, got %s", content)
 	}
-	if !(strings.Index(content, `"content":"刷新消息"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出 Agent"`) &&
-		strings.Index(content, `"content":"退出 Agent"`) < strings.Index(content, `"content":"Esc"`) &&
+	if !strings.Contains(content, "自动刷新") || !strings.Contains(content, `"easy_terminal_action":"toggle_auto_refresh"`) {
+		t.Fatalf("card content should include auto refresh button, got %s", content)
+	}
+	if !(strings.Index(content, `"content":"刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
+		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
+		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出"`) &&
+		strings.Index(content, `"content":"退出"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
 		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
@@ -945,15 +975,15 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
 		t.Fatalf("card content should include custom shortcut row, got %s", content)
 	}
-	for _, label := range []string{"刷新消息", "Ctrl-C", "退出 Agent", "Esc", "Enter"} {
+	for _, label := range []string{"刷新", "自动刷新", "Ctrl-C", "退出", "Esc", "Enter"} {
 		if !strings.Contains(content, `"content":"`+label+`"`) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
 	}
-	if strings.Count(content, `"type":"primary"`) < 5 {
+	if strings.Count(content, `"type":"primary"`) < 6 {
 		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
 	}
-	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
+	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"has_border":true`) || !strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
 		t.Fatalf("custom shortcut actions should use green text and border without green background, got %s", content)
 	}
 	if !strings.Contains(content, `\u003cfont color=\"green\"\u003e状态\u003c/font\u003e`) {
@@ -967,6 +997,19 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	}
 	if !strings.Contains(content, `"schema":"2.0"`) || !strings.Contains(content, `"behaviors"`) || !strings.Contains(content, `"callback"`) {
 		t.Fatalf("card shortcut buttons should use card 2.0 callback behavior, got %s", content)
+	}
+	enabled, err := larkNotificationCardContent(WaitingNotification{
+		SessionID:          "sess-1",
+		Name:               "A",
+		Content:            RunningNotificationPlaceholder,
+		Running:            true,
+		AutoRefreshEnabled: true,
+	}, "ou_1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(enabled, "停自动") {
+		t.Fatalf("enabled auto refresh card should show close button, got %s", enabled)
 	}
 }
 

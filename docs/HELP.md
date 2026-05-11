@@ -103,6 +103,7 @@ pwd | ls -la | git status
 - 卡片内显示 `已更新-N`。
 - 每次内容更新后，会回复原卡片发送一条极简提示卡片，只包含 `已更新-N`。
 - 卡片快捷键和“刷新消息”按钮会继续锚定当前卡片。
+- 卡片开启自动刷新后，会话在 running 状态下按配置间隔自动更新当前卡片；自动刷新不递增 `已更新-N`，也不会发送额外提示卡片。
 - 用户提交新一轮输入后，会重新创建新的飞书主通知。
 
 ## 飞书卡片快捷键
@@ -113,6 +114,7 @@ pwd | ls -la | git status
 - `Esc`
 - `Enter`
 - `刷新消息`
+- `开启自动刷新` / `关闭自动刷新`
 
 自定义快捷键通过 `lark_custom_shortcuts` 配置，显示在系统快捷键下一行。点击后会把对应指令提交到当前会话。
 
@@ -184,6 +186,7 @@ pwd | ls -la | git status
 | `lark_session_chat_prefix` | 飞书独立群聊名称前缀，默认 `ET · ` |
 | `fast_waiting_transition_ms` | 普通输出稳定后进入 waiting 的延迟 |
 | `conservative_waiting_transition_ms` | Codex/TUI 等更保守场景的 waiting 延迟 |
+| `lark_auto_refresh_interval_ms` | 飞书卡片自动刷新间隔，默认 5000 |
 | `lark_notify_max_lines` | 飞书通知最多保留尾部行数 |
 | `lark_notify_drop_line_patterns` | 飞书通知按行删除规则；每项包含 `title` 和 `pattern` |
 | `lark_custom_shortcuts` | 飞书通知卡片上的自定义快捷键 |

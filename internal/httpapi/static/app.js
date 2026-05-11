@@ -237,6 +237,7 @@ function renderConfig() {
   stopLarkRegistrationPolling();
   $("cfg-fast-waiting").value = cfg.fast_waiting_transition_ms;
   $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
+  $("cfg-auto-refresh-interval").value = cfg.lark_auto_refresh_interval_ms || 5000;
   $("cfg-lark-max-lines").value = cfg.lark_notify_max_lines;
   $("cfg-lark-app-id").value = cfg.lark_app_id || "";
   $("cfg-lark-app-secret").value = cfg.lark_app_secret || "";
@@ -330,6 +331,7 @@ function readConfigForm() {
     lark_session_chat_prefix: $("cfg-lark-session-chat-prefix").value.trim(),
     fast_waiting_transition_ms: readNumber("cfg-fast-waiting"),
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting"),
+    lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval"),
     lark_notify_max_lines: readNumber("cfg-lark-max-lines"),
     session_pre_start_command: $("cfg-prestart-command").value,
     lark_notify_drop_line_patterns: dropRules,

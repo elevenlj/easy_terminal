@@ -157,6 +157,7 @@
             <div class="config-grid">
               <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="1"></label>
               <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="1"></label>
+              <label><span>自动刷新间隔(ms)</span><input id="cfg-auto-refresh-interval" type="number" min="1" step="1"></label>
               <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="1"></label>
             </div>
             <div class="drop-rule-editor">
@@ -301,6 +302,7 @@
               <div><strong>群聊前缀</strong><span>新建飞书会话群的名称前缀，默认是“ET · ”。</span></div>
               <div><strong>快速等待(ms)</strong><span>普通输出稳定后进入 waiting 的时间，默认 1000。</span></div>
               <div><strong>保守等待(ms)</strong><span>复杂交互场景进入 waiting 的时间，默认 3000。</span></div>
+              <div><strong>自动刷新间隔(ms)</strong><span>飞书卡片开启自动刷新后，running 状态下自动 Patch 当前卡片的间隔，默认 5000。</span></div>
               <div><strong>通知最大行数</strong><span>飞书通知中最多保留多少行终端内容，默认 100。</span></div>
               <div><strong>通知过滤正则</strong><span>每行一个正则，匹配到的输出行不会出现在通知里。</span></div>
               <div><strong>飞书自定义快捷键</strong><span>配置按钮名称和指令。按钮会显示在系统快捷键下一行，点击后提交该指令。</span></div>
