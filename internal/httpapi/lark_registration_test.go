@@ -31,20 +31,38 @@ func TestLarkRegistrationBeginFormRequestsMessageAndCardCapabilities(t *testing.
 	form := larkRegistrationBeginForm()
 	scope := form.Get("scope")
 	for _, want := range []string{
+		"im:message",
 		"im:message:send_as_bot",
 		"im:message.p2p_msg:readonly",
 		"im:message.group_at_msg:readonly",
 		"im:message.group_at_msg.include_bot:readonly",
+		"im:message:readonly",
+		"im:message:update",
+		"im:message.reactions:read",
+		"im:message.reactions:write_only",
+		"im:resource",
+		"im:chat:create",
 		"im:chat:read",
+		"im:chat:update",
+		"im:chat.members:read",
 		"im:chat.members:bot_access",
+		"cardkit:card:read",
 		"cardkit:card:write",
 	} {
 		if !strings.Contains(scope, want) {
 			t.Fatalf("scope %q should contain %q", scope, want)
 		}
 	}
-	if form.Get("events") != "im.message.receive_v1" {
-		t.Fatalf("events = %q", form.Get("events"))
+	events := form.Get("events")
+	for _, want := range []string{
+		"im.message.receive_v1",
+		"im.message.message_read_v1",
+		"im.message.reaction.created_v1",
+		"im.message.reaction.deleted_v1",
+	} {
+		if !strings.Contains(events, want) {
+			t.Fatalf("events %q should contain %q", events, want)
+		}
 	}
 	if form.Get("callbacks") != "card.action.trigger" {
 		t.Fatalf("callbacks = %q", form.Get("callbacks"))

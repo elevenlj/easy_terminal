@@ -24,6 +24,7 @@ const (
 
 var (
 	larkRegistrationScopes = []string{
+		"im:message",
 		"im:message:send_as_bot",
 		"im:message.p2p_msg:readonly",
 		"im:message.group_at_msg:readonly",
@@ -33,12 +34,20 @@ var (
 		"im:message.reactions:read",
 		"im:message.reactions:write_only",
 		"im:resource",
+		"im:chat:create",
 		"im:chat:read",
 		"im:chat:update",
+		"im:chat.members:read",
 		"im:chat.members:bot_access",
+		"cardkit:card:read",
 		"cardkit:card:write",
 	}
-	larkRegistrationEvents    = []string{"im.message.receive_v1"}
+	larkRegistrationEvents = []string{
+		"im.message.receive_v1",
+		"im.message.message_read_v1",
+		"im.message.reaction.created_v1",
+		"im.message.reaction.deleted_v1",
+	}
 	larkRegistrationCallbacks = []string{"card.action.trigger"}
 )
 
