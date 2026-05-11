@@ -4,37 +4,31 @@
 
 ## 快速开始
 
-1. 复制配置文件：
-
-   ```sh
-   cp conf/config.local.example.json conf/config.local.json
-   ```
-
-2. 启动服务：
+1. 启动服务：
 
    ```sh
    make run
    ```
 
-3. 打开 Web 页面，首次进入时会看到新手引导。先选择默认会话 Agent，也可以跳过后再配置。
+2. 打开 Web 页面，首次进入会直接进入配置页。保存后会生成本机配置文件 `conf/config.local.json`。
 
-4. 创建会话后即可在网页终端里输入命令；配置飞书后，也可以从飞书创建和继续会话。
+3. 创建会话后即可在网页终端里输入命令；配置飞书后，也可以从飞书创建和继续会话。
 
 ## 首次配置引导
 
-首次进入 Web 端时，系统会弹出新手引导，提示选择默认会话 Agent。这个状态会保存到 `conf/config.local.json`：
+首次进入 Web 端时，系统会直接打开配置页。这个状态会保存到 `conf/config.local.json`：
 
-- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：为默认会话名补一条最大权限启动预设。
-- 点击“跳过”：不配置默认 Agent，只标记已完成引导。
+- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：更新 0 号启动预设。
+- 不选择默认 Agent：不配置 0 号启动预设。
 - 配置入口始终在左下角齿轮按钮。
 
 建议首次配置顺序：
 
 1. 在“飞书”页签中填写或扫码生成 App ID、App Secret、通知接收 ID。
 2. 点击“测试飞书配置”，确认可以发送测试通知。
-3. 在“等待通知”页签里调整通知最大行数、过滤正则和自定义快捷键。
-4. 在“启动预设”页签里选择默认会话 Agent，或手动维护会话启动命令。
-5. 点击 Save 保存到 `conf/config.local.json`。
+3. 在“等待通知”页签里调整通知最大行数和过滤正则。
+4. 在“会话”页签里选择默认会话 Agent，或在“启动预设”页签里手动维护会话启动命令。
+5. 点击“保存”保存到 `conf/config.local.json`。
 
 ## 网页终端
 
@@ -170,11 +164,7 @@ pwd | ls -la | git status
 
 ## 配置文件
 
-主配置文件是 `conf/config.local.json`，建议从示例复制：
-
-```sh
-cp conf/config.local.example.json conf/config.local.json
-```
+主配置文件是 `conf/config.local.json`。首次在 Web 配置页点击“保存”时会自动写入。
 
 常用字段：
 

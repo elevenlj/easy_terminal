@@ -4,12 +4,6 @@
 
 ## 启动
 
-准备配置文件：
-
-```sh
-cp conf/config.local.example.json conf/config.local.json
-```
-
 开发启动：
 
 ```sh
@@ -23,6 +17,8 @@ PORT=9090 make run
 go run ./cmd --port 9090
 go run ./cmd -p 9090
 ```
+
+首次保存 Web 配置时会生成本机配置文件 `conf/config.local.json`。
 
 构建二进制：
 
