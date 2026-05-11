@@ -363,6 +363,8 @@ func larkShortcutInputSequence(key string) (string, string, bool) {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "ctrl_c", "ctrl-c", "control_c", "control-c":
 		return "\x03", "Ctrl-C", true
+	case "exit_agent", "exit-agent", "quit_agent", "quit-agent":
+		return "\x03\x03", "退出 Agent", true
 	case "esc", "escape":
 		return "\x1b", "Esc", true
 	case "enter", "return":

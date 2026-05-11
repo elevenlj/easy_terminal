@@ -663,6 +663,37 @@ func TestLarkReplyBridgeLegacyCardPayloadSendsCtrlC(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeCardShortcutExitsAgentWithDoubleCtrlC(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "shortcut",
+			"session_id":           sess.ID,
+			"key":                  "exit_agent",
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != nil {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	parts := launcher.terminals[0].writeParts()
+	if len(parts) == 0 || parts[len(parts)-1] != "\x03\x03" {
+		t.Fatalf("exit agent shortcut should send two Ctrl-C inputs, got %#v", parts)
+	}
+}
+
 func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

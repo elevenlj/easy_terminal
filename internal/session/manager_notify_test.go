@@ -929,11 +929,15 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if strings.Contains(content, "Ctrl-D") || strings.Contains(content, "ctrl_d") {
 		t.Fatalf("card content should not include Ctrl-D, got %s", content)
 	}
+	if !strings.Contains(content, "退出 Agent") || !strings.Contains(content, "exit_agent") {
+		t.Fatalf("card content should include exit agent shortcut, got %s", content)
+	}
 	if !strings.Contains(content, "刷新消息") || !strings.Contains(content, `"easy_terminal_action":"refresh"`) {
 		t.Fatalf("card content should include manual refresh button, got %s", content)
 	}
 	if !(strings.Index(content, `"content":"刷新消息"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"Esc"`) &&
+		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出 Agent"`) &&
+		strings.Index(content, `"content":"退出 Agent"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
 		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
@@ -941,12 +945,12 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
 		t.Fatalf("card content should include custom shortcut row, got %s", content)
 	}
-	for _, label := range []string{"刷新消息", "Ctrl-C", "Esc", "Enter"} {
+	for _, label := range []string{"刷新消息", "Ctrl-C", "退出 Agent", "Esc", "Enter"} {
 		if !strings.Contains(content, `"content":"`+label+`"`) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
 	}
-	if strings.Count(content, `"type":"primary"`) < 4 {
+	if strings.Count(content, `"type":"primary"`) < 5 {
 		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
 	}
 	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
