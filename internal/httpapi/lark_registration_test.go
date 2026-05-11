@@ -31,11 +31,12 @@ func TestLarkRegistrationBeginFormRequestsMessageAndCardCapabilities(t *testing.
 	form := larkRegistrationBeginForm()
 	scope := form.Get("scope")
 	for _, want := range []string{
-		"im:message",
 		"im:message:send_as_bot",
 		"im:message.p2p_msg:readonly",
-		"im:message.group_msg:readonly",
-		"im:chat",
+		"im:message.group_at_msg:readonly",
+		"im:message.group_at_msg.include_bot:readonly",
+		"im:chat:read",
+		"im:chat.members:bot_access",
 		"cardkit:card:write",
 	} {
 		if !strings.Contains(scope, want) {
@@ -47,5 +48,22 @@ func TestLarkRegistrationBeginFormRequestsMessageAndCardCapabilities(t *testing.
 	}
 	if form.Get("callbacks") != "card.action.trigger" {
 		t.Fatalf("callbacks = %q", form.Get("callbacks"))
+	}
+}
+
+func TestLarkRegistrationVerificationURLUsesDefaultTemplate(t *testing.T) {
+	got := larkRegistrationVerificationURL("https://open.feishu.cn", "ABCD-EFGH")
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Path != "/page/cli" {
+		t.Fatalf("path = %q", parsed.Path)
+	}
+	if parsed.Query().Get("user_code") != "ABCD-EFGH" {
+		t.Fatalf("user_code = %q", parsed.Query().Get("user_code"))
+	}
+	if parsed.Query().Get("tp") != larkRegistrationTemplateID {
+		t.Fatalf("tp = %q", parsed.Query().Get("tp"))
 	}
 }

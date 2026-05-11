@@ -14,23 +14,28 @@ import (
 )
 
 const (
-	larkRegistrationPath  = "/oauth/v1/app/registration"
-	feishuAccountsBase    = "https://accounts.feishu.cn"
-	feishuOpenBase        = "https://open.feishu.cn"
-	larksuiteAccountsBase = "https://accounts.larksuite.com"
-	larksuiteOpenBase     = "https://open.larksuite.com"
+	larkRegistrationPath       = "/oauth/v1/app/registration"
+	larkRegistrationTemplateID = "default"
+	feishuAccountsBase         = "https://accounts.feishu.cn"
+	feishuOpenBase             = "https://open.feishu.cn"
+	larksuiteAccountsBase      = "https://accounts.larksuite.com"
+	larksuiteOpenBase          = "https://open.larksuite.com"
 )
 
 var (
 	larkRegistrationScopes = []string{
-		"im:message",
 		"im:message:send_as_bot",
 		"im:message.p2p_msg:readonly",
-		"im:message.group_msg:readonly",
-		"im:message.reaction",
+		"im:message.group_at_msg:readonly",
+		"im:message.group_at_msg.include_bot:readonly",
+		"im:message:readonly",
+		"im:message:update",
+		"im:message.reactions:read",
+		"im:message.reactions:write_only",
 		"im:resource",
-		"im:chat",
-		"im:chat:readonly",
+		"im:chat:read",
+		"im:chat:update",
+		"im:chat.members:bot_access",
 		"cardkit:card:write",
 	}
 	larkRegistrationEvents    = []string{"im.message.receive_v1"}
@@ -84,11 +89,23 @@ func (c *larkAppRegistrationClient) Begin(ctx context.Context, brand string) (La
 		DeviceCode:              deviceCode,
 		UserCode:                userCode,
 		VerificationURI:         stringField(data, "verification_uri"),
-		VerificationURIComplete: fmt.Sprintf("%s/page/cli?user_code=%s", openBase, url.QueryEscape(userCode)),
+		VerificationURIComplete: larkRegistrationVerificationURL(openBase, userCode),
 		ExpiresIn:               intField(data, "expires_in", 3600),
 		Interval:                intField(data, "interval", 5),
 		Brand:                   brand,
 	}, nil
+}
+
+func larkRegistrationVerificationURL(openBase, userCode string) string {
+	u, err := url.Parse(openBase + "/page/cli")
+	if err != nil {
+		return fmt.Sprintf("%s/page/cli?user_code=%s&tp=%s", openBase, url.QueryEscape(userCode), url.QueryEscape(larkRegistrationTemplateID))
+	}
+	q := u.Query()
+	q.Set("user_code", userCode)
+	q.Set("tp", larkRegistrationTemplateID)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func larkRegistrationBeginForm() url.Values {
