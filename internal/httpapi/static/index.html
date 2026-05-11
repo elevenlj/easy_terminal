@@ -116,7 +116,7 @@
             <div class="lark-register">
               <div>
                 <strong>扫码创建飞书应用</strong>
-                <p>无需公网和服务器。点击后用飞书扫码确认，本地会自动取回 App ID、App Secret 和 open_id。</p>
+                <p>无需公网和服务器。点击后用飞书扫码确认，本地会自动取回 App ID、App Secret 和 open_id，并请求群聊消息、群创建、发消息和卡片回调能力。</p>
               </div>
               <button id="lark-register-start" type="button">扫码配置</button>
             </div>
@@ -128,7 +128,7 @@
                 <div class="lark-register-status" id="lark-register-status">等待扫码确认...</div>
                 <div class="lark-register-code">用户码：<strong id="lark-register-code"></strong></div>
                 <a id="lark-register-link" target="_blank" rel="noreferrer">打不开二维码时，点击这里打开确认页面</a>
-                <p>扫码成功后会自动填入下方配置。确认后点击“保存”。</p>
+                <p>扫码成功后会自动填入下方配置。确认后点击“保存”。如果群聊消息或卡片按钮没有响应，请在飞书开放平台确认长连接下已启用消息事件和卡片回调。</p>
               </div>
             </div>
             <div class="config-grid">
@@ -257,6 +257,10 @@
           <section id="help-lark" class="help-panel">
             <h2>飞书联动</h2>
             <p>配置飞书应用后，可以通过机器人消息创建和继续终端会话。系统会为会话创建独立群聊，群名由“群聊前缀 + 会话名”组成。</p>
+            <div class="help-callout">
+              <strong>应用能力</strong>
+              <p>扫码创建应用时会请求群聊消息、发消息、创建群聊和卡片回调能力。若飞书后台没有自动带上，请在应用的事件与回调配置里确认长连接已启用 `im.message.receive_v1` 和 `card.action.trigger`。</p>
+            </div>
             <div class="help-steps">
               <p><strong>开始 会话名</strong>：创建一个会话，并按会话名匹配启动预设。</p>
               <p><strong>开始 会话名 1</strong>：创建会话，并执行会话名后面数字对应的启动预设。</p>
@@ -287,7 +291,7 @@
             <h2>配置说明</h2>
             <div class="help-table">
               <div><strong>首次引导</strong><span>首次进入 Web 端会直接打开配置页；保存后不会再次自动弹出，配置入口始终在左下角齿轮。</span></div>
-              <div><strong>扫码配置</strong><span>用飞书扫码创建应用，本地会自动填入 App ID、App Secret 和 open_id，保存后生效。</span></div>
+              <div><strong>扫码配置</strong><span>用飞书扫码创建应用，本地会自动填入 App ID、App Secret 和 open_id，并请求群聊消息、群创建、发消息和卡片回调能力，保存后生效。</span></div>
               <div><strong>测试飞书配置</strong><span>保存前可发送测试卡片，确认凭证和通知接收 ID 可用。</span></div>
               <div><strong>App ID / App Secret</strong><span>飞书应用凭证，用于接收事件、发通知、创建群聊。</span></div>
               <div><strong>通知接收 ID</strong><span>接收主通知的用户 open_id。</span></div>
@@ -321,7 +325,7 @@
               </article>
               <article>
                 <h3>问题：飞书发送消息后没有响应</h3>
-                <p><strong>解决：</strong>确认 App ID、App Secret、事件订阅、机器人权限和接收 ID 都已配置。修改飞书凭证后，建议重新打开飞书事件连接所在的服务进程。</p>
+                <p><strong>解决：</strong>确认 App ID、App Secret、机器人权限、长连接事件 `im.message.receive_v1`、卡片回调 `card.action.trigger` 和接收 ID 都已配置。修改飞书凭证并保存后，服务会自动重连飞书事件连接。</p>
               </article>
               <article>
                 <h3>问题：飞书通知内容太长</h3>

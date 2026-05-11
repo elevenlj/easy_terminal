@@ -68,7 +68,7 @@ make tidy         # go mod tidy
 - 一个飞书自建应用
 - 应用的 `app_id` 和 `app_secret`
 - 已启用机器人能力或消息发送能力
-- 飞书应用信息、消息权限和事件/长连接配置可在 Web 端通过扫码一键配置
+- 飞书应用信息、消息权限、群聊消息事件和卡片回调可在 Web 端通过扫码一键配置；如飞书后台没有自动带上，请确认长连接事件 `im.message.receive_v1` 和卡片回调 `card.action.trigger`
 
 本地 Agent 需要：
 

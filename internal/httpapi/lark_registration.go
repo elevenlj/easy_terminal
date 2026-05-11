@@ -21,6 +21,22 @@ const (
 	larksuiteOpenBase     = "https://open.larksuite.com"
 )
 
+var (
+	larkRegistrationScopes = []string{
+		"im:message",
+		"im:message:send_as_bot",
+		"im:message.p2p_msg:readonly",
+		"im:message.group_msg:readonly",
+		"im:message.reaction",
+		"im:resource",
+		"im:chat",
+		"im:chat:readonly",
+		"cardkit:card:write",
+	}
+	larkRegistrationEvents    = []string{"im.message.receive_v1"}
+	larkRegistrationCallbacks = []string{"card.action.trigger"}
+)
+
 type LarkAppRegistrationBegin struct {
 	DeviceCode              string `json:"device_code"`
 	UserCode                string `json:"user_code"`
@@ -51,11 +67,7 @@ func newLarkAppRegistrationClient() *larkAppRegistrationClient {
 func (c *larkAppRegistrationClient) Begin(ctx context.Context, brand string) (LarkAppRegistrationBegin, error) {
 	brand = normalizeRegistrationBrand(brand)
 	accountsBase, openBase := registrationBases(brand)
-	form := url.Values{}
-	form.Set("action", "begin")
-	form.Set("archetype", "PersonalAgent")
-	form.Set("auth_method", "client_secret")
-	form.Set("request_user_info", "open_id tenant_brand")
+	form := larkRegistrationBeginForm()
 	data, err := c.postForm(ctx, accountsBase+larkRegistrationPath, form)
 	if err != nil {
 		return LarkAppRegistrationBegin{}, err
@@ -77,6 +89,18 @@ func (c *larkAppRegistrationClient) Begin(ctx context.Context, brand string) (La
 		Interval:                intField(data, "interval", 5),
 		Brand:                   brand,
 	}, nil
+}
+
+func larkRegistrationBeginForm() url.Values {
+	form := url.Values{}
+	form.Set("action", "begin")
+	form.Set("archetype", "PersonalAgent")
+	form.Set("auth_method", "client_secret")
+	form.Set("request_user_info", "open_id tenant_brand")
+	form.Set("scope", strings.Join(larkRegistrationScopes, " "))
+	form.Set("events", strings.Join(larkRegistrationEvents, " "))
+	form.Set("callbacks", strings.Join(larkRegistrationCallbacks, " "))
+	return form
 }
 
 func (c *larkAppRegistrationClient) Poll(ctx context.Context, brand, deviceCode string) (LarkAppRegistrationResult, error) {
