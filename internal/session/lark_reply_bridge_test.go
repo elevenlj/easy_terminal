@@ -775,13 +775,47 @@ func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 		t.Fatalf("preset suffix should not be part of session name, got %#v", sessions)
 	}
 	parts := launcher.terminals[0].writeParts()
-	want := []string{"mkdir -p '测试'\r", "cd '测试'\r", "codex\r"}
+	want := []string{
+		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p '测试'\r",
+		"cd '测试'\r",
+		"codex\r",
+	}
 	if len(parts) != len(want) {
 		t.Fatalf("preset writes = %#v, want %#v", parts, want)
 	}
 	for i := range want {
 		if parts[i] != want[i] {
 			t.Fatalf("preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
+func TestLarkReplyBridgeStartDefaultsToWorkspaceAndPresetZero(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"0": {Commands: []string{"codex --dangerously-bypass-approvals-and-sandbox"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-default-zero", "", "", "text", `{"text":"开始 测试"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{
+		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"codex --dangerously-bypass-approvals-and-sandbox\r",
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("default workspace writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("default workspace write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
 		}
 	}
 }
@@ -864,12 +898,21 @@ func TestLarkReplyBridgeStartNamePresetRequiresExactMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) != 0 {
-		t.Fatalf("non-exact name preset should not run, got %#v", parts)
+	want := []string{
+		"mkdir -p ${HOME}/'Easy Terminal Workspace/会话 A 草稿'\r",
+		"cd ${HOME}/'Easy Terminal Workspace/会话 A 草稿'\r",
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("non-exact name preset should only run default workspace commands, got %#v want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("workspace write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
 	}
 }
 
-func TestLarkReplyBridgeStartRunsNamePresetBeforeCodePresets(t *testing.T) {
+func TestLarkReplyBridgeStartNamePresetTakesPriorityOverCodePresets(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
@@ -892,7 +935,7 @@ func TestLarkReplyBridgeStartRunsNamePresetBeforeCodePresets(t *testing.T) {
 		t.Fatalf("preset suffix should not be part of session name, got %#v", sessions)
 	}
 	parts := launcher.terminals[0].writeParts()
-	want := []string{"name-one\r", "name-two\r", "code-one\r"}
+	want := []string{"name-one\r", "name-two\r"}
 	if len(parts) != len(want) {
 		t.Fatalf("preset writes = %#v, want %#v", parts, want)
 	}
@@ -925,7 +968,13 @@ func TestLarkReplyBridgeStartRunsHyphenSeparatedPresetCodes(t *testing.T) {
 		t.Fatalf("hyphen preset suffix should not be part of session name, got %#v", sessions)
 	}
 	parts := launcher.terminals[0].writeParts()
-	want := []string{"one\r", "twenty-three\r", "two-two-three\r"}
+	want := []string{
+		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"one\r",
+		"twenty-three\r",
+		"two-two-three\r",
+	}
 	if len(parts) != len(want) {
 		t.Fatalf("preset writes = %#v, want %#v", parts, want)
 	}
@@ -949,14 +998,20 @@ func TestLarkReplyBridgeStartPresetQuotesVariables(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) != 2 {
+	if len(parts) != 4 {
 		t.Fatalf("preset writes = %#v", parts)
 	}
-	if parts[0] != "mkdir -p '项目 O'\\''Brien'\r" {
-		t.Fatalf("quoted session name write = %q", parts[0])
+	if parts[0] != "mkdir -p ${HOME}/'Easy Terminal Workspace/项目 O'\\''Brien'\r" {
+		t.Fatalf("workspace mkdir write = %q", parts[0])
 	}
-	if parts[1] != "echo 项目 O'Brien\r" {
-		t.Fatalf("raw session name write = %q", parts[1])
+	if parts[1] != "cd ${HOME}/'Easy Terminal Workspace/项目 O'\\''Brien'\r" {
+		t.Fatalf("workspace cd write = %q", parts[1])
+	}
+	if parts[2] != "mkdir -p '项目 O'\\''Brien'\r" {
+		t.Fatalf("quoted session name write = %q", parts[2])
+	}
+	if parts[3] != "echo 项目 O'Brien\r" {
+		t.Fatalf("raw session name write = %q", parts[3])
 	}
 }
 

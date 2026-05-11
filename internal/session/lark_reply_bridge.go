@@ -499,11 +499,20 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		s, err := b.createLarkSessionForMessage(ctx, name, routeCtx)
 		if err == nil {
 			defaultLarkMessageRegistry.remember(s.ID, messageID)
-			if presetErr := b.runSessionNamePreset(s, presetCodes); presetErr != nil {
+			namePresetMatched, presetErr := b.runSessionNamePreset(s, presetCodes)
+			if presetErr != nil {
 				log.Printf("lark name preset failed session=%s name=%q: %v", s.ID, s.Name, presetErr)
 			}
-			if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
-				log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
+			if !namePresetMatched {
+				if workspaceErr := b.runDefaultWorkspacePreset(s); workspaceErr != nil {
+					log.Printf("lark default workspace preset failed session=%s name=%q: %v", s.ID, s.Name, workspaceErr)
+				}
+				if strings.TrimSpace(presetCodes) == "" {
+					presetCodes = "0"
+				}
+				if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
+					log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
+				}
 			}
 			b.enqueuePipeline(s.ID, parts[1:])
 			b.notifyInputRunning(s.ID)
@@ -819,25 +828,43 @@ func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) err
 	return nil
 }
 
-func (b *LarkReplyBridge) runSessionNamePreset(sess Session, codes string) error {
+func (b *LarkReplyBridge) runDefaultWorkspacePreset(sess Session) error {
 	rt, ok := b.manager.GetRuntime(sess.ID)
 	if !ok {
 		return fmt.Errorf("runtime not found")
+	}
+	workspaceDir := defaultWorkspaceShellPath(sess.Name)
+	preset := SessionStartPreset{Commands: []string{
+		"mkdir -p " + workspaceDir,
+		"cd " + workspaceDir,
+	}}
+	rt.SuppressStartupNotifications()
+	if err := runSessionPresetCommands(rt, preset, sessionStartPresetVars(sess, "")); err != nil {
+		return err
+	}
+	rt.FinishStartupNotifications()
+	return nil
+}
+
+func (b *LarkReplyBridge) runSessionNamePreset(sess Session, codes string) (bool, error) {
+	rt, ok := b.manager.GetRuntime(sess.ID)
+	if !ok {
+		return false, fmt.Errorf("runtime not found")
 	}
 	b.mu.Lock()
 	presets := copySessionStartPresets(b.namePresets)
 	b.mu.Unlock()
 	preset, ok := presets[sess.Name]
 	if !ok {
-		return nil
+		return false, nil
 	}
 	rt.SuppressStartupNotifications()
 	vars := sessionStartPresetVars(sess, codes)
 	if err := runSessionPresetCommands(rt, preset, vars); err != nil {
-		return err
+		return true, err
 	}
 	rt.FinishStartupNotifications()
-	return nil
+	return true, nil
 }
 
 func runSessionPresetCommands(rt *RuntimeSession, preset SessionStartPreset, vars map[string]string) error {
@@ -898,6 +925,42 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func safeWorkspaceSessionDir(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "session"
+	}
+	var b strings.Builder
+	lastSeparator := false
+	for _, r := range value {
+		if r == '/' || r == '\\' || r == ':' || r < 32 || r == 127 {
+			if !lastSeparator {
+				b.WriteByte('-')
+				lastSeparator = true
+			}
+			continue
+		}
+		if r == ' ' || r == '\t' {
+			if !lastSeparator {
+				b.WriteByte(' ')
+				lastSeparator = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastSeparator = false
+	}
+	out := strings.Trim(b.String(), " -")
+	if out == "" || out == "." || out == ".." {
+		return "session"
+	}
+	return out
+}
+
+func defaultWorkspaceShellPath(sessionName string) string {
+	return "${HOME}/" + shellQuote("Easy Terminal Workspace/"+safeWorkspaceSessionDir(sessionName))
 }
 
 func slugForShellPath(value string) string {
