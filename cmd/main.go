@@ -210,6 +210,7 @@ func (s *appConfigService) RuntimeConfig() httpapi.RuntimeConfig {
 func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpapi.RuntimeConfig, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	oldCfg := *s.cfg
 	cfg := *s.cfg
 	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkNotifyMaxLines <= 0 {
 		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
@@ -235,7 +236,8 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.SessionNamePresets = req.SessionNamePresets
 	cfg.LarkCustomShortcuts = req.LarkCustomShortcuts
 	cfg.OnboardingCompleted = req.OnboardingCompleted
-	if err := applyRuntimeConfig(cfg, s.manager, s.bridge); err != nil {
+	reconnectLark := oldCfg.LarkAppID != cfg.LarkAppID || oldCfg.LarkAppSecret != cfg.LarkAppSecret
+	if err := applyRuntimeConfig(cfg, s.manager, s.bridge, reconnectLark); err != nil {
 		return httpapi.RuntimeConfig{}, err
 	}
 	if err := writeConfigFile(s.path, cfg); err != nil {
@@ -245,7 +247,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	return runtimeConfigFromConfig(cfg), nil
 }
 
-func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.LarkReplyBridge) error {
+func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.LarkReplyBridge, reconnectLark bool) error {
 	manager.SetWaitingTransitionDelays(time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond, time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond)
 	manager.SetPreStartCommand(cfg.SessionPreStartCommand)
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
@@ -256,11 +258,22 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 		return err
 	}
 	if bridge != nil {
+		if reconnectLark {
+			bridge.Stop()
+			bridge.SetAppCredentials(cfg.LarkAppID, cfg.LarkAppSecret)
+		}
 		bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 		bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
 		bridge.SetStartPresets(cfg.SessionStartPresets)
 		bridge.SetNamePresets(cfg.SessionNamePresets)
 		bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
+		if reconnectLark && bridge.Available() {
+			go func() {
+				if err := bridge.Start(context.Background()); err != nil {
+					log.Printf("lark reply bridge stopped: %v", err)
+				}
+			}()
+		}
 	}
 	return nil
 }

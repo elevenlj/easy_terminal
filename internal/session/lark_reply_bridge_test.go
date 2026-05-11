@@ -310,22 +310,19 @@ func TestSubmitStructuredInputDelaysEnterForTUI(t *testing.T) {
 		t.Fatalf("structured input should write text and enter separately, got %#v", parts)
 	}
 	times := term.writeTimes()
-	if len(times) < 3 {
+	if len(times) < 2 {
 		t.Fatalf("expected text and enter write times, got %d", len(times))
 	}
-	if got := times[len(times)-2].Sub(times[len(times)-3]); got < structuredInputEnterDelay {
+	if got := times[len(times)-1].Sub(times[len(times)-2]); got < structuredInputEnterDelay {
 		t.Fatalf("enter should be delayed after text by at least %s, got %s", structuredInputEnterDelay, got)
 	}
 }
 
-func TestSubmitStructuredInputCleansUpExtraLineAfterCRLFEnter(t *testing.T) {
+func TestSubmitStructuredInputUsesSingleCarriageReturnEnter(t *testing.T) {
 	previousDelay := structuredInputEnterDelay
-	previousCleanupDelay := structuredInputPostEnterCleanupDelay
 	structuredInputEnterDelay = 0
-	structuredInputPostEnterCleanupDelay = 0
 	defer func() {
 		structuredInputEnterDelay = previousDelay
-		structuredInputPostEnterCleanupDelay = previousCleanupDelay
 	}()
 
 	term := &recordingTerminal{readCh: make(chan []byte)}
@@ -342,14 +339,8 @@ func TestSubmitStructuredInputCleansUpExtraLineAfterCRLFEnter(t *testing.T) {
 	if len(parts) < 2 {
 		t.Fatalf("expected text and enter writes, got %#v", parts)
 	}
-	if len(parts) < 3 {
-		t.Fatalf("expected text, CRLF enter, and cleanup writes, got %#v", parts)
-	}
-	if got := parts[len(parts)-2]; got != "\r\n" {
-		t.Fatalf("structured input should keep CRLF enter for compatibility, got %q", got)
-	}
-	if got := parts[len(parts)-1]; got != "\x7f" {
-		t.Fatalf("structured input should clean up a possible extra TUI newline with DEL, got %q", got)
+	if got := parts[len(parts)-1]; got != "\r" {
+		t.Fatalf("structured input should submit with a single carriage return, got %q", got)
 	}
 }
 
@@ -463,10 +454,10 @@ func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) 
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if len(parts) < 4 {
+	if len(parts) < 3 {
 		t.Fatalf("expected pending input, clear, submitted new input; got %#v", parts)
 	}
-	if parts[len(parts)-4] != "\x15" {
+	if parts[len(parts)-3] != "\x15" {
 		t.Fatalf("new attachment+text should clear stale pending input before submit, got %#v", parts)
 	}
 	if !lastSubmittedWrite(parts, "/tmp/new.png 分析新的") {
@@ -1406,18 +1397,11 @@ func (t *recordingTerminal) writeTimes() []time.Time {
 }
 
 func lastSubmittedWrite(parts []string, text string) bool {
-	if len(parts) >= 2 && parts[len(parts)-2] == text && isEnterWrite(parts[len(parts)-1]) {
-		return true
-	}
-	return len(parts) >= 3 && parts[len(parts)-3] == text && isEnterWrite(parts[len(parts)-2]) && isPostEnterCleanupWrite(parts[len(parts)-1])
+	return len(parts) >= 2 && parts[len(parts)-2] == text && isEnterWrite(parts[len(parts)-1])
 }
 
 func isEnterWrite(text string) bool {
-	return text == "\r" || text == "\n" || text == "\r\n"
-}
-
-func isPostEnterCleanupWrite(text string) bool {
-	return text == structuredInputPostEnterCleanupSequence
+	return text == "\r"
 }
 
 type blockingWaiter struct{}

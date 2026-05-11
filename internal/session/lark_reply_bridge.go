@@ -41,12 +41,13 @@ type LarkReplyBridge struct {
 	addReaction             func(context.Context, string, string) error
 	createChat              func(context.Context, string, string, string) (string, error)
 	sendChatText            func(context.Context, string, string) error
+	startMu                 sync.Mutex
+	cancelStart             context.CancelFunc
+	startID                 int64
 }
 
 var structuredInputEnterDelay = 200 * time.Millisecond
-var structuredInputEnterSequence = "\r\n"
-var structuredInputPostEnterCleanupDelay = 50 * time.Millisecond
-var structuredInputPostEnterCleanupSequence = "\x7f"
+var structuredInputEnterSequence = "\r"
 
 const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
@@ -118,13 +119,35 @@ func (b *LarkReplyBridge) SetSessionChatPrefix(prefix string) {
 }
 
 func (b *LarkReplyBridge) Available() bool {
-	return b != nil && b.apiClient != nil && b.manager != nil && b.appID != "" && b.appSecret != ""
+	if b == nil || b.manager == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.apiClient != nil && b.appID != "" && b.appSecret != ""
 }
 
 func (b *LarkReplyBridge) Start(ctx context.Context) error {
 	if !b.Available() {
 		return nil
 	}
+	b.startMu.Lock()
+	if b.cancelStart != nil {
+		b.startMu.Unlock()
+		return nil
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	b.startID++
+	startID := b.startID
+	b.cancelStart = cancel
+	b.startMu.Unlock()
+	defer func() {
+		b.startMu.Lock()
+		if b.startID == startID {
+			b.cancelStart = nil
+		}
+		b.startMu.Unlock()
+	}()
 	handler := dispatcher.NewEventDispatcher("", "").
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			return b.HandleP2MessageReceive(ctx, event)
@@ -147,9 +170,49 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		OnP1MessageReadV1(func(ctx context.Context, event *larkim.P1MessageReadV1) error {
 			return nil
 		})
-	b.wsClient = newLarkBridgeWSClient(b.appID, b.appSecret, handler, b.handleCardActionPayload)
+	b.mu.Lock()
+	appID := b.appID
+	appSecret := b.appSecret
+	b.mu.Unlock()
+	client := newLarkBridgeWSClient(appID, appSecret, handler, b.handleCardActionPayload)
+	b.startMu.Lock()
+	b.wsClient = client
+	b.startMu.Unlock()
 	log.Printf("lark reply bridge listening for incoming messages")
-	return b.wsClient.Start(ctx)
+	return client.Start(runCtx)
+}
+
+func (b *LarkReplyBridge) Stop() {
+	if b == nil {
+		return
+	}
+	b.startMu.Lock()
+	cancel := b.cancelStart
+	client := b.wsClient
+	b.cancelStart = nil
+	b.wsClient = nil
+	b.startMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+}
+
+func (b *LarkReplyBridge) SetAppCredentials(appID, appSecret string) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.appID = strings.TrimSpace(appID)
+	b.appSecret = appSecret
+	if b.appID != "" && b.appSecret != "" {
+		b.apiClient = lark.NewClient(b.appID, b.appSecret)
+	} else {
+		b.apiClient = nil
+	}
 }
 
 func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload []byte) (*callback.CardActionTriggerResponse, error) {
@@ -1214,13 +1277,6 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 		enter = "\r"
 	}
 	if _, err := rt.terminal.Write([]byte(enter)); err != nil {
-		return err
-	}
-	if strings.Contains(enter, "\n") && structuredInputPostEnterCleanupSequence != "" {
-		if structuredInputPostEnterCleanupDelay > 0 {
-			time.Sleep(structuredInputPostEnterCleanupDelay)
-		}
-		_, err := rt.terminal.Write([]byte(structuredInputPostEnterCleanupSequence))
 		return err
 	}
 	return nil

@@ -241,7 +241,7 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	if notes[0].MessageID != "" || notes[0].UpdateNo != 0 {
 		t.Fatalf("first notification should create a new message, got %#v", notes[0])
 	}
-	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || !notes[1].SuppressUpdateTip {
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || notes[1].SuppressUpdateTip {
 		t.Fatalf("second notification should update msg-1 with update marker 1, got %#v", notes[1])
 	}
 	if notes[1].Running {
@@ -305,7 +305,7 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 	if notes[0].MessageID != "" {
 		t.Fatalf("first notification should create, got %#v", notes[0])
 	}
-	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || !notes[1].SuppressUpdateTip {
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || notes[1].SuppressUpdateTip {
 		t.Fatalf("second same-round notification should update msg-1 with update marker 1, got %#v", notes[1])
 	}
 }
@@ -333,8 +333,8 @@ func TestNotifyIfStillWaitingIncrementsExistingUpdateNumber(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("expected one update notification, got %#v", notes)
 	}
-	if notes[0].MessageID != "msg-1" || notes[0].UpdateNo != 3 || !notes[0].SuppressUpdateTip {
-		t.Fatalf("automatic update should increment update marker without sending tip, got %#v", notes[0])
+	if notes[0].MessageID != "msg-1" || notes[0].UpdateNo != 3 || notes[0].SuppressUpdateTip {
+		t.Fatalf("automatic update should increment update marker and allow update tip, got %#v", notes[0])
 	}
 	if rt.notificationUpdateNo != 3 {
 		t.Fatalf("runtime update marker should increment, got %d", rt.notificationUpdateNo)

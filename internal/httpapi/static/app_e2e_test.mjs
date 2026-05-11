@@ -594,13 +594,34 @@ elements["startup-json-preview"].value = JSON.stringify({
 elements["startup-json-preview"].oninput();
 elements["cfg-agent-preset"].value = "codex";
 elements["cfg-agent-preset"].onchange();
-let generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
-assert.deepEqual(generatedNamePresets["默认会话"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should generate default session name preset");
+let generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
+assert.deepEqual(generatedStartPresets["0"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should update default start preset 0");
+app.state.config = {
+  ...app.state.config,
+  session_start_presets: generatedStartPresets,
+};
+app.openConfigDialog("config-session");
+assert.equal(elements["cfg-agent-preset"].value, "codex", "agent preset should be selected from saved preset 0");
+elements["startup-json-preview"].value = JSON.stringify({
+  session_pre_start_command: "source ~/.zshrc",
+  session_name_presets: { "开发": { commands: ["cd project/dev", "codex"] } },
+  session_start_presets: { "1": { commands: ["codex"] } },
+}, null, 2);
+elements["startup-json-preview"].oninput();
+elements["cfg-fast-waiting"].value = "450";
+elements["cfg-lark-app-id"].value = "new-app";
+elements["cfg-lark-mention-enabled"].checked = false;
+elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
+elements["cfg-drop-patterns"].value = JSON.stringify([
+  { title: "噪声", pattern: "noise" },
+  { title: "调试", pattern: "debug" },
+]);
+elements["cfg-lark-custom-shortcuts"].value = JSON.stringify([{ label: "状态", command: "git status" }]);
 elements["cfg-lark-default-session-name"].value = "Claude 会话";
 elements["cfg-agent-preset"].value = "claude";
 elements["cfg-agent-preset"].onchange();
-generatedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
-assert.deepEqual(generatedNamePresets["Claude 会话"], { commands: ["claude --dangerously-skip-permissions"] }, "claude preset should use claude command");
+generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
+assert.deepEqual(generatedStartPresets["0"], { commands: ["claude --dangerously-skip-permissions"] }, "claude preset should update default start preset 0");
 await app.testLarkConfig();
 assert.ok(fetchCalls.some((call) => call.path === "/api/config/lark-test" && call.options.method === "POST"), "lark config test should POST /api/config/lark-test");
 assert.equal(elements["lark-test-result"].children.length, 2, "lark test result should render steps");
@@ -617,6 +638,6 @@ assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
   { title: "调试", pattern: "debug" },
 ]);
 assert.deepEqual(patchedConfig.lark_custom_shortcuts, [{ label: "状态", command: "git status" }]);
-assert.deepEqual(patchedConfig.session_start_presets, { "1": { commands: ["codex"] } });
+assert.deepEqual(patchedConfig.session_start_presets, { "0": { commands: ["claude --dangerously-skip-permissions"] }, "1": { commands: ["codex"] } });
 
 console.log("frontend e2e ok");

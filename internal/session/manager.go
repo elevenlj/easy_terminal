@@ -1103,7 +1103,6 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		n.MessageID = rt.lastNotifiedMessageID
 		n.UpdateNo = rt.notificationUpdateNo + 1
 		n.Running = false
-		n.SuppressUpdateTip = true
 	}
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion

@@ -227,10 +227,9 @@ function renderConfig() {
   $("lark-register-start").disabled = false;
   $("lark-test-start").disabled = false;
   $("lark-test-result").innerHTML = "";
-  $("cfg-agent-preset").value = "";
-  $("cfg-agent-custom-command").value = "";
+  renderDefaultAgentPresetFromStartPreset(cfg.session_start_presets || {});
   renderAgentPresetControls();
-  setAgentPresetStatus("选择默认会话 Agent 后，会自动补默认会话预设；已有会话名预设时不会覆盖。");
+  setAgentPresetStatus("选择默认会话 Agent 后，会更新 0 号启动预设；发送“开始 会话名”且未命中会话名预设时会使用它。");
   $("preset-session-name").value = "";
   state.editingPresetCommand = null;
   setPresetStatus("");
@@ -579,6 +578,23 @@ function agentCommandForPreset(preset, customCommand = "") {
   }[preset] || "";
 }
 
+function presetForAgentCommand(command = "") {
+  const normalized = String(command || "").trim();
+  for (const preset of ["codex", "opencode", "claude", "gemini"]) {
+    if (normalized === agentCommandForPreset(preset)) return { preset, customCommand: "" };
+  }
+  if (normalized) return { preset: "custom", customCommand: normalized };
+  return { preset: "", customCommand: "" };
+}
+
+function renderDefaultAgentPresetFromStartPreset(startPresets = {}) {
+  const commands = Array.isArray(startPresets?.["0"]?.commands) ? startPresets["0"].commands : [];
+  const firstCommand = commands.find((command) => String(command || "").trim());
+  const matched = presetForAgentCommand(firstCommand || "");
+  $("cfg-agent-preset").value = matched.preset;
+  $("cfg-agent-custom-command").value = matched.customCommand;
+}
+
 function renderAgentPresetControls() {
   const custom = $("cfg-agent-preset").value === "custom";
   $("cfg-agent-custom-command").hidden = !custom;
@@ -593,24 +609,21 @@ function setAgentPresetStatus(message, ok = null) {
 }
 
 function ensureDefaultAgentPreset() {
-  const presets = readNamePresetsForUI();
+  const presets = readStartPresetsForUI();
   if (!presets) {
-    setAgentPresetStatus("会话名预设 JSON 格式不正确，先修正后再生成。", false);
-    return;
-  }
-  const sessionName = $("cfg-lark-default-session-name").value.trim() || DEFAULT_SESSION_NAME;
-  if (presets[sessionName]) {
-    setAgentPresetStatus(`“${sessionName}”已有预设，未覆盖。`, null);
+    setAgentPresetStatus("启动预设 JSON 格式不正确，先修正后再更新默认 Agent。", false);
     return;
   }
   const command = agentPresetCommand();
   if (!command) {
-    setAgentPresetStatus("填写自定义 Agent 命令后，会自动补默认会话预设。", null);
+    delete presets["0"];
+    writeStartPresetsFromUI(presets);
+    setAgentPresetStatus("已清空 0 号默认 Agent 预设。", true);
     return;
   }
-  presets[sessionName] = { commands: [command] };
-  writeNamePresetsFromUI(presets);
-  setAgentPresetStatus(`已为“${sessionName}”补充预设：${command}`, true);
+  presets["0"] = { commands: [command] };
+  writeStartPresetsFromUI(presets);
+  setAgentPresetStatus(`已更新 0 号默认 Agent 预设：${command}`, true);
 }
 
 function renderOnboardingAgentControls() {
@@ -629,13 +642,13 @@ function setOnboardingAgentStatus(message, ok = null) {
 function setDefaultAgentPresetInConfig(cfg, preset, customCommand, defaultSessionName = "") {
   const command = agentCommandForPreset(preset, customCommand);
   const sessionName = (defaultSessionName || cfg.lark_default_session_name || DEFAULT_SESSION_NAME).trim() || DEFAULT_SESSION_NAME;
-  const presets = cfg.session_name_presets && typeof cfg.session_name_presets === "object" && !Array.isArray(cfg.session_name_presets)
-    ? { ...cfg.session_name_presets }
+  const presets = cfg.session_start_presets && typeof cfg.session_start_presets === "object" && !Array.isArray(cfg.session_start_presets)
+    ? { ...cfg.session_start_presets }
     : {};
-  if (command && !presets[sessionName]) {
-    presets[sessionName] = { commands: [command] };
+  if (command) {
+    presets["0"] = { commands: [command] };
   }
-  return { ...cfg, lark_default_session_name: sessionName, session_name_presets: presets, onboarding_completed: true };
+  return { ...cfg, lark_default_session_name: sessionName, session_start_presets: presets, onboarding_completed: true };
 }
 
 async function completeOnboarding(options = {}) {
@@ -667,9 +680,25 @@ function readNamePresetsForUI() {
   }
 }
 
+function readStartPresetsForUI() {
+  try {
+    const presets = JSON.parse($("cfg-session-start-presets").value || "{}");
+    if (!presets || typeof presets !== "object" || Array.isArray(presets)) return null;
+    return presets;
+  } catch {
+    return null;
+  }
+}
+
 function writeNamePresetsFromUI(presets) {
   $("cfg-session-name-presets").value = JSON.stringify(presets || {}, null, 2);
   renderNamePresets();
+  state.startupJSONDirty = false;
+  updateStartupJSONPreview();
+}
+
+function writeStartPresetsFromUI(presets) {
+  $("cfg-session-start-presets").value = JSON.stringify(presets || {}, null, 2);
   state.startupJSONDirty = false;
   updateStartupJSONPreview();
 }
@@ -1117,7 +1146,6 @@ $("cfg-agent-preset").onchange = () => {
 };
 
 $("cfg-agent-custom-command").onchange = ensureDefaultAgentPreset;
-$("cfg-lark-default-session-name").onchange = ensureDefaultAgentPreset;
 
 $("preset-save").onclick = saveNamePresetFromForm;
 $("preset-clear").onclick = clearNamePresetForm;

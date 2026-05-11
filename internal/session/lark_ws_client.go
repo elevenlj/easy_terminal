@@ -58,6 +58,17 @@ func (c *larkBridgeWSClient) Start(ctx context.Context) error {
 	}
 }
 
+func (c *larkBridgeWSClient) Close() error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.conn == nil {
+		return nil
+	}
+	err := c.conn.Close()
+	c.conn = nil
+	return err
+}
+
 func (c *larkBridgeWSClient) connect(ctx context.Context) error {
 	connURL, err := c.getConnURL(ctx)
 	if err != nil {
