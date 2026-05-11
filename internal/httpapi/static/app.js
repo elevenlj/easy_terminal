@@ -18,6 +18,7 @@ const MIN_TERMINAL_ROWS = 20;
 const DEFAULT_TERMINAL_COLS = 120;
 const DEFAULT_TERMINAL_ROWS = 36;
 const DEFAULT_SESSION_NAME = "默认会话";
+const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -260,24 +261,42 @@ function renderConfig() {
 function setConfigTab(targetID) {
   document.querySelectorAll(".config-tab").forEach((item) => item.classList.toggle("active", item.dataset.configTarget === targetID));
   document.querySelectorAll(".config-panel").forEach((panel) => panel.classList.toggle("active", panel.id === targetID));
+  updateConfigStepButtons(targetID);
 }
 
-async function openConfigDialog(targetID = "config-lark") {
+function activeConfigTabID() {
+  const active = Array.from(document.querySelectorAll(".config-tab")).find((tab) => /\bactive\b/.test(tab.className));
+  return active?.dataset.configTarget || CONFIG_TAB_IDS[0];
+}
+
+function updateConfigStepButtons(targetID = activeConfigTabID()) {
+  const index = CONFIG_TAB_IDS.indexOf(targetID);
+  const prev = $("config-prev");
+  const next = $("config-next");
+  if (!prev || !next) return;
+  prev.disabled = index <= 0;
+  next.disabled = index < 0 || index >= CONFIG_TAB_IDS.length - 1;
+}
+
+function moveConfigStep(delta) {
+  const index = CONFIG_TAB_IDS.indexOf(activeConfigTabID());
+  if (index < 0) return;
+  const nextIndex = Math.min(CONFIG_TAB_IDS.length - 1, Math.max(0, index + delta));
+  if (nextIndex !== index) setConfigTab(CONFIG_TAB_IDS[nextIndex]);
+}
+
+async function openConfigDialog(targetID = "config-session") {
   if (!state.config) await loadConfig();
   renderConfig();
   setConfigTab(targetID);
   $("config-dialog").showModal();
 }
 
-function maybeShowOnboarding() {
+async function maybeShowOnboarding() {
   if (!state.config || state.config.onboarding_completed) return;
-  const dialog = $("onboarding-dialog");
-  if (!dialog || $("config-dialog").open || $("help-dialog").open) return;
-  $("onboarding-agent-preset").value = "";
-  $("onboarding-agent-custom-command").value = "";
-  renderOnboardingAgentControls();
-  setOnboardingAgentStatus("");
-  dialog.showModal();
+  if ($("config-dialog").open || $("help-dialog").open) return;
+  state.config = await api("/api/config", { method: "PATCH", body: JSON.stringify({ ...state.config, onboarding_completed: true }) });
+  await openConfigDialog("config-session");
 }
 
 function readNumber(id) {
@@ -607,9 +626,9 @@ function setOnboardingAgentStatus(message, ok = null) {
   el.classList.toggle("fail", ok === false);
 }
 
-function setDefaultAgentPresetInConfig(cfg, preset, customCommand) {
+function setDefaultAgentPresetInConfig(cfg, preset, customCommand, defaultSessionName = "") {
   const command = agentCommandForPreset(preset, customCommand);
-  const sessionName = (cfg.lark_default_session_name || DEFAULT_SESSION_NAME).trim() || DEFAULT_SESSION_NAME;
+  const sessionName = (defaultSessionName || cfg.lark_default_session_name || DEFAULT_SESSION_NAME).trim() || DEFAULT_SESSION_NAME;
   const presets = cfg.session_name_presets && typeof cfg.session_name_presets === "object" && !Array.isArray(cfg.session_name_presets)
     ? { ...cfg.session_name_presets }
     : {};
@@ -622,14 +641,20 @@ function setDefaultAgentPresetInConfig(cfg, preset, customCommand) {
 async function completeOnboarding(options = {}) {
   if (!state.config) await loadConfig();
   const preset = options.skip ? "" : $("onboarding-agent-preset").value;
+  const defaultSessionName = $("onboarding-default-session-name").value.trim() || DEFAULT_SESSION_NAME;
   const customCommand = $("onboarding-agent-custom-command").value.trim();
   if (preset === "custom" && !customCommand) {
     setOnboardingAgentStatus("请填写自定义 Agent 启动命令，或选择跳过。", false);
     return;
   }
-  state.config = setDefaultAgentPresetInConfig(state.config, preset, customCommand);
+  state.config = setDefaultAgentPresetInConfig(state.config, preset, customCommand, defaultSessionName);
   state.config = await api("/api/config", { method: "PATCH", body: JSON.stringify(state.config) });
   $("onboarding-dialog").close();
+  if (!options.skip) {
+    renderConfig();
+    setConfigTab("config-session");
+    $("config-dialog").showModal();
+  }
 }
 
 function readNamePresetsForUI() {
@@ -1063,6 +1088,9 @@ $("config-cancel").onclick = () => {
   $("config-dialog").close();
 };
 
+$("config-prev").onclick = () => moveConfigStep(-1);
+$("config-next").onclick = () => moveConfigStep(1);
+
 $("config-form").onsubmit = async (ev) => {
   ev.preventDefault();
   try {
@@ -1193,7 +1221,7 @@ function applyLarkRegistrationResult(result) {
   $("cfg-lark-app-id").value = result.app_id || "";
   $("cfg-lark-app-secret").value = result.app_secret || "";
   if (result.lark_notify_receive_id) $("cfg-lark-receive-id").value = result.lark_notify_receive_id;
-  $("lark-register-status").textContent = "扫码成功，已填入飞书应用配置。点击 Save 保存。";
+  $("lark-register-status").textContent = "扫码成功，已填入飞书应用配置。点击“保存”。";
   $("lark-register-start").disabled = false;
   stopLarkRegistrationPolling();
 }
@@ -1251,7 +1279,7 @@ document.addEventListener("paste", handleImagePaste);
 setInterval(loadSessions, 3000);
 loadSessions().catch(console.error);
 loadQuick().catch(console.error);
-loadConfig().then(() => setTimeout(maybeShowOnboarding, 250)).catch(console.error);
+loadConfig().then(() => setTimeout(() => maybeShowOnboarding().catch(console.error), 250)).catch(console.error);
 
 if (typeof window !== "undefined") {
   window.easyTerminalApp = {

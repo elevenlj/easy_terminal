@@ -185,6 +185,7 @@ const ids = [
   "quick-dialog",
   "quick-cancel",
   "onboarding-dialog",
+  "onboarding-default-session-name",
   "onboarding-agent-preset",
   "onboarding-agent-custom-command",
   "onboarding-agent-status",
@@ -194,6 +195,9 @@ const ids = [
   "config-dialog",
   "config-form",
   "config-cancel",
+  "config-save",
+  "config-prev",
+  "config-next",
   "config-error",
   "help-open",
   "help-dialog",
@@ -248,13 +252,13 @@ const helpTabs = ["help-start", "help-terminal"].map((targetID, index) => {
   tab.className = index === 0 ? "help-tab active" : "help-tab";
   return tab;
 });
-const configTabs = ["config-lark", "config-notify", "config-startup"].map((targetID, index) => {
+const configTabs = ["config-session", "config-lark", "config-notify", "config-startup"].map((targetID, index) => {
   const tab = new FakeElement("", "button");
   tab.dataset.configTarget = targetID;
   tab.className = index === 0 ? "config-tab active" : "config-tab";
   return tab;
 });
-const configPanels = ["config-lark", "config-notify", "config-startup"].map((id, index) => {
+const configPanels = ["config-session", "config-lark", "config-notify", "config-startup"].map((id, index) => {
   const panel = new FakeElement(id, "section");
   panel.className = index === 0 ? "config-panel active" : "config-panel";
   return panel;
@@ -399,18 +403,30 @@ const app = context.window.easyTerminalApp;
 assert.ok(app, "app test API is exposed");
 
 await app.loadConfig();
-app.maybeShowOnboarding();
-assert.equal(elements["onboarding-dialog"].open, true, "first visit should show onboarding");
-elements["onboarding-agent-preset"].value = "codex";
-await Promise.resolve(elements["onboarding-config"].onclick());
-assert.equal(elements["onboarding-dialog"].open, false, "onboarding should close after saving");
+await app.maybeShowOnboarding();
+assert.notEqual(elements["onboarding-dialog"].open, true, "first visit should not show onboarding choice dialog");
+assert.equal(elements["config-dialog"].open, true, "first visit should open config dialog directly");
+assert.ok(configTabs[0].className.includes("active"), "first visit should start from session config tab");
 let onboardingPatch = fetchCalls.find((call) => call.path === "/api/config" && call.options.method === "PATCH");
 assert.ok(onboardingPatch, "onboarding should PATCH config");
 let onboardingConfig = JSON.parse(onboardingPatch.options.body);
 assert.equal(onboardingConfig.onboarding_completed, true, "onboarding should be marked as completed in config");
-assert.deepEqual(onboardingConfig.session_name_presets["默认会话"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] });
-app.maybeShowOnboarding();
-assert.equal(elements["onboarding-dialog"].open, false, "completed onboarding should not reopen");
+assert.equal(onboardingConfig.lark_default_session_name, "默认会话");
+assert.equal(elements["config-prev"].disabled, true, "previous should be disabled on first config tab");
+assert.equal(elements["config-next"].disabled, false, "next should be enabled on first config tab");
+elements["config-next"].onclick();
+assert.ok(configTabs[1].className.includes("active"), "next should move to the next config tab");
+assert.equal(elements["config-prev"].disabled, false, "previous should be enabled after moving forward");
+elements["config-prev"].onclick();
+assert.ok(configTabs[0].className.includes("active"), "previous should move back to session config tab");
+elements["config-next"].onclick();
+elements["config-next"].onclick();
+elements["config-next"].onclick();
+assert.ok(configTabs[3].className.includes("active"), "next should stop at the last config tab");
+assert.equal(elements["config-next"].disabled, true, "next should be disabled on last config tab");
+elements["config-dialog"].close();
+await app.maybeShowOnboarding();
+assert.notEqual(elements["onboarding-dialog"].open, true, "completed onboarding should not reopen");
 
 app.state.active = "sess-1";
 app.state.socket = {

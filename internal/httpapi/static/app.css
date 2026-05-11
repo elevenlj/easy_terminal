@@ -417,6 +417,17 @@ dialog::backdrop {
   color: var(--muted);
 }
 
+.onboarding-session-name {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.onboarding-session-name input {
+  width: 100%;
+}
+
 .onboarding-actions {
   margin-top: 8px;
   display: flex;

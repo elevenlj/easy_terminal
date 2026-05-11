@@ -722,7 +722,7 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
 }
 
-func (rt *RuntimeSession) RefreshNotificationMessage(messageID string) error {
+func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveUpdateNo ...int) error {
 	if rt == nil || rt.manager == nil || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
 		return errors.New("lark notifier is not configured")
 	}
@@ -746,6 +746,10 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string) error {
 		return errors.New("notification is not enabled")
 	}
 	running := rt.session.Status == StatusRunning
+	updateNo := rt.notificationUpdateNo
+	if len(preserveUpdateNo) > 0 && preserveUpdateNo[0] > 0 {
+		updateNo = preserveUpdateNo[0]
+	}
 	rt.notificationPatchVersion++
 	patchVersion := rt.notificationPatchVersion
 	n := WaitingNotification{
@@ -754,7 +758,7 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string) error {
 		Content:             content,
 		MessageID:           messageID,
 		ChatID:              rt.session.LarkChatID,
-		UpdateNo:            rt.notificationUpdateNo + 1,
+		UpdateNo:            updateNo,
 		Running:             running,
 		SuppressUpdateTip:   true,
 		NotificationVersion: patchVersion,
@@ -1099,6 +1103,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		n.MessageID = rt.lastNotifiedMessageID
 		n.UpdateNo = rt.notificationUpdateNo + 1
 		n.Running = false
+		n.SuppressUpdateTip = true
 	}
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion

@@ -36,7 +36,7 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 			"header": map[string]any{"template": "blue", "title": map[string]any{"tag": "plain_text", "content": note.Name}},
 			"body": map[string]any{"elements": []map[string]any{
 				{"tag": "markdown", "content": content},
-				larkShortcutActionElement(note.SessionID),
+				larkShortcutActionElement(note.SessionID, note.UpdateNo),
 			}},
 		},
 	}

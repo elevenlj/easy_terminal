@@ -50,6 +50,10 @@
         <div class="onboarding-kicker">首次使用</div>
         <h2 id="onboarding-title">选择默认会话 Agent</h2>
         <p>发送“开始”时会进入默认会话。先选择默认会话使用的 Agent；也可以跳过，之后在配置页或会话预设命令里覆盖。</p>
+        <label class="onboarding-session-name">
+          <span>默认会话名</span>
+          <input id="onboarding-default-session-name" placeholder="默认会话">
+        </label>
         <div class="agent-preset-controls onboarding-agent-controls">
           <select id="onboarding-agent-preset">
             <option value="">跳过，不配置默认 Agent</option>
@@ -77,76 +81,17 @@
           </div>
         </div>
         <nav class="config-tabs" aria-label="配置分组">
-          <button class="config-tab active" type="button" data-config-target="config-lark">飞书</button>
+          <button class="config-tab active" type="button" data-config-target="config-session">会话</button>
+          <button class="config-tab" type="button" data-config-target="config-lark">飞书</button>
           <button class="config-tab" type="button" data-config-target="config-notify">等待通知</button>
           <button class="config-tab" type="button" data-config-target="config-startup">启动预设</button>
         </nav>
         <div class="config-sections">
-          <section id="config-lark" class="config-section config-panel active">
-            <h2>飞书</h2>
-            <div class="lark-register">
-              <div>
-                <strong>扫码创建飞书应用</strong>
-                <p>无需公网和服务器。点击后用飞书扫码确认，本地会自动取回 App ID、App Secret 和 open_id。</p>
-              </div>
-              <button id="lark-register-start" type="button">扫码配置</button>
-            </div>
-            <div id="lark-register-panel" class="lark-register-panel hidden" hidden>
-              <div class="lark-register-qr">
-                <img id="lark-register-qr" alt="飞书应用创建二维码">
-              </div>
-              <div class="lark-register-info">
-                <div class="lark-register-status" id="lark-register-status">等待扫码确认...</div>
-                <div class="lark-register-code">用户码：<strong id="lark-register-code"></strong></div>
-                <a id="lark-register-link" target="_blank" rel="noreferrer">打不开二维码时，点击这里打开确认页面</a>
-                <p>扫码成功后会自动填入下方配置。确认后点击 Save 保存。</p>
-              </div>
-            </div>
+          <section id="config-session" class="config-section config-panel active">
+            <h2>会话</h2>
             <div class="config-grid">
-              <label><span>App ID</span><input id="cfg-lark-app-id"></label>
-              <label><span>App Secret</span><input id="cfg-lark-app-secret" type="password"></label>
-              <label><span>通知接收 ID</span><input id="cfg-lark-receive-id"></label>
               <label><span>默认会话名</span><input id="cfg-lark-default-session-name"></label>
-              <label><span>群聊前缀</span><input id="cfg-lark-session-chat-prefix"></label>
             </div>
-            <label class="config-check"><input id="cfg-lark-mention-enabled" type="checkbox"><span>主通知卡片 @ 接收人</span></label>
-            <div class="lark-test">
-              <button id="lark-test-start" type="button">测试飞书配置</button>
-              <div id="lark-test-result" class="lark-test-result" aria-live="polite"></div>
-            </div>
-          </section>
-          <section id="config-notify" class="config-section config-panel">
-            <h2>等待与通知</h2>
-            <div class="config-grid">
-              <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="1"></label>
-              <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="1"></label>
-              <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="1"></label>
-            </div>
-            <div class="drop-rule-editor">
-              <div>
-                <strong>通知过滤正则</strong>
-                <p>每条规则包含标题和正则表达式。匹配到的输出行不会出现在通知里。</p>
-              </div>
-              <div id="drop-rule-list" class="drop-rule-list"></div>
-              <button id="drop-rule-add" type="button">添加过滤规则</button>
-            </div>
-            <textarea id="cfg-drop-patterns" class="hidden" hidden spellcheck="false"></textarea>
-            <div class="custom-shortcut-editor">
-              <div>
-                <strong>飞书自定义快捷键</strong>
-                <p>显示在系统快捷键下一行。点击后会把对应指令提交到当前会话。</p>
-              </div>
-              <div id="custom-shortcut-list" class="custom-shortcut-list"></div>
-              <button id="custom-shortcut-add" type="button">添加快捷键</button>
-            </div>
-            <textarea id="cfg-lark-custom-shortcuts" class="hidden" hidden spellcheck="false"></textarea>
-          </section>
-          <section id="config-startup" class="config-section config-panel">
-            <div class="section-title-row">
-              <h2>启动</h2>
-              <button id="startup-json-toggle" type="button">查看启动配置 JSON</button>
-            </div>
-            <textarea id="startup-json-preview" class="preset-json-preview hidden" rows="10" spellcheck="false" hidden></textarea>
             <div class="agent-preset">
               <div>
                 <strong>默认会话 Agent</strong>
@@ -165,6 +110,71 @@
               </div>
               <div id="agent-preset-status" class="agent-preset-status" aria-live="polite"></div>
             </div>
+          </section>
+          <section id="config-lark" class="config-section config-panel">
+            <h2>飞书</h2>
+            <div class="lark-register">
+              <div>
+                <strong>扫码创建飞书应用</strong>
+                <p>无需公网和服务器。点击后用飞书扫码确认，本地会自动取回 App ID、App Secret 和 open_id。</p>
+              </div>
+              <button id="lark-register-start" type="button">扫码配置</button>
+            </div>
+            <div id="lark-register-panel" class="lark-register-panel hidden" hidden>
+              <div class="lark-register-qr">
+                <img id="lark-register-qr" alt="飞书应用创建二维码">
+              </div>
+              <div class="lark-register-info">
+                <div class="lark-register-status" id="lark-register-status">等待扫码确认...</div>
+                <div class="lark-register-code">用户码：<strong id="lark-register-code"></strong></div>
+                <a id="lark-register-link" target="_blank" rel="noreferrer">打不开二维码时，点击这里打开确认页面</a>
+                <p>扫码成功后会自动填入下方配置。确认后点击“保存”。</p>
+              </div>
+            </div>
+            <div class="config-grid">
+              <label><span>App ID</span><input id="cfg-lark-app-id"></label>
+              <label><span>App Secret</span><input id="cfg-lark-app-secret" type="password"></label>
+              <label><span>通知接收 ID</span><input id="cfg-lark-receive-id"></label>
+              <label><span>群聊前缀</span><input id="cfg-lark-session-chat-prefix"></label>
+            </div>
+            <label class="config-check"><input id="cfg-lark-mention-enabled" type="checkbox"><span>主通知卡片 @ 接收人</span></label>
+            <div class="lark-test">
+              <button id="lark-test-start" type="button">测试飞书配置</button>
+              <div id="lark-test-result" class="lark-test-result" aria-live="polite"></div>
+            </div>
+            <div class="custom-shortcut-editor">
+              <div>
+                <strong>飞书自定义快捷键</strong>
+                <p>显示在系统快捷键下一行。点击后会把对应指令提交到当前会话。</p>
+              </div>
+              <div id="custom-shortcut-list" class="custom-shortcut-list"></div>
+              <button id="custom-shortcut-add" type="button">添加快捷键</button>
+            </div>
+            <textarea id="cfg-lark-custom-shortcuts" class="hidden" hidden spellcheck="false"></textarea>
+          </section>
+          <section id="config-notify" class="config-section config-panel">
+            <h2>等待与通知</h2>
+            <div class="config-grid">
+              <label><span>快速等待(ms)</span><input id="cfg-fast-waiting" type="number" min="1" step="1"></label>
+              <label><span>保守等待(ms)</span><input id="cfg-conservative-waiting" type="number" min="1" step="1"></label>
+              <label><span>通知最大行数</span><input id="cfg-lark-max-lines" type="number" min="1" step="1"></label>
+            </div>
+            <div class="drop-rule-editor">
+              <div>
+                <strong>通知过滤正则</strong>
+                <p>每条规则包含标题和正则表达式。匹配到的输出行不会出现在通知里。</p>
+              </div>
+              <div id="drop-rule-list" class="drop-rule-list"></div>
+              <button id="drop-rule-add" type="button">添加过滤规则</button>
+            </div>
+            <textarea id="cfg-drop-patterns" class="hidden" hidden spellcheck="false"></textarea>
+          </section>
+          <section id="config-startup" class="config-section config-panel">
+            <div class="section-title-row">
+              <h2>启动</h2>
+              <button id="startup-json-toggle" type="button">查看启动配置 JSON</button>
+            </div>
+            <textarea id="startup-json-preview" class="preset-json-preview hidden" rows="10" spellcheck="false" hidden></textarea>
             <div class="startup-command-editor">
               <div>
                 <strong>会话启动前命令</strong>
@@ -195,8 +205,10 @@
         </div>
         <div id="config-error" class="config-error"></div>
         <div class="dialog-actions">
-          <button value="cancel" type="button" id="config-cancel">Cancel</button>
-          <button value="default">Save</button>
+          <button value="cancel" type="button" id="config-cancel">取消</button>
+          <button value="default" id="config-save">保存</button>
+          <button type="button" id="config-prev">上一步</button>
+          <button type="button" id="config-next">下一步</button>
         </div>
       </form>
     </dialog>
@@ -265,7 +277,7 @@
               <article><h3>消息标题</h3><p>通知卡片标题默认是会话名。用户回复后终端重新运行时，会把同一张卡片标题临时改成“会话名（Running）”；本轮再次进入 waiting 后恢复会话名。</p></article>
               <article><h3>消息正文</h3><p>正文是当前轮终端内容，不是完整历史。系统优先使用浏览器里 xterm 的可见快照；没有可用页面时，会尝试启动 headless 浏览器打开该会话获取快照。</p></article>
               <article><h3>锚点规则</h3><p>每次提交输入时会记录“上次输入文本”和“输入前的可见快照”。推送时优先从可见快照里找到这次输入的回显，只截取它后面的回复；找不到输入回显时，会用本轮原始输出作为兜底，避免把上一轮内容推出来。</p></article>
-              <article><h3>更新规则</h3><p>同一轮第一次 waiting 会新发主卡片；后续内容变化会 Patch 更新同一张卡片，并在卡片里追加“已更新-N”。每次内容更新后，还会回复一条极简提示卡片“已更新-N”，用于提醒用户有新内容；快捷键和“刷新消息”按钮会继续锚定当前卡片。</p></article>
+              <article><h3>更新规则</h3><p>同一轮第一次 waiting 会新发主卡片；后续内容变化会 Patch 更新同一张卡片，并递增卡片里的“已更新-N”计数。手动点击“刷新消息”会继续锚定当前卡片，只保留卡片中已有的“已更新-N”提示，不递增次数。</p></article>
               <article><h3>快捷键</h3><p>系统快捷键固定显示在第一行。自定义快捷键显示在下一行，每个按钮对应一条配置的指令，点击后会提交到当前会话。</p></article>
               <article><h3>内容清理</h3><p>推送前会清理终端控制字符、重复行、空白分隔、Codex/TUI 临时状态行，并按“通知过滤正则”删除匹配行。邮箱样式文本会被替换成 [email]。</p></article>
               <article><h3>长度限制</h3><p>正文最多保留“通知最大行数”里的尾部内容，同时还有总字符保护。超过限制时会带 [truncated] 前缀，表示前面的内容已被裁剪。</p></article>

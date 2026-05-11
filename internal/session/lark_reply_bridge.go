@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -280,8 +281,9 @@ func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[strin
 	if openMessageID != "" {
 		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
 	}
+	updateNo, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value["update_no"])))
 	go func() {
-		if err := rt.RefreshNotificationMessage(openMessageID); err != nil {
+		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
 			log.Printf("lark card manual refresh failed session=%s message=%s: %v", sessionID, openMessageID, err)
 			return
 		}

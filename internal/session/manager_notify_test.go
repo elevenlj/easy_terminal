@@ -241,8 +241,8 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 	if notes[0].MessageID != "" || notes[0].UpdateNo != 0 {
 		t.Fatalf("first notification should create a new message, got %#v", notes[0])
 	}
-	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
-		t.Fatalf("second notification should update msg-1 with update no 1, got %#v", notes[1])
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || !notes[1].SuppressUpdateTip {
+		t.Fatalf("second notification should update msg-1 with update marker 1, got %#v", notes[1])
 	}
 	if notes[1].Running {
 		t.Fatalf("waiting notification update should clear running title state, got %#v", notes[1])
@@ -305,8 +305,39 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 	if notes[0].MessageID != "" {
 		t.Fatalf("first notification should create, got %#v", notes[0])
 	}
-	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 {
-		t.Fatalf("second same-round notification should update msg-1, got %#v", notes[1])
+	if notes[1].MessageID != "msg-1" || notes[1].UpdateNo != 1 || !notes[1].SuppressUpdateTip {
+		t.Fatalf("second same-round notification should update msg-1 with update marker 1, got %#v", notes[1])
+	}
+}
+
+func TestNotifyIfStillWaitingIncrementsExistingUpdateNumber(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "msg-1",
+		notificationUpdateNo:  2,
+		lastInputText:         "echo hello",
+		snapshotAtRoundStart:  "$ echo hello",
+		roundReply:            []byte("old\nnew"),
+		visibleSnapshot:       "$ echo hello\nold\nnew\n$",
+	}
+	rt.mu.Lock()
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+
+	rt.notifyIfStillWaiting(version)
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one update notification, got %#v", notes)
+	}
+	if notes[0].MessageID != "msg-1" || notes[0].UpdateNo != 3 || !notes[0].SuppressUpdateTip {
+		t.Fatalf("automatic update should increment update marker without sending tip, got %#v", notes[0])
+	}
+	if rt.notificationUpdateNo != 3 {
+		t.Fatalf("runtime update marker should increment, got %d", rt.notificationUpdateNo)
 	}
 }
 
@@ -356,8 +387,9 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
-		manager: m,
-		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		manager:              m,
+		session:              Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		notificationUpdateNo: 2,
 	}
 	rt.MarkInputActivity("echo hello\r")
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
@@ -365,7 +397,7 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	rt.session.Status = StatusWaiting
 	rt.mu.Unlock()
 
-	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+	if err := rt.RefreshNotificationMessage("bot-card", 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -375,6 +407,12 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 	if notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" || notes[0].Running {
 		t.Fatalf("manual refresh should patch clicked card with current round, got %#v", notes[0])
+	}
+	if notes[0].UpdateNo != 2 || !notes[0].SuppressUpdateTip {
+		t.Fatalf("manual refresh should preserve existing update marker without increasing count, got %#v", notes[0])
+	}
+	if rt.notificationUpdateNo != 2 {
+		t.Fatalf("runtime update marker should not increase on manual refresh, got %d", rt.notificationUpdateNo)
 	}
 }
 
@@ -831,6 +869,9 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	if !strings.Contains(content, "已更新-2") {
 		t.Fatalf("card content should include update marker, got %s", content)
 	}
+	if !strings.Contains(content, `"update_no":2`) {
+		t.Fatalf("refresh action should carry current update marker, got %s", content)
+	}
 	if !strings.Contains(content, "状态：Not Running") {
 		t.Fatalf("card content should include non-running status marker, got %s", content)
 	}
@@ -894,7 +935,7 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !(strings.Index(content, `"content":"刷新消息"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
-		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"content":"状态"`)) {
+		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
 	}
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
@@ -908,14 +949,14 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if strings.Count(content, `"type":"primary"`) < 4 {
 		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
 	}
-	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"background_style":"green"`) {
-		t.Fatalf("custom shortcut actions should use green clickable containers, got %s", content)
+	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
+		t.Fatalf("custom shortcut actions should use green text and border without green background, got %s", content)
+	}
+	if !strings.Contains(content, `\u003cfont color=\"green\"\u003e状态\u003c/font\u003e`) {
+		t.Fatalf("custom shortcut label should use green text, got %s", content)
 	}
 	if strings.Contains(content, `"tag":"plain_text","content":"状态"`) {
 		t.Fatalf("custom shortcut container text should use a card-supported element, got %s", content)
-	}
-	if !strings.Contains(content, `"content":"状态"`) {
-		t.Fatalf("card content should include custom shortcut button, got %s", content)
 	}
 	if !strings.Contains(content, `"size":"tiny"`) {
 		t.Fatalf("card shortcut buttons should be small, got %s", content)

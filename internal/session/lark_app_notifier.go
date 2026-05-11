@@ -84,7 +84,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	}
 	elements = append(elements, map[string]any{"tag": "markdown", "content": note.Content})
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
-	elements = append(elements, larkShortcutActionElement(note.SessionID))
+	elements = append(elements, larkShortcutActionElement(note.SessionID, note.UpdateNo))
 	if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 		elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
 	}
@@ -114,14 +114,14 @@ func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomSh
 	return out
 }
 
-func larkShortcutActionElement(sessionID string) map[string]any {
+func larkShortcutActionElement(sessionID string, updateNo int) map[string]any {
 	return map[string]any{
 		"tag":                "column_set",
 		"flex_mode":          "none",
 		"horizontal_align":   "left",
 		"horizontal_spacing": "4px",
 		"columns": []map[string]any{
-			larkRefreshButtonColumn(sessionID),
+			larkRefreshButtonColumn(sessionID, updateNo),
 			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
 			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
 			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
@@ -160,7 +160,7 @@ func larkShortcutButton(label, buttonType, sessionID, key string) map[string]any
 	}
 }
 
-func larkRefreshButtonColumn(sessionID string) map[string]any {
+func larkRefreshButtonColumn(sessionID string, updateNo int) map[string]any {
 	return map[string]any{
 		"tag":              "column",
 		"width":            "auto",
@@ -178,6 +178,7 @@ func larkRefreshButtonColumn(sessionID string) map[string]any {
 						"value": map[string]any{
 							"easy_terminal_action": "refresh",
 							"session_id":           sessionID,
+							"update_no":            updateNo,
 						},
 					},
 				},
@@ -207,14 +208,14 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 		"vertical_spacing": "8px",
 		"elements": []map[string]any{
 			{
-				"tag":              "interactive_container",
-				"width":            "auto",
-				"height":           "auto",
-				"background_style": "green",
-				"corner_radius":    "4px",
-				"padding":          "4px 8px",
+				"tag":           "interactive_container",
+				"width":         "auto",
+				"height":        "auto",
+				"border_color":  "green",
+				"corner_radius": "4px",
+				"padding":       "4px 8px",
 				"elements": []map[string]any{
-					{"tag": "markdown", "content": shortcut.Label},
+					{"tag": "markdown", "content": fmt.Sprintf(`<font color="green">%s</font>`, shortcut.Label)},
 				},
 				"behaviors": []map[string]any{
 					{
