@@ -595,13 +595,13 @@ elements["startup-json-preview"].oninput();
 elements["cfg-agent-preset"].value = "codex";
 elements["cfg-agent-preset"].onchange();
 let generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
-assert.deepEqual(generatedStartPresets["0"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should update default start preset 0");
+assert.deepEqual(generatedStartPresets["999999"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should update default start preset 999999");
 app.state.config = {
   ...app.state.config,
   session_start_presets: generatedStartPresets,
 };
 app.openConfigDialog("config-session");
-assert.equal(elements["cfg-agent-preset"].value, "codex", "agent preset should be selected from saved preset 0");
+assert.equal(elements["cfg-agent-preset"].value, "codex", "agent preset should be selected from saved preset 999999");
 elements["startup-json-preview"].value = JSON.stringify({
   session_pre_start_command: "source ~/.zshrc",
   session_name_presets: { "开发": { commands: ["cd project/dev", "codex"] } },
@@ -621,7 +621,7 @@ elements["cfg-lark-default-session-name"].value = "Claude 会话";
 elements["cfg-agent-preset"].value = "claude";
 elements["cfg-agent-preset"].onchange();
 generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
-assert.deepEqual(generatedStartPresets["0"], { commands: ["claude --dangerously-skip-permissions"] }, "claude preset should update default start preset 0");
+assert.deepEqual(generatedStartPresets["999999"], { commands: ["claude --dangerously-skip-permissions"] }, "claude preset should update default start preset 999999");
 await app.testLarkConfig();
 assert.ok(fetchCalls.some((call) => call.path === "/api/config/lark-test" && call.options.method === "POST"), "lark config test should POST /api/config/lark-test");
 assert.equal(elements["lark-test-result"].children.length, 2, "lark test result should render steps");
@@ -638,6 +638,6 @@ assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
   { title: "调试", pattern: "debug" },
 ]);
 assert.deepEqual(patchedConfig.lark_custom_shortcuts, [{ label: "状态", command: "git status" }]);
-assert.deepEqual(patchedConfig.session_start_presets, { "0": { commands: ["claude --dangerously-skip-permissions"] }, "1": { commands: ["codex"] } });
+assert.deepEqual(patchedConfig.session_start_presets, { "999999": { commands: ["claude --dangerously-skip-permissions"] }, "1": { commands: ["codex"] } });
 
 console.log("frontend e2e ok");

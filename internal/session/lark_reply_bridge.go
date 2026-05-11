@@ -509,9 +509,6 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 				if workspaceErr := b.runDefaultWorkspacePreset(s); workspaceErr != nil {
 					log.Printf("lark default workspace preset failed session=%s name=%q: %v", s.ID, s.Name, workspaceErr)
 				}
-				if strings.TrimSpace(presetCodes) == "" {
-					presetCodes = "0"
-				}
 				if presetErr := b.runSessionStartPresets(s, presetCodes); presetErr != nil {
 					log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
 				}
@@ -815,6 +812,10 @@ func (b *LarkReplyBridge) runSessionStartPresets(sess Session, codes string) err
 		rt.SuppressStartupNotifications()
 	}
 	for _, code := range presetCodes {
+		if code == "0" {
+			log.Printf("lark start preset skipped workspace-only code session=%s code=%q", sess.ID, code)
+			continue
+		}
 		preset, ok := presets[code]
 		if !ok {
 			log.Printf("lark start preset not configured session=%s code=%q", sess.ID, code)

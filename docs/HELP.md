@@ -18,8 +18,8 @@
 
 首次进入 Web 端时，系统会直接打开配置页。这个状态会保存到 `conf/config.local.json`：
 
-- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：更新 0 号启动预设。
-- 不选择默认 Agent：不配置 0 号启动预设。
+- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：更新 999999 号默认 Agent 启动预设。
+- 不选择默认 Agent：不配置 999999 号启动预设。
 - 配置入口始终在左下角齿轮按钮。
 
 建议首次配置顺序：
@@ -59,6 +59,8 @@ pwd | ls -la | git status
 
 - `开始 会话名`、`新会话 会话名`、`/new 会话名`：创建新终端会话。
 - `开始`、`新会话`、`/new`：使用 `lark_default_session_name` 作为默认会话名。
+- `开始 会话名 0`：只创建会话并进入默认工作目录，不启动 Agent。
+- `开始 会话名 999999`：创建会话并启动“默认会话 Agent”。
 - 绑定到终端会话的飞书群聊里，普通消息默认进入该会话。
 - 回复某条通知消息时，输入会路由到对应会话。
 - 消息中包含 `sess-数字` 时，输入会路由到指定会话。
@@ -135,7 +137,7 @@ pwd | ls -la | git status
 飞书创建会话时支持两类启动预设：
 
 - `session_name_presets`：按会话名精确匹配。
-- `session_start_presets`：按会话名后面的数字匹配，例如 `开始 demo 1`。
+- `session_start_presets`：按会话名后面的数字匹配，例如 `开始 demo 1`。`0` 保留为仅进入目录，`999999` 由“默认会话 Agent”维护。
 
 执行顺序：
 

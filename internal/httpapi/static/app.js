@@ -18,6 +18,7 @@ const MIN_TERMINAL_ROWS = 20;
 const DEFAULT_TERMINAL_COLS = 120;
 const DEFAULT_TERMINAL_ROWS = 36;
 const DEFAULT_SESSION_NAME = "默认会话";
+const DEFAULT_AGENT_PRESET_CODE = "999999";
 const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
 
 async function api(path, options = {}) {
@@ -229,7 +230,7 @@ function renderConfig() {
   $("lark-test-result").innerHTML = "";
   renderDefaultAgentPresetFromStartPreset(cfg.session_start_presets || {});
   renderAgentPresetControls();
-  setAgentPresetStatus("选择默认会话 Agent 后，会更新 0 号启动预设；发送“开始 会话名”且未命中会话名预设时会使用它。");
+  setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 号启动预设；发送“开始 会话名 ${DEFAULT_AGENT_PRESET_CODE}”可启动它。0 号表示仅进入目录。`);
   $("preset-session-name").value = "";
   state.editingPresetCommand = null;
   setPresetStatus("");
@@ -588,7 +589,7 @@ function presetForAgentCommand(command = "") {
 }
 
 function renderDefaultAgentPresetFromStartPreset(startPresets = {}) {
-  const commands = Array.isArray(startPresets?.["0"]?.commands) ? startPresets["0"].commands : [];
+  const commands = Array.isArray(startPresets?.[DEFAULT_AGENT_PRESET_CODE]?.commands) ? startPresets[DEFAULT_AGENT_PRESET_CODE].commands : [];
   const firstCommand = commands.find((command) => String(command || "").trim());
   const matched = presetForAgentCommand(firstCommand || "");
   $("cfg-agent-preset").value = matched.preset;
@@ -616,14 +617,14 @@ function ensureDefaultAgentPreset() {
   }
   const command = agentPresetCommand();
   if (!command) {
-    delete presets["0"];
+    delete presets[DEFAULT_AGENT_PRESET_CODE];
     writeStartPresetsFromUI(presets);
-    setAgentPresetStatus("已清空 0 号默认 Agent 预设。", true);
+    setAgentPresetStatus(`已清空 ${DEFAULT_AGENT_PRESET_CODE} 号默认 Agent 预设。`, true);
     return;
   }
-  presets["0"] = { commands: [command] };
+  presets[DEFAULT_AGENT_PRESET_CODE] = { commands: [command] };
   writeStartPresetsFromUI(presets);
-  setAgentPresetStatus(`已更新 0 号默认 Agent 预设：${command}`, true);
+  setAgentPresetStatus(`已更新 ${DEFAULT_AGENT_PRESET_CODE} 号默认 Agent 预设：${command}`, true);
 }
 
 function renderOnboardingAgentControls() {
@@ -646,7 +647,7 @@ function setDefaultAgentPresetInConfig(cfg, preset, customCommand, defaultSessio
     ? { ...cfg.session_start_presets }
     : {};
   if (command) {
-    presets["0"] = { commands: [command] };
+    presets[DEFAULT_AGENT_PRESET_CODE] = { commands: [command] };
   }
   return { ...cfg, lark_default_session_name: sessionName, session_start_presets: presets, onboarding_completed: true };
 }
