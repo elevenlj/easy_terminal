@@ -404,6 +404,25 @@ func (m *Manager) FindSessionByLarkChatID(ctx context.Context, chatID string) (S
 	return Session{}, false, nil
 }
 
+func (m *Manager) LatestLarkChatID() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var latest Session
+	for _, rt := range m.sessions {
+		s := rt.Snapshot()
+		if strings.TrimSpace(s.LarkChatID) == "" {
+			continue
+		}
+		if latest.ID == "" || s.CreatedAt.After(latest.CreatedAt) {
+			latest = s
+		}
+	}
+	return latest.LarkChatID
+}
+
 func (m *Manager) DeleteSession(ctx context.Context, id string) error {
 	m.mu.Lock()
 	rt, ok := m.sessions[id]
@@ -756,6 +775,14 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 }
 
 func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveUpdateNo ...int) error {
+	return rt.refreshNotificationMessage(messageID, true, preserveUpdateNo...)
+}
+
+func (rt *RuntimeSession) AutoRefreshNotificationMessage(messageID string, preserveUpdateNo ...int) error {
+	return rt.refreshNotificationMessage(messageID, false, preserveUpdateNo...)
+}
+
+func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressUpdateTip bool, preserveUpdateNo ...int) error {
 	if rt == nil || rt.manager == nil || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
 		return errors.New("lark notifier is not configured")
 	}
@@ -794,12 +821,16 @@ func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveU
 		UpdateNo:            updateNo,
 		Running:             running,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
-		SuppressUpdateTip:   true,
+		SuppressUpdateTip:   suppressUpdateTip,
 		NotificationVersion: patchVersion,
 	}
 	rt.notificationRunning = n.Running
 	rt.mu.Unlock()
-	log.Printf("lark card write queued source=manual_refresh action=patch session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
+	source := "auto_refresh"
+	if suppressUpdateTip {
+		source = "manual_refresh"
+	}
+	log.Printf("lark card write queued source=%s action=patch session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", source, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 
 	rt.notificationPatchMu.Lock()
 	result, err := rt.manager.notifier.NotifyWaiting(n)
@@ -898,7 +929,7 @@ func (rt *RuntimeSession) autoRefreshLoop(stop <-chan struct{}) {
 		sessionID := rt.session.ID
 		rt.mu.Unlock()
 		if running && messageID != "" {
-			if err := rt.RefreshNotificationMessage(messageID, updateNo); err != nil {
+			if err := rt.AutoRefreshNotificationMessage(messageID, updateNo); err != nil {
 				log.Printf("lark card auto refresh failed session=%s message=%s: %v", sessionID, messageID, err)
 			}
 		}

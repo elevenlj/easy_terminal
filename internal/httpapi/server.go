@@ -36,7 +36,7 @@ func NewServer(manager *session.Manager, uploadsDir string, config ...ConfigServ
 		manager:             manager,
 		uploadsDir:          uploadsDir,
 		larkAppRegistration: newLarkAppRegistrationClient(),
-		larkConfigTester:    realLarkConfigTester{},
+		larkConfigTester:    realLarkConfigTester{probe: manager},
 		mux:                 http.NewServeMux(),
 	}
 	if len(config) > 0 {

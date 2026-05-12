@@ -208,6 +208,11 @@ const ids = [
   "lark-register-code",
   "lark-register-link",
   "lark-register-qr",
+  "lark-app-console-link",
+  "lark-copy-scope",
+  "lark-copy-permission-json",
+  "lark-permission-status",
+  "lark-group-scope",
   "lark-test-start",
   "lark-test-result",
   "cfg-fast-waiting",
@@ -330,6 +335,14 @@ const context = {
       },
     },
   },
+  navigator: {
+    clipboard: {
+      async writeText(text) {
+        context.copiedText = text;
+      },
+    },
+  },
+  copiedText: "",
   fetch: async (path, options = {}) => {
     fetchCalls.push({ path, options });
     if (path === "/api/sessions" && !options.method) {
@@ -457,6 +470,13 @@ assert.equal(elements["lark-register-panel"].hidden, false, "lark registration p
 assert.equal(elements["lark-register-code"].textContent, "USER-1");
 assert.equal(elements["lark-register-link"].href, "https://open.feishu.cn/page/cli?user_code=USER-1");
 assert.ok(elements["lark-register-qr"].src.includes("/api/lark-app-registration/qr?text="));
+assert.equal(elements["lark-app-console-link"].href, "https://open.feishu.cn/app/app-id/auth");
+elements["lark-copy-scope"].onclick();
+await Promise.resolve();
+assert.equal(context.copiedText, "im:message.group_msg");
+elements["lark-copy-permission-json"].onclick();
+await Promise.resolve();
+assert.ok(context.copiedText.includes("im:message.group_msg"));
 
 elements["composer-input"].value = "line one";
 let prevented = false;
@@ -611,7 +631,9 @@ elements["startup-json-preview"].value = JSON.stringify({
 }, null, 2);
 elements["startup-json-preview"].oninput();
 elements["cfg-fast-waiting"].value = "450";
+elements["cfg-conservative-waiting"].value = "";
 elements["cfg-auto-refresh-interval"].value = "6000";
+elements["cfg-lark-max-lines"].value = "";
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
@@ -633,7 +655,9 @@ const configPatch = fetchCalls.filter((call) => call.path === "/api/config" && c
 assert.ok(configPatch, "config form should PATCH /api/config");
 const patchedConfig = JSON.parse(configPatch.options.body);
 assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
+assert.equal(patchedConfig.conservative_waiting_transition_ms, 700);
 assert.equal(patchedConfig.lark_auto_refresh_interval_ms, 6000);
+assert.equal(patchedConfig.lark_notify_max_lines, 300);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);
 assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");

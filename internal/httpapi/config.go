@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -88,9 +90,11 @@ func (s *Server) handleLarkConfigTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.larkConfigTester.Test(req), nil)
 }
 
-type realLarkConfigTester struct{}
+type realLarkConfigTester struct {
+	probe larkGroupPermissionProbe
+}
 
-func (realLarkConfigTester) Test(cfg RuntimeConfig) LarkConfigTestResult {
+func (t realLarkConfigTester) Test(cfg RuntimeConfig) LarkConfigTestResult {
 	result := LarkConfigTestResult{}
 	appID := strings.TrimSpace(cfg.LarkAppID)
 	appSecret := strings.TrimSpace(cfg.LarkAppSecret)
@@ -130,8 +134,135 @@ func (realLarkConfigTester) Test(cfg RuntimeConfig) LarkConfigTestResult {
 		return result
 	}
 	result.Steps = append(result.Steps, LarkConfigTestStep{Name: "发送测试通知", OK: true, Message: "已向通知接收 ID 发送测试卡片"})
+	probeChatID := ""
+	if t.probe != nil {
+		probeChatID = t.probe.LatestLarkChatID()
+	}
+	if err := checkLarkGroupAllMessagesPermission(appID, appSecret, receiveID, probeChatID); err != nil {
+		result.Steps = append(result.Steps, LarkConfigTestStep{
+			Name:    "群所有消息权限",
+			OK:      false,
+			Message: err.Error(),
+		})
+		return result
+	}
+	result.Steps = append(result.Steps, LarkConfigTestStep{Name: "群所有消息权限", OK: true, Message: "im:message.group_msg 已生效"})
 	result.OK = true
 	return result
+}
+
+type larkGroupPermissionProbe interface {
+	LatestLarkChatID() string
+}
+
+func checkLarkGroupAllMessagesPermission(appID, appSecret string, receiveID string, probeChatID string) error {
+	probeChatID = strings.TrimSpace(probeChatID)
+	payload, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	req, err := http.NewRequest(http.MethodPost, feishuOpenBase+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var tokenResp struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&tokenResp); err != nil {
+		return err
+	}
+	if tokenResp.Code != 0 || tokenResp.TenantAccessToken == "" {
+		return errors.New("获取飞书访问令牌失败：" + tokenResp.Msg)
+	}
+	if probeChatID == "" {
+		var err error
+		probeChatID, err = createLarkPermissionProbeChat(client, tokenResp.TenantAccessToken, receiveID)
+		if err != nil {
+			return err
+		}
+	}
+	u, _ := url.Parse(feishuOpenBase + "/open-apis/im/v1/messages")
+	q := u.Query()
+	q.Set("container_id_type", "chat")
+	q.Set("container_id", probeChatID)
+	q.Set("page_size", "1")
+	u.RawQuery = q.Encode()
+	req, err = http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+tokenResp.TenantAccessToken)
+	resp, err = client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var msgResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&msgResp); err != nil {
+		return err
+	}
+	if msgResp.Code == 230027 && strings.Contains(msgResp.Msg, "im:message.group_msg") {
+		return errors.New("当前飞书应用缺少 im:message.group_msg，请在飞书后台开通“获取群组中所有消息（敏感权限）”并发布/审批后重新保存配置")
+	}
+	if msgResp.Code != 0 {
+		return errors.New("检测 im:message.group_msg 失败：" + msgResp.Msg)
+	}
+	return nil
+}
+
+func createLarkPermissionProbeChat(client *http.Client, token string, receiveID string) (string, error) {
+	receiveID = strings.TrimSpace(receiveID)
+	if receiveID == "" {
+		return "", errors.New("无法创建权限测试群：通知接收 ID 为空")
+	}
+	u, _ := url.Parse(feishuOpenBase + "/open-apis/im/v1/chats")
+	q := u.Query()
+	q.Set("user_id_type", "open_id")
+	q.Set("uuid", "easy-terminal-permission-probe-"+time.Now().Format("20060102150405"))
+	u.RawQuery = q.Encode()
+	body, _ := json.Marshal(map[string]any{
+		"name":                     "Easy Terminal 权限测试",
+		"user_id_list":             []string{receiveID},
+		"chat_mode":                "group",
+		"chat_type":                "private",
+		"join_message_visibility":  "not_anyone",
+		"leave_message_visibility": "not_anyone",
+		"membership_approval":      "no_approval_required",
+	})
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var createResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ChatID string `json:"chat_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&createResp); err != nil {
+		return "", err
+	}
+	if createResp.Code != 0 || strings.TrimSpace(createResp.Data.ChatID) == "" {
+		return "", errors.New("创建权限测试群失败：" + createResp.Msg)
+	}
+	return createResp.Data.ChatID, nil
 }
 
 func (s *Server) handleLarkAppRegistration(w http.ResponseWriter, r *http.Request) {

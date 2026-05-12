@@ -122,7 +122,7 @@ func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabl
 		),
 		larkShortcutActionElement(
 			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
-			larkShortcutButtonColumn("退出", "primary", sessionID, "exit_agent"),
+			larkShortcutButtonColumn("退出agent", "primary", sessionID, "exit_agent"),
 			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
 			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
 		),

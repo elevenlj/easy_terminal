@@ -579,6 +579,70 @@ dialog::backdrop {
   color: var(--accent-dark);
 }
 
+.lark-permission-guide {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d8b45f;
+  border-radius: 8px;
+  background: #fff8e6;
+  display: grid;
+  gap: 10px;
+}
+
+.lark-permission-guide p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.permission-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.permission-grid div {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
+}
+
+.permission-grid span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.permission-grid code {
+  overflow-wrap: anywhere;
+}
+
+.permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.permission-actions a,
+.permission-actions button {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: white;
+  color: var(--accent-dark);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.permission-status {
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .lark-test {
   margin-top: 12px;
   display: grid;

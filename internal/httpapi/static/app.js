@@ -252,11 +252,33 @@ function renderConfig() {
   $("cfg-session-start-presets").value = JSON.stringify(cfg.session_start_presets || {}, null, 2);
   renderDropRules();
   renderCustomShortcuts();
+  renderLarkPermissionGuide();
   renderPreStartCommandRows();
   renderNamePresets();
   state.startupJSONDirty = false;
   updateStartupJSONPreview();
   $("config-error").textContent = "";
+}
+
+function larkGroupMessagePermissionJSON() {
+  return JSON.stringify({
+    scopes: ["im:message.group_msg"],
+    events: ["im.message.receive_v1"],
+  }, null, 2);
+}
+
+function larkAppConsoleURL(appID) {
+  const id = String(appID || "").trim();
+  if (!id) return "https://open.feishu.cn/app";
+  return `https://open.feishu.cn/app/${encodeURIComponent(id)}/auth`;
+}
+
+function renderLarkPermissionGuide() {
+  const appID = $("cfg-lark-app-id").value.trim();
+  $("lark-app-console-link").href = larkAppConsoleURL(appID);
+  $("lark-permission-status").textContent = appID
+    ? "打开后台后进入权限管理，搜索并开通 im:message.group_msg，然后发布应用版本。"
+    : "先扫码或填写 App ID，再打开应用后台。";
 }
 
 function setConfigTab(targetID) {
@@ -300,9 +322,10 @@ async function maybeShowOnboarding() {
   await openConfigDialog("config-session");
 }
 
-function readNumber(id) {
-  const n = Number($(id).value);
-  if (!Number.isFinite(n)) throw new Error("配置里存在无效数字");
+function readNumber(id, fallback) {
+  const raw = String($(id).value || "").trim();
+  const n = raw === "" ? Number(fallback) : Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new Error("配置里存在无效数字");
   return Math.trunc(n);
 }
 
@@ -329,10 +352,10 @@ function readConfigForm() {
     lark_mention_enabled: $("cfg-lark-mention-enabled").checked,
     lark_default_session_name: $("cfg-lark-default-session-name").value.trim(),
     lark_session_chat_prefix: $("cfg-lark-session-chat-prefix").value.trim(),
-    fast_waiting_transition_ms: readNumber("cfg-fast-waiting"),
-    conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting"),
-    lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval"),
-    lark_notify_max_lines: readNumber("cfg-lark-max-lines"),
+    fast_waiting_transition_ms: readNumber("cfg-fast-waiting", state.config?.fast_waiting_transition_ms || 1000),
+    conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting", state.config?.conservative_waiting_transition_ms || 3000),
+    lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval", state.config?.lark_auto_refresh_interval_ms || 5000),
+    lark_notify_max_lines: readNumber("cfg-lark-max-lines", state.config?.lark_notify_max_lines || 100),
     session_pre_start_command: $("cfg-prestart-command").value,
     lark_notify_drop_line_patterns: dropRules,
     lark_custom_shortcuts: customShortcuts,
@@ -565,6 +588,15 @@ function renderLarkTestResult(result) {
     row.querySelector("span").textContent = step.message || "";
     box.appendChild(row);
   }
+}
+
+async function copyText(text, okMessage) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    $("lark-permission-status").textContent = okMessage;
+    return;
+  }
+  $("lark-permission-status").textContent = text;
 }
 
 function agentPresetCommand() {
@@ -1142,6 +1174,12 @@ $("lark-test-start").onclick = () => testLarkConfig().catch((err) => {
   $("lark-test-start").disabled = false;
 });
 
+$("cfg-lark-app-id").oninput = renderLarkPermissionGuide;
+
+$("lark-copy-scope").onclick = () => copyText("im:message.group_msg", "已复制 Scope：im:message.group_msg");
+
+$("lark-copy-permission-json").onclick = () => copyText(larkGroupMessagePermissionJSON(), "已复制权限 JSON");
+
 $("cfg-agent-preset").onchange = () => {
   renderAgentPresetControls();
   setAgentPresetStatus("");
@@ -1252,7 +1290,8 @@ function applyLarkRegistrationResult(result) {
   $("cfg-lark-app-id").value = result.app_id || "";
   $("cfg-lark-app-secret").value = result.app_secret || "";
   if (result.lark_notify_receive_id) $("cfg-lark-receive-id").value = result.lark_notify_receive_id;
-  $("lark-register-status").textContent = "扫码成功，已填入飞书应用配置。点击“保存”。";
+  renderLarkPermissionGuide();
+  $("lark-register-status").textContent = "扫码成功，已填入飞书应用配置。保存后请按下方企业级权限引导补开 im:message.group_msg。";
   $("lark-register-start").disabled = false;
   stopLarkRegistrationPolling();
 }

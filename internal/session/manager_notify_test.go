@@ -955,7 +955,7 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if strings.Contains(content, "Ctrl-D") || strings.Contains(content, "ctrl_d") {
 		t.Fatalf("card content should not include Ctrl-D, got %s", content)
 	}
-	if !strings.Contains(content, "退出") || !strings.Contains(content, "exit_agent") {
+	if !strings.Contains(content, "退出agent") || !strings.Contains(content, "exit_agent") {
 		t.Fatalf("card content should include exit agent shortcut, got %s", content)
 	}
 	if !strings.Contains(content, "刷新") || !strings.Contains(content, `"easy_terminal_action":"refresh"`) {
@@ -966,8 +966,8 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	}
 	if !(strings.Index(content, `"content":"刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出"`) &&
-		strings.Index(content, `"content":"退出"`) < strings.Index(content, `"content":"Esc"`) &&
+		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出agent"`) &&
+		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
 		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
@@ -975,7 +975,7 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
 		t.Fatalf("card content should include custom shortcut row, got %s", content)
 	}
-	for _, label := range []string{"刷新", "自动刷新", "Ctrl-C", "退出", "Esc", "Enter"} {
+	for _, label := range []string{"刷新", "自动刷新", "Ctrl-C", "退出agent", "Esc", "Enter"} {
 		if !strings.Contains(content, `"content":"`+label+`"`) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
@@ -1114,6 +1114,36 @@ func TestLarkUpdateWaitingSuppressesManualRefreshTip(t *testing.T) {
 	}
 	if len(sent) != 0 {
 		t.Fatalf("manual refresh should not send tip messages, got %#v", sent)
+	}
+}
+
+func TestAutoRefreshNotificationMessageKeepsUpdateNumberButAllowsTip(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:              m,
+		session:              Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+		notificationUpdateNo: 2,
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	rt.mu.Lock()
+	rt.session.Status = StatusRunning
+	rt.mu.Unlock()
+
+	if err := rt.AutoRefreshNotificationMessage("bot-card", 2); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one auto refresh update, got %#v", notes)
+	}
+	if notes[0].UpdateNo != 2 || notes[0].SuppressUpdateTip {
+		t.Fatalf("auto refresh should preserve update number and allow tip, got %#v", notes[0])
+	}
+	if rt.notificationUpdateNo != 2 {
+		t.Fatalf("auto refresh should not increase update number, got %d", rt.notificationUpdateNo)
 	}
 }
 

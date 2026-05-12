@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,8 @@ var (
 		"im:message",
 		"im:message:send_as_bot",
 		"im:message.p2p_msg:readonly",
+		"im:message.group_msg",
+		"im:message.group_msg:readonly",
 		"im:message.group_at_msg:readonly",
 		"im:message.group_at_msg.include_bot:readonly",
 		"im:message:readonly",
@@ -82,6 +85,7 @@ func (c *larkAppRegistrationClient) Begin(ctx context.Context, brand string) (La
 	brand = normalizeRegistrationBrand(brand)
 	accountsBase, openBase := registrationBases(brand)
 	form := larkRegistrationBeginForm()
+	log.Printf("lark app registration begin brand=%s scopes=%q events=%q callbacks=%q", brand, form.Get("scope"), form.Get("events"), form.Get("callbacks"))
 	data, err := c.postForm(ctx, accountsBase+larkRegistrationPath, form)
 	if err != nil {
 		return LarkAppRegistrationBegin{}, err
