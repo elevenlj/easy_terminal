@@ -983,14 +983,11 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if strings.Count(content, `"type":"primary"`) < 6 {
 		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
 	}
-	if !strings.Contains(content, `"tag":"interactive_container"`) || !strings.Contains(content, `"has_border":true`) || !strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
-		t.Fatalf("custom shortcut actions should use green text and border without green background, got %s", content)
+	if strings.Contains(content, `"tag":"interactive_container"`) || strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
+		t.Fatalf("custom shortcut actions should use native tiny buttons, got %s", content)
 	}
-	if !strings.Contains(content, `\u003cfont color=\"green\"\u003e状态\u003c/font\u003e`) {
-		t.Fatalf("custom shortcut label should use green text, got %s", content)
-	}
-	if strings.Contains(content, `"tag":"plain_text","content":"状态"`) {
-		t.Fatalf("custom shortcut container text should use a card-supported element, got %s", content)
+	if !strings.Contains(content, `"content":"状态","tag":"plain_text"`) || !strings.Contains(content, `"type":"default"`) {
+		t.Fatalf("custom shortcut label should use a default tiny button, got %s", content)
 	}
 	if !strings.Contains(content, `"size":"tiny"`) {
 		t.Fatalf("card shortcut buttons should be small, got %s", content)

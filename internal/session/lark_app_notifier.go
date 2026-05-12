@@ -249,16 +249,11 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 		"vertical_spacing": "8px",
 		"elements": []map[string]any{
 			{
-				"tag":           "interactive_container",
-				"width":         "auto",
-				"height":        "auto",
-				"has_border":    true,
-				"border_color":  "green",
-				"corner_radius": "4px",
-				"padding":       "4px 8px",
-				"elements": []map[string]any{
-					{"tag": "markdown", "content": fmt.Sprintf(`<font color="green">%s</font>`, shortcut.Label)},
-				},
+				"tag":   "button",
+				"type":  "default",
+				"size":  "tiny",
+				"width": "default",
+				"text":  map[string]any{"tag": "plain_text", "content": shortcut.Label},
 				"behaviors": []map[string]any{
 					{
 						"type": "callback",
