@@ -722,9 +722,13 @@ elements["cfg-agent-preset"].value = "codex";
 elements["cfg-agent-preset"].onchange();
 let generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
 assert.deepEqual(generatedStartPresets["999999"], { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] }, "agent preset should update default start preset 999999");
+elements["cfg-agent-preset"].value = "aiden";
+elements["cfg-agent-preset"].onchange();
+generatedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
+assert.deepEqual(generatedStartPresets["999999"], { commands: ["aiden"] }, "aiden preset should update default start preset 999999");
 app.state.config = {
   ...app.state.config,
-  session_start_presets: generatedStartPresets,
+  session_start_presets: { "999999": { commands: ["codex --dangerously-bypass-approvals-and-sandbox"] } },
 };
 app.openConfigDialog("config-session");
 assert.equal(elements["cfg-agent-preset"].value, "codex", "agent preset should be selected from saved preset 999999");

@@ -766,12 +766,13 @@ function agentCommandForPreset(preset, customCommand = "") {
     opencode: "opencode --dangerously-skip-permissions",
     claude: "claude --dangerously-skip-permissions",
     gemini: "gemini --yolo",
+    aiden: "aiden",
   }[preset] || "";
 }
 
 function presetForAgentCommand(command = "") {
   const normalized = String(command || "").trim();
-  for (const preset of ["codex", "opencode", "claude", "gemini"]) {
+  for (const preset of ["codex", "opencode", "claude", "gemini", "aiden"]) {
     if (normalized === agentCommandForPreset(preset)) return { preset, customCommand: "" };
   }
   if (normalized) return { preset: "custom", customCommand: normalized };

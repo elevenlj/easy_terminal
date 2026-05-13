@@ -18,7 +18,7 @@
 
 首次进入 Web 端时，系统会直接打开配置页。这个状态会保存到 `conf/config.local.json`：
 
-- 选择 Codex、OpenCode、Claude Code、Gemini 或自定义命令：更新 999999 号默认 Agent 启动预设。
+- 选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令：更新 999999 号默认 Agent 启动预设。
 - 不选择默认 Agent：不配置 999999 号启动预设。
 - 配置入口始终在左下角齿轮按钮。
 

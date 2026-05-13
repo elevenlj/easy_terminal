@@ -4,7 +4,7 @@
 
 适合这些场景：
 
-- 用手机在飞书里启动和继续 Codex、OpenCode、Claude Code、Gemini 等 CLI Agent。
+- 用手机在飞书里启动和继续 Codex、OpenCode、Claude Code、Gemini、Aiden 等 CLI Agent。
 - 在一台电脑或服务器上同时管理多个终端会话，例如跑服务、看日志、执行测试、处理代码任务。
 - 不想把所有任务都变成云端 API 调用，希望复用本机环境、已有命令、已有账号和本地模型。
 - 需要实时看到 Agent 输出，中途补充指令，而不是等任务结束后才收到一条通知。
@@ -109,7 +109,7 @@ NPM 安装脚本会优先从 GitHub Release 下载二进制，失败后从 Gitee
 
 本地 Agent 需要：
 
-- 先在当前机器安装对应 CLI 工具，例如 `opencode`、`codex`、`claude`、`gemini` 等
+- 先在当前机器安装对应 CLI 工具，例如 `opencode`、`codex`、`claude`、`gemini`、`aiden` 等
 - 确保这些命令可以在默认 shell 中直接执行
 - 如果 Agent 依赖 API Key 或本地模型，请提前在本机环境变量或对应工具配置中完成设置
 
