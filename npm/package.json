@@ -1,5 +1,5 @@
 {
-  "name": "@elevenlj/easy-terminal",
+  "name": "@lijuneleven/easy-terminal",
   "version": "0.1.0",
   "description": "Local web terminal with Feishu remote session control.",
   "license": "MIT",

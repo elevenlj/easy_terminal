@@ -3,7 +3,7 @@
 Install:
 
 ```sh
-npm install -g @elevenlj/easy-terminal
+npm install -g @lijuneleven/easy-terminal
 easy-terminal
 ```
 

@@ -24,7 +24,7 @@
 快速安装：
 
 ```sh
-npm install -g @elevenlj/easy-terminal
+npm install -g @lijuneleven/easy-terminal
 easy-terminal
 ```
 
@@ -77,7 +77,7 @@ make tidy         # go mod tidy
 
 ## 发布到 NPM
 
-当前 NPM 包名为 `@elevenlj/easy-terminal`，安装后提供 `easy-terminal` 命令。
+当前 NPM 包名为 `@lijuneleven/easy-terminal`，安装后提供 `easy-terminal` 命令。
 
 发布前需要在 NPM 账号中创建 `NPM_TOKEN`，并配置到 GitHub 仓库 Secrets。之后推送版本标签即可自动发布：
 
