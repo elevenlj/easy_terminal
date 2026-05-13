@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
+const http = require("http");
 const https = require("https");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
@@ -11,9 +11,11 @@ const packageJson = require("../package.json");
 
 const owner = process.env.EASY_TERMINAL_GITHUB_OWNER || "elevenlj";
 const repo = process.env.EASY_TERMINAL_GITHUB_REPO || "easy_terminal";
+const giteeRepo = process.env.EASY_TERMINAL_GITEE_REPO || "eleven_lj/easy_terminal";
 const version = packageJson.version;
 const platform = process.platform;
 const arch = process.arch;
+const requestTimeoutMs = Number(process.env.EASY_TERMINAL_DOWNLOAD_TIMEOUT_MS || 30000);
 
 const platformMap = {
   darwin: "darwin",
@@ -44,20 +46,24 @@ if (!targetPlatform || !targetArch) {
 
 const ext = targetPlatform === "windows" ? ".exe" : "";
 const assetName = `easy_terminal-${targetPlatform}-${targetArch}${ext}`;
-const url = `https://github.com/${owner}/${repo}/releases/download/v${version}/${assetName}`;
+const urls = [
+  `https://github.com/${owner}/${repo}/releases/download/v${version}/${assetName}`,
+  `https://gitee.com/${giteeRepo}/releases/download/v${version}/${assetName}`
+];
 const vendorDir = path.resolve(__dirname, "..", "vendor");
 const outPath = path.join(vendorDir, targetPlatform === "windows" ? "easy_terminal.exe" : "easy_terminal");
 
 async function download(downloadUrl, redirects = 0) {
   if (redirects > 5) {
-    fail("too many redirects while downloading binary");
+    throw new Error("too many redirects while downloading binary");
   }
 
   await fs.promises.mkdir(vendorDir, { recursive: true });
 
   await new Promise((resolve, reject) => {
-    https
-      .get(downloadUrl, (res) => {
+    const mod = downloadUrl.startsWith("https:") ? https : http;
+    const request = mod
+      .get(downloadUrl, { headers: { "User-Agent": "easy-terminal-npm" } }, (res) => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode || 0)) {
           res.resume();
           download(res.headers.location, redirects + 1).then(resolve, reject);
@@ -73,6 +79,9 @@ async function download(downloadUrl, redirects = 0) {
         pipeline(res, createWriteStream(outPath)).then(resolve, reject);
       })
       .on("error", reject);
+    request.setTimeout(requestTimeoutMs, () => {
+      request.destroy(new Error(`download timed out after ${requestTimeoutMs}ms`));
+    });
   });
 
   if (targetPlatform !== "windows") {
@@ -80,10 +89,27 @@ async function download(downloadUrl, redirects = 0) {
   }
 }
 
-download(url).catch((err) => {
-  try {
-    fs.rmSync(outPath, { force: true });
-  } catch (_) {
+async function main() {
+  const failures = [];
+
+  for (const url of urls) {
+    try {
+      console.log(`[easy-terminal] downloading ${assetName}`);
+      console.log(`[easy-terminal] source: ${url}`);
+      await download(url);
+      console.log(`[easy-terminal] installed binary to ${outPath}`);
+      return;
+    } catch (err) {
+      try {
+        fs.rmSync(outPath, { force: true });
+      } catch (_) {
+      }
+      failures.push(`${url}: ${err.message}`);
+      console.warn(`[easy-terminal] download failed, trying next source`);
+    }
   }
-  fail(`${err.message}. URL: ${url}`);
-});
+
+  fail(`could not download binary from any source.\n${failures.map((item) => `- ${item}`).join("\n")}`);
+}
+
+main();

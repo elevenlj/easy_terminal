@@ -86,6 +86,8 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+NPM 安装脚本会优先从 GitHub Release 下载二进制，失败后从 Gitee Release 下载。默认 Gitee 仓库为 `eleven_lj/easy_terminal`。使用 Gitee 备用源时，需要在 Gitee 仓库发布同名版本和同名二进制文件，例如 `v0.1.1` 版本需要包含 `easy_terminal-darwin-arm64`、`easy_terminal-linux-amd64` 等文件。
+
 ## 运行环境
 
 必需环境：
