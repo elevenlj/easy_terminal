@@ -48,6 +48,7 @@ type LarkReplyBridge struct {
 
 var structuredInputEnterDelay = 200 * time.Millisecond
 var structuredInputEnterSequence = "\r"
+var structuredInputNumericOnlyRE = regexp.MustCompile(`^\d+$`)
 
 const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
@@ -382,13 +383,17 @@ func (b *LarkReplyBridge) handleCardToggleAutoRefresh(ctx context.Context, value
 	if err != nil {
 		return nil, err
 	}
-	go func() {
-		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
-			log.Printf("lark card auto refresh toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, enabled, err)
-			return
-		}
-		log.Printf("lark card auto refresh toggled session=%s message=%s enabled=%v", sessionID, openMessageID, enabled)
-	}()
+	if enabled {
+		log.Printf("lark card auto refresh enabled session=%s message=%s", sessionID, openMessageID)
+	} else {
+		go func() {
+			if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
+				log.Printf("lark card auto refresh toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, enabled, err)
+				return
+			}
+			log.Printf("lark card auto refresh toggled session=%s message=%s enabled=%v", sessionID, openMessageID, enabled)
+		}()
+	}
 	if enabled {
 		return larkCardToast("info", "已开启自动刷新"), nil
 	}
@@ -419,13 +424,25 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	msg := event.Event.Message
-	if shouldIgnoreLarkP2Message(event.Event.Sender, valueOf(msg.MessageType)) {
+	if shouldIgnoreLarkP2Message(event.Event.Sender) {
 		return nil
 	}
-	incoming := extractLarkIncomingMessage(valueOf(msg.Content), valueOf(msg.MessageType))
+	messageType := valueOf(msg.MessageType)
+	incoming := extractLarkIncomingMessage(valueOf(msg.Content), messageType)
 	log.Printf("lark reply bridge received P2 message=%s chat=%s chat_type=%s msg_type=%s text_len=%d attachments=%d",
-		valueOf(msg.MessageId), valueOf(msg.ChatId), valueOf(msg.ChatType), valueOf(msg.MessageType), len(incoming.Text), len(incoming.Attachments))
+		valueOf(msg.MessageId), valueOf(msg.ChatId), valueOf(msg.ChatType), messageType, len(incoming.Text), len(incoming.Attachments))
+	if isUnsupportedLarkForwardedCard(messageType) {
+		if err := b.replyLarkText(ctx, valueOf(msg.MessageId), "收到转发卡片，但飞书没有把卡片内容作为普通文本开放给机器人。请直接在原卡片所在会话操作，或把需要处理的内容复制成文本/截图后发送。"); err != nil {
+			return err
+		}
+		return nil
+	}
 	if incoming.Text == "" && len(incoming.Attachments) == 0 {
+		if mayContainUnsupportedLarkContent(messageType) {
+			if err := b.replyLarkText(ctx, valueOf(msg.MessageId), "收到消息，但当前无法读取其中的卡片或富媒体内容。请改为发送文本、图片或文件。"); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	b.markLarkMessageProcessing(ctx, valueOf(msg.MessageId))
@@ -455,14 +472,24 @@ func (b *LarkReplyBridge) markLarkMessageProcessing(ctx context.Context, message
 	}
 }
 
-func shouldIgnoreLarkP2Message(sender *larkim.EventSender, messageType string) bool {
-	if messageType == "interactive" {
-		return true
-	}
+func shouldIgnoreLarkP2Message(sender *larkim.EventSender) bool {
 	if sender == nil || sender.SenderType == nil {
 		return false
 	}
 	return *sender.SenderType != "" && *sender.SenderType != "user"
+}
+
+func isUnsupportedLarkForwardedCard(messageType string) bool {
+	return messageType == "interactive"
+}
+
+func mayContainUnsupportedLarkContent(messageType string) bool {
+	switch messageType {
+	case "interactive", "post", "share_chat", "share_user":
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *larkim.P1MessageReceiveV1) error {
@@ -708,12 +735,7 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 	if err != nil {
 		return s, err
 	}
-	updated, ok, err := b.manager.UpdateNotifyOnWaiting(ctx, s.ID, true)
-	if err != nil || !ok {
-		return s, err
-	}
-	b.manager.EnsureBrowser(updated.ID)
-	return updated, nil
+	return s, nil
 }
 
 func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name string, routeCtx larkRouteContext) (Session, error) {
@@ -722,17 +744,31 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 		return s, err
 	}
 	if routeCtx.ChatID != "" && routeCtx.ChatType == "group" {
-		return b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
+		if rt, ok := b.manager.GetRuntime(s.ID); ok {
+			rt.RequireLarkChatForNotifications()
+		}
+		updated, err := b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
+		if err != nil {
+			return updated, err
+		}
+		return b.enableLarkSessionNotifications(ctx, updated)
 	}
 	if routeCtx.SenderOpenID == "" || b.createChat == nil {
 		log.Printf("lark reply bridge skipped dedicated chat creation session=%s name=%q reason=missing_sender_or_creator sender=%q",
 			s.ID, s.Name, routeCtx.SenderOpenID)
-		return s, nil
+		return b.enableLarkSessionNotifications(ctx, s)
+	}
+	if rt, ok := b.manager.GetRuntime(s.ID); ok {
+		rt.RequireLarkChatForNotifications()
 	}
 	log.Printf("lark reply bridge creating dedicated chat session=%s name=%q owner=%s", s.ID, s.Name, routeCtx.SenderOpenID)
 	chatID, err := b.createChat(ctx, s.ID, s.Name, routeCtx.SenderOpenID)
 	if err != nil {
 		log.Printf("lark reply bridge failed to create session chat session=%s name=%q: %v", s.ID, s.Name, err)
+		return s, nil
+	}
+	if strings.TrimSpace(chatID) == "" {
+		log.Printf("lark reply bridge failed to create session chat session=%s name=%q: empty chat id", s.ID, s.Name)
 		return s, nil
 	}
 	updated, err := b.bindSessionToLarkChat(ctx, s, chatID)
@@ -745,6 +781,15 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 			log.Printf("lark reply bridge failed to send session chat intro session=%s chat=%s: %v", updated.ID, chatID, err)
 		}
 	}
+	return b.enableLarkSessionNotifications(ctx, updated)
+}
+
+func (b *LarkReplyBridge) enableLarkSessionNotifications(ctx context.Context, sess Session) (Session, error) {
+	updated, ok, err := b.manager.UpdateNotifyOnWaiting(ctx, sess.ID, true)
+	if err != nil || !ok {
+		return sess, err
+	}
+	b.manager.EnsureBrowser(updated.ID)
 	return updated, nil
 }
 
@@ -1373,10 +1418,18 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	}
 	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
 	sessionID := rt.Snapshot().ID
-	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=true enter_len=%d", sessionID, len(text), len(structuredInputEnterSequence))
-	rt.MarkInputActivity(text + "\r")
+	pressEnter := structuredInputShouldPressEnter(rt, text)
+	enterLen := 0
+	if pressEnter {
+		enterLen = len(structuredInputEnterSequence)
+	}
+	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d", sessionID, len(text), pressEnter, enterLen)
+	rt.MarkStructuredInputActivity(text)
 	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err
+	}
+	if !pressEnter {
+		return nil
 	}
 	if structuredInputEnterDelay > 0 {
 		time.Sleep(structuredInputEnterDelay)
@@ -1389,6 +1442,10 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 		return err
 	}
 	return nil
+}
+
+func structuredInputShouldPressEnter(rt *RuntimeSession, text string) bool {
+	return !structuredInputNumericOnlyRE.MatchString(strings.TrimSpace(text))
 }
 
 type larkIncomingMessage struct {

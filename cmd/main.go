@@ -378,15 +378,7 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 		return
 	}
 	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID)
-	cmd := exec.Command(chrome,
-		"--headless=new",
-		"--disable-gpu",
-		"--no-first-run",
-		"--no-default-browser-check",
-		"--disable-dev-shm-usage",
-		"--user-data-dir="+profile,
-		pageURL,
-	)
+	cmd := exec.Command(chrome, headlessChromeArgs(profile, pageURL)...)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
 		log.Printf("headless browser start failed: %v", err)
@@ -407,6 +399,21 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 		m.mu.Unlock()
 		_ = os.RemoveAll(profile)
 	}()
+}
+
+func headlessChromeArgs(profile, pageURL string) []string {
+	return []string{
+		"--headless=new",
+		"--disable-gpu",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-dev-shm-usage",
+		"--window-size=1440,1000",
+		"--force-device-scale-factor=1",
+		"--hide-scrollbars",
+		"--user-data-dir=" + profile,
+		pageURL,
+	}
 }
 
 func findChrome() string {

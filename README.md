@@ -78,7 +78,7 @@ make tidy         # go mod tidy
 
 可选环境：
 
-- Chrome、Chromium 或 Microsoft Edge：用于生成终端快照
+- Chrome、Chromium 或 Microsoft Edge：可选，用于浏览器端查看和辅助快照同步
 
 飞书联动需要：
 

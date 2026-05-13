@@ -17,10 +17,11 @@ type wsBridge struct {
 }
 
 type clientMessage struct {
-	Type string `json:"type"`
-	Data string `json:"data,omitempty"`
-	Cols uint16 `json:"cols,omitempty"`
-	Rows uint16 `json:"rows,omitempty"`
+	Type   string `json:"type"`
+	Data   string `json:"data,omitempty"`
+	Source string `json:"source,omitempty"`
+	Cols   uint16 `json:"cols,omitempty"`
+	Rows   uint16 `json:"rows,omitempty"`
 }
 
 func serveWS(w http.ResponseWriter, r *http.Request, rt *session.RuntimeSession) {
@@ -70,7 +71,7 @@ func (b *wsBridge) readClient() {
 		case "resize":
 			_ = b.rt.Resize(msg.Cols, msg.Rows)
 		case "snapshot":
-			b.rt.SetVisibleSnapshot(msg.Data)
+			b.rt.SetVisibleSnapshotWithSource(msg.Data, msg.Source)
 		}
 	}
 }

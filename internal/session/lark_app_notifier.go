@@ -82,7 +82,10 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	if mention {
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + receiveID + "></at>"})
 	}
-	elements = append(elements, map[string]any{"tag": "markdown", "content": note.Content})
+	if strings.EqualFold(strings.TrimSpace(note.SnapshotSource), "buffer") {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": `⚠️ 本次终端快照使用 buffer 兜底，可能与浏览器可见终端存在细微差异。`})
+	}
+	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
 	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
 	if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
@@ -112,6 +115,22 @@ func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomSh
 		out = append(out, LarkCustomShortcut{Label: label, Command: command})
 	}
 	return out
+}
+
+func larkTerminalTextElement(content string) map[string]any {
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":     "plain_text",
+			"content": larkTerminalPlainText(content),
+		},
+	}
+}
+
+func larkTerminalPlainText(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	return content
 }
 
 func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool) []map[string]any {
@@ -250,7 +269,7 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 		"elements": []map[string]any{
 			{
 				"tag":   "button",
-				"type":  "default",
+				"type":  "primary",
 				"size":  "tiny",
 				"width": "default",
 				"text":  map[string]any{"tag": "plain_text", "content": shortcut.Label},
@@ -282,7 +301,7 @@ func larkNotificationStatusLine(note WaitingNotification) string {
 		prefix = fmt.Sprintf("已更新-%d · ", note.UpdateNo)
 	}
 	if note.Running {
-		return prefix + `状态：<font color="red">Running</font>`
+		return prefix + `状态：<font color="green">Running</font>`
 	}
 	return prefix + "状态：Not Running"
 }

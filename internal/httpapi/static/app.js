@@ -10,6 +10,8 @@ const state = {
   larkRegistrationTimer: null,
   editingPresetCommand: null,
   startupJSONDirty: false,
+  pendingTerminalWrite: Promise.resolve(),
+  snapshotRequestSeq: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -105,6 +107,7 @@ function currentSession() {
 
 function initTerminal() {
   if (state.term) state.term.dispose();
+  state.pendingTerminalWrite = Promise.resolve();
   state.term = new Terminal({
     cols: DEFAULT_TERMINAL_COLS,
     rows: DEFAULT_TERMINAL_ROWS,
@@ -138,7 +141,7 @@ function selectSession(id) {
   } else {
     if (state.socket) state.socket.close();
     initTerminal();
-    api(`/api/sessions/${id}/output`).then((out) => state.term.write(out.content || ""));
+    api(`/api/sessions/${id}/output`).then((out) => writeTerminal(out.content || ""));
   }
 }
 
@@ -155,13 +158,13 @@ function connectWS(id) {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "snapshot_request") {
-          syncSnapshotNow();
+          void syncSnapshotNow();
           return;
         }
       } catch {}
     }
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
-    state.term.write(text);
+    void writeTerminal(text);
   };
   ws.onclose = () => setTimeout(loadSessions, 300);
 }
@@ -196,14 +199,121 @@ function fitTerminalSafely() {
   }
 }
 
-function syncSnapshotNow() {
-  if (!state.term) return;
+function writeTerminal(text) {
+  const term = state.term;
+  if (!term || !text) return Promise.resolve();
+  const writeDone = state.pendingTerminalWrite.catch(() => {}).then(() => new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    try {
+      term.write(text, finish);
+      if (term.write.length < 2) finish();
+      setTimeout(finish, 100);
+    } catch {
+      finish();
+    }
+  }));
+  state.pendingTerminalWrite = writeDone.catch(() => {});
+  return writeDone;
+}
+
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => resolve());
+      return;
+    }
+    setTimeout(resolve, 16);
+  });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function terminalVisibleSnapshot() {
+  return terminalVisibleSnapshotWithSource().data;
+}
+
+function terminalVisibleSnapshotWithSource() {
+  if (!state.term) return { data: "", source: "none" };
+  const domSnapshot = terminalDOMVisibleSnapshot();
+  if (domSnapshot) return { data: domSnapshot, source: "dom" };
   const lines = [];
   const buffer = state.term.buffer.active;
-  for (let i = 0; i < buffer.length; i++) {
+  const rows = state.term.rows || DEFAULT_TERMINAL_ROWS;
+  const start = Math.max(0, buffer.viewportY || 0);
+  const end = Math.min(buffer.length, start + rows);
+  for (let i = start; i < end; i++) {
     lines.push(buffer.getLine(i)?.translateToString(true) || "");
   }
-  sendWS({ type: "snapshot", data: lines.join("\n") });
+  return { data: lines.join("\n"), source: "buffer" };
+}
+
+function terminalDOMVisibleSnapshot() {
+  const rows = Array.from(document.querySelectorAll("#terminal .xterm-rows > div"));
+  if (!rows.length) return "";
+  const cellWidth = terminalCellWidth();
+  const lines = rows.map((row) => terminalDOMRowText(row, cellWidth));
+  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+  return lines.join("\n").trim();
+}
+
+function terminalCellWidth() {
+  const width = state.term?._core?._renderService?.dimensions?.css?.cell?.width;
+  if (Number.isFinite(width) && width > 0) return width;
+  const measure = document.querySelector?.(".xterm-char-measure-element");
+  const measured = measure?.getBoundingClientRect?.().width;
+  if (Number.isFinite(measured) && measured > 0) return measured;
+  return 8;
+}
+
+function terminalDOMRowText(row, cellWidth) {
+  const rowRect = row.getBoundingClientRect?.() || { left: 0 };
+  const chars = [];
+  const spans = Array.from(row.querySelectorAll?.("span") || []);
+  if (!spans.length) {
+    return normalizeTerminalDOMText(row.textContent || "").trimEnd();
+  }
+  for (const span of spans) {
+    const text = normalizeTerminalDOMText(span.textContent || "");
+    if (!text) continue;
+    const rect = span.getBoundingClientRect?.();
+    const col = rect && Number.isFinite(rect.left) ? Math.max(0, Math.round((rect.left - rowRect.left) / cellWidth)) : chars.length;
+    for (let i = 0; i < text.length; i++) {
+      chars[col + i] = text[i];
+    }
+  }
+  return Array.from({ length: chars.length }, (_, i) => chars[i] || " ").join("").trimEnd();
+}
+
+function normalizeTerminalDOMText(text) {
+  return text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+}
+
+async function syncSnapshotNow() {
+  if (!state.term) return;
+  const requestSeq = ++state.snapshotRequestSeq;
+  await state.pendingTerminalWrite.catch(() => {});
+  let snapshot = "";
+  for (let i = 0; i < 5; i++) {
+    fitTerminalSafely();
+    await waitForNextPaint();
+    await waitForNextPaint();
+    const first = terminalVisibleSnapshotWithSource();
+    await wait(80);
+    await state.pendingTerminalWrite.catch(() => {});
+    await waitForNextPaint();
+    const second = terminalVisibleSnapshotWithSource();
+    snapshot = second;
+    if (requestSeq !== state.snapshotRequestSeq) return;
+    if (first.data === second.data && first.source === second.source) break;
+  }
+  sendWS({ type: "snapshot", data: snapshot.data || "", source: snapshot.source || "unknown" });
 }
 
 async function loadQuick() {
@@ -1367,5 +1477,7 @@ if (typeof window !== "undefined") {
     renderNamePresets,
     addPreStartCommandRow,
     visibleSessions,
+    syncSnapshotNow,
+    terminalVisibleSnapshot,
   };
 }

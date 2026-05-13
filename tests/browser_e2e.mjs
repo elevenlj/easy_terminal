@@ -71,6 +71,13 @@ try {
   await fillComposer("echo BROWSER_BUTTON_E2E");
   await click("document.querySelector('#composer button').click()");
   await waitForOutput("BROWSER_BUTTON_E2E");
+  await waitForTerminalSnapshot("BROWSER_BUTTON_E2E");
+
+  await fillComposer("printf '中文快照_OK\\n'");
+  await click("document.querySelector('#composer button').click()");
+  await waitForOutput("中文快照_OK");
+  const cjkSnapshot = await waitForTerminalSnapshot("中文快照_OK");
+  assert.equal(cjkSnapshot.includes("\uFFFD"), false, "terminal snapshot should not contain replacement characters");
 
   await fillComposer("plain enter line");
   await keydownComposer({ key: "Enter", metaKey: false, ctrlKey: false });
@@ -175,6 +182,15 @@ async function waitForOutput(text) {
     if (!live) return false;
     return fetchJSON(`http://localhost:${port}/api/sessions/${live.id}/output`).then((out) => out.content.includes(text));
   }), 8000);
+}
+
+async function waitForTerminalSnapshot(text) {
+  let snapshot = "";
+  await waitFor(async () => {
+    snapshot = await evalExpr("window.easyTerminalApp.terminalVisibleSnapshot()");
+    return typeof snapshot === "string" && snapshot.includes(text);
+  }, 8000);
+  return snapshot;
 }
 
 async function openQuickDialogAndAdd(text) {

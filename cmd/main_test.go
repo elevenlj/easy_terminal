@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"easy_terminal/internal/httpapi"
@@ -36,6 +37,21 @@ func TestParseStartupOptionsPort(t *testing.T) {
 	}
 	if opts.Port != "7070" {
 		t.Fatalf("expected short port override, got %q", opts.Port)
+	}
+}
+
+func TestHeadlessChromeArgsUseStableViewport(t *testing.T) {
+	args := headlessChromeArgs("/tmp/profile", "http://localhost:8080/?session=sess-1")
+	for _, want := range []string{
+		"--window-size=1440,1000",
+		"--force-device-scale-factor=1",
+		"--hide-scrollbars",
+		"--user-data-dir=/tmp/profile",
+		"http://localhost:8080/?session=sess-1",
+	} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("headless args missing %q: %#v", want, args)
+		}
 	}
 }
 

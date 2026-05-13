@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type LarkNotifier struct {
@@ -22,16 +23,18 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 	if !n.Available() {
 		return WaitingNotificationResult{}, errors.New("lark webhook is not configured")
 	}
-	content := note.Content
+	content := larkTerminalPlainText(note.Content)
+	elements := []map[string]any{}
+	if strings.EqualFold(strings.TrimSpace(note.SnapshotSource), "buffer") {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": "⚠️ 本次终端快照使用 buffer 兜底，可能与浏览器可见终端存在细微差异。"})
+	}
 	if note.UpdateNo > 0 {
 		content += fmt.Sprintf("\n\n已更新-%d", note.UpdateNo)
 	}
 	if n.MentionAll {
-		content = "<at id=all></at>\n" + content
+		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=all></at>"})
 	}
-	elements := []map[string]any{
-		{"tag": "markdown", "content": content},
-	}
+	elements = append(elements, map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": content}})
 	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
 	payload := map[string]any{
 		"msg_type": "interactive",

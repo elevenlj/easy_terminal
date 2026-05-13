@@ -69,7 +69,7 @@ func TestLarkReplyBridgeAddsProcessingReactionForP2Message(t *testing.T) {
 	if len(launcher.terminals) != 1 {
 		t.Fatalf("message should still route to terminal, got %d terminals", len(launcher.terminals))
 	}
-	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo from lark\r") {
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("echo from lark")) {
 		t.Fatalf("terminal should receive submitted input despite reaction, got %q", got)
 	}
 }
@@ -89,7 +89,7 @@ func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
 	if len(launcher.terminals) != 1 {
 		t.Fatalf("reaction failure should not block routing, got %d terminals", len(launcher.terminals))
 	}
-	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo from lark\r") {
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("echo from lark")) {
 		t.Fatalf("terminal should receive submitted input despite reaction failure, got %q", got)
 	}
 }
@@ -127,6 +127,63 @@ func TestLarkReplyBridgeStartCreatesDedicatedChat(t *testing.T) {
 	}
 	if len(chatMessages) != 1 || !strings.Contains(chatMessages[0], "oc-chat-1:已创建会话 手机会话") {
 		t.Fatalf("expected intro message to session chat, got %#v", chatMessages)
+	}
+}
+
+func TestLarkReplyBridgeDoesNotNotifyBeforeDedicatedChatBind(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(
+		nil,
+		launcher,
+		WithNotifier(notifier),
+		WithWaitingTransitionDelays(10*time.Millisecond, 10*time.Millisecond),
+		WithNotificationUpdateCoalesce(0),
+	)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.createChat = func(_ context.Context, sessionID, name, ownerOpenID string) (string, error) {
+		if len(launcher.terminals) != 1 {
+			t.Fatalf("expected terminal before chat creation, got %d", len(launcher.terminals))
+		}
+		launcher.terminals[0].readCh <- []byte("eleven ~ > ")
+		time.Sleep(80 * time.Millisecond)
+		return "oc-chat-1", nil
+	}
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-start-chat-bind", "", "", "text", `{"text":"开始 手机会话"}`, "p2p", "oc-main", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	for _, note := range notifier.notes() {
+		if note.ChatID != "oc-chat-1" {
+			t.Fatalf("notification should wait until dedicated chat is bound, got %#v", note)
+		}
+	}
+}
+
+func TestLarkReplyBridgeDoesNotFallbackToDefaultReceiverWhenDedicatedChatMissing(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier), WithWaitingTransitionDelays(10*time.Millisecond, 10*time.Millisecond), WithNotificationUpdateCoalesce(0))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.createChat = func(context.Context, string, string, string) (string, error) {
+		return "", nil
+	}
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-start-chat-empty", "", "", "text", `{"text":"开始 手机会话"}`, "p2p", "oc-main", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("expected created terminal, got %d", len(launcher.terminals))
+	}
+	launcher.terminals[0].readCh <- []byte("eleven ~ > ")
+	time.Sleep(80 * time.Millisecond)
+	if notes := notifier.notes(); len(notes) != 0 {
+		t.Fatalf("dedicated-chat session must not notify default receiver before chat bind, got %#v", notes)
 	}
 }
 
@@ -171,7 +228,7 @@ func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
 	if len(launcher.terminals) != 1 {
 		t.Fatalf("terminal count = %d, want 1", len(launcher.terminals))
 	}
-	if got := launcher.terminals[0].writes(); !strings.Contains(got, "pwd\r") {
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("pwd")) {
 		t.Fatalf("dedicated chat input should route to existing terminal, got %q", got)
 	}
 }
@@ -199,7 +256,7 @@ func TestLarkReplyBridgeIgnoresStaleDedicatedChatRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := launcher.terminals[0].writes(); strings.Contains(got, "pwd\r") {
+	if got := launcher.terminals[0].writes(); strings.Contains(got, PrepareStructuredInput("pwd")) {
 		t.Fatalf("stale dedicated chat should not route to exited terminal, got %q", got)
 	}
 	if got, ok := defaultLarkMessageRegistry.lookupChat("oc-chat-a"); ok && got == sess.ID {
@@ -235,7 +292,7 @@ func TestLarkReplyBridgeRoutesP1ByDedicatedChatID(t *testing.T) {
 	if len(launcher.terminals) != 1 {
 		t.Fatalf("terminal count = %d, want 1", len(launcher.terminals))
 	}
-	if got := launcher.terminals[0].writes(); !strings.Contains(got, "echo p1\r") {
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("echo p1")) {
 		t.Fatalf("P1 dedicated chat input should route to existing terminal, got %q", got)
 	}
 }
@@ -341,6 +398,69 @@ func TestSubmitStructuredInputUsesSingleCarriageReturnEnter(t *testing.T) {
 	}
 	if got := parts[len(parts)-1]; got != "\r" {
 		t.Fatalf("structured input should submit with a single carriage return, got %q", got)
+	}
+}
+
+func TestSubmitStructuredInputSkipsEnterForNumericInput(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() {
+		structuredInputEnterDelay = previousDelay
+	}()
+
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	rt := &RuntimeSession{
+		manager:  NewManager(nil, nil),
+		terminal: term,
+		session:  Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true},
+		visibleSnapshot: strings.Join([]string{
+			"Select Model and Effort",
+			"Access legacy models by running codex -m <model_name>",
+			"› 1. gpt-5.5 (current)",
+			"2. gpt-5.4",
+			"3. gpt-5.4-mini",
+			"Press enter to confirm or esc to go back",
+		}, "\n"),
+	}
+
+	if err := SubmitStructuredInput(rt, "1"); err != nil {
+		t.Fatal(err)
+	}
+	parts := term.writeParts()
+	if len(parts) != 1 || parts[0] != "1" {
+		t.Fatalf("numeric input should write only the digit, got %#v", parts)
+	}
+}
+
+func TestSubmitStructuredInputSkipsEnterForPlainNumericInput(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() {
+		structuredInputEnterDelay = previousDelay
+	}()
+
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	rt := &RuntimeSession{
+		manager:         NewManager(nil, nil),
+		terminal:        term,
+		session:         Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true},
+		visibleSnapshot: "› 1",
+	}
+
+	if err := SubmitStructuredInput(rt, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if parts := term.writeParts(); len(parts) != 1 || parts[0] != "1" {
+		t.Fatalf("plain numeric input should write only the digit, got %#v", parts)
+	}
+}
+
+func TestPrepareStructuredInputKeepsInputText(t *testing.T) {
+	if got := PrepareStructuredInput("hello tui"); got != "hello tui\r" {
+		t.Fatalf("structured input = %q", got)
+	}
+	if got := PrepareStructuredInput("/exit"); got != "/exit\r" {
+		t.Fatalf("slash command should be kept as-is, got %q", got)
 	}
 }
 
@@ -495,6 +615,11 @@ func TestLarkReplyBridgeIgnoresInteractiveCards(t *testing.T) {
 	launcher := &recordingLauncher{}
 	manager := NewManager(nil, launcher)
 	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
 
 	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-card", "", "", "interactive", `{"title":"测试","elements":[{"tag":"div"}]}`))
 	if err != nil {
@@ -502,6 +627,32 @@ func TestLarkReplyBridgeIgnoresInteractiveCards(t *testing.T) {
 	}
 	if len(launcher.terminals) != 0 {
 		t.Fatalf("interactive card should not create or write a terminal, got %d", len(launcher.terminals))
+	}
+	if !strings.Contains(reply, "收到转发卡片") {
+		t.Fatalf("interactive card should get an explanatory reply, got %q", reply)
+	}
+}
+
+func TestLarkReplyBridgeRepliesWhenPostContentIsUnreadable(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-unreadable-post", "", "", "post", `{"content":[[{"tag":"media","media_key":"unsupported"}]]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("unreadable post should not create or write a terminal, got %d", len(launcher.terminals))
+	}
+	if !strings.Contains(reply, "无法读取") {
+		t.Fatalf("unreadable post should get an explanatory reply, got %q", reply)
 	}
 }
 
@@ -556,7 +707,7 @@ func TestLarkReplyBridgeRoutesP2StartAndFollowup(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := launcher.terminals[0].writes()
-	if !strings.Contains(got, "echo from lark\r") {
+	if !strings.Contains(got, PrepareStructuredInput("echo from lark")) {
 		t.Fatalf("terminal did not receive followup input: %q", got)
 	}
 	parts := launcher.terminals[0].writeParts()
@@ -731,11 +882,11 @@ func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
 	}
 }
 
-func TestLarkReplyBridgeCardToggleAutoRefreshPatchesClickedMessage(t *testing.T) {
+func TestLarkReplyBridgeCardToggleAutoRefreshWaitsForInterval(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	notifier := &recordingNotifier{messageID: "bot-card"}
-	manager := NewManager(nil, launcher, WithNotifier(notifier), WithAutoRefreshInterval(time.Hour))
+	manager := NewManager(nil, launcher, WithNotifier(notifier), WithAutoRefreshInterval(80*time.Millisecond))
 	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 	sess, err := manager.CreateSession(context.Background(), "Shortcut")
 	if err != nil {
@@ -762,9 +913,13 @@ func TestLarkReplyBridgeCardToggleAutoRefreshPatchesClickedMessage(t *testing.T)
 	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已开启自动刷新" {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
+	time.Sleep(40 * time.Millisecond)
+	if notes := notifier.notes(); len(notes) != 0 {
+		t.Fatalf("toggle should not refresh before configured interval, got %#v", notes)
+	}
 	notes := waitForNotifierNotes(t, notifier, 1)
-	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].AutoRefreshEnabled || !notes[0].SuppressUpdateTip {
-		t.Fatalf("toggle should patch clicked card as auto refresh enabled, got %#v", notes)
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].AutoRefreshEnabled || notes[0].SuppressUpdateTip {
+		t.Fatalf("auto refresh should patch clicked card after interval, got %#v", notes)
 	}
 
 	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)

@@ -70,7 +70,7 @@ func sanitizeForLarkAudit(text string) string {
 }
 
 func truncateForLark(text string) string {
-	text = truncateLinesFromTail(text, int(larkNotifyMaxLines.Load()), larkTruncatedPrefix)
+	text = truncateLinesFromTail(text, int(larkNotifyMaxLines.Load()), "")
 	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
 }
 
@@ -156,35 +156,13 @@ func HasRenderableContent(data []byte) bool {
 	return false
 }
 
-func SanitizeRoundReply(data []byte) string {
-	return strings.TrimSpace(StripTerminalControls(data))
-}
-
 func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) string {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, fromVisible := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
+	body, _ := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
 	if body == "" {
-		if lastInputText == "" {
-			body = strings.TrimSpace(visibleSnapshot)
-			fromVisible = true
-		} else {
-			body = lastInputText
-			fromVisible = true
-		}
+		return ""
 	}
-	if !fromVisible && lastInputText != "" {
-		if strings.HasPrefix(body, lastInputText) {
-			body = strings.TrimSpace(strings.TrimPrefix(body, lastInputText))
-		}
-		if body == "" {
-			body = lastInputText
-		} else if !startsWithInputEcho(body, lastInputText) {
-			body = lastInputText + "\n\n" + body
-		}
-	}
-	body = cleanupLarkNotifyText(body, lastInputText)
-	body = restoreWrappedInputEcho(body, lastInputText)
-	body = dropConfiguredLarkNotifyLines(body)
+	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
@@ -194,48 +172,16 @@ func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, snapshotAtRoundStart
 	if strings.TrimSpace(body) == "" {
 		return true
 	}
-	cleaned := cleanupLarkNotifyText(body, lastInputText)
-	hasReply := hasReplyLine(cleaned, lastInputText)
+	hasReply := hasReplyLine(trimVisibleText(body), lastInputText)
 	return !hasReply || (containsTransientStatusLine(body) && !hasReply)
 }
 
-func selectNotifyBody(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) (string, bool) {
+func selectNotifyBody(visibleSnapshot string, snapshotAtRoundStart string, _ []byte, lastInputText string) (string, bool) {
 	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
-	replyBody := currentRoundReplyText(roundReply, lastInputText)
-	if shouldPreferRoundReplyOverVisible(visibleBody, replyBody, lastInputText) {
-		return replyBody, false
-	}
-	if lastInputText != "" && !visibleSnapshotHasInputEcho(visibleSnapshot, lastInputText) {
-		if replyBody != "" {
-			return replyBody, false
-		}
-		if visibleSnapshotHasHardRoundAnchor(visibleSnapshot, lastInputText) {
-			return visibleBody, fromVisible
-		}
+	if strings.TrimSpace(visibleBody) == "" {
 		return "", false
 	}
-	if strings.TrimSpace(visibleBody) != "" {
-		return visibleBody, fromVisible
-	}
-	return replyBody, false
-}
-
-func shouldPreferRoundReplyOverVisible(visibleBody string, replyBody string, lastInputText string) bool {
-	visibleBody = strings.TrimSpace(visibleBody)
-	replyBody = strings.TrimSpace(replyBody)
-	input := strings.TrimSpace(lastInputText)
-	if visibleBody == "" || replyBody == "" || input == "" || !strings.HasPrefix(input, "/") {
-		return false
-	}
-	cleanVisible := cleanupLarkNotifyText(visibleBody, input)
-	cleanReply := cleanupLarkNotifyText(replyBody, input)
-	if cleanVisible == "" || cleanReply == "" {
-		return false
-	}
-	if len([]rune(cleanVisible)) > len([]rune(cleanReply))*3 {
-		return true
-	}
-	return countInputEchoLines(cleanVisible) > 1
+	return visibleBody, fromVisible
 }
 
 func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) bool {
@@ -263,84 +209,16 @@ func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRound
 }
 
 func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) (string, bool) {
-	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
+	visibleSnapshot = trimVisibleText(visibleSnapshot)
 	if visibleSnapshot == "" {
 		return "", false
-	}
-	if lastInputText != "" {
-		if current := visibleTextFromLastInput(visibleSnapshot, lastInputText); current != "" {
-			return current, true
-		}
-		if current := visibleTextAfterRoundStart(visibleSnapshot, snapshotAtRoundStart); current != "" {
-			if exit := codexExitSegment(current); exit != "" {
-				return exit, true
-			}
-			if isFullScreenTUIScreen(current) {
-				return codexNoAnchorFallbackText(current), true
-			}
-			return current, true
-		}
-		if exit := codexExitSegment(visibleSnapshot); exit != "" {
-			return exit, true
-		}
-		if isFullScreenTUIScreen(visibleSnapshot) {
-			return codexNoAnchorFallbackText(visibleSnapshot), true
-		}
-		if current := visibleTextFromLastShellInput(visibleSnapshot); current != "" {
-			return current, true
-		}
-	}
-	if isTrustTUIScreen(visibleSnapshot) || (lastInputText == "" && isFullScreenTUIScreen(visibleSnapshot)) {
-		return visibleSnapshot, true
-	}
-	if lastInputText == "" {
-		return visibleSnapshot, true
-	}
-	if isFullScreenTUIScreen(visibleSnapshot) {
-		return codexNoAnchorFallbackText(visibleSnapshot), true
 	}
 	return visibleSnapshot, true
 }
 
-func codexNoAnchorFallbackText(text string) string {
-	text = codexTUISegment(text)
-	return truncateLinesFromTail(strings.TrimSpace(text), int(larkNotifyMaxLines.Load()), codexNoAnchorFallbackPrefix)
-}
-
-func codexExitSegment(text string) string {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for i, line := range lines {
-		if strings.Contains(line, "Token usage:") || strings.Contains(line, "run codex resume") {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
-	}
-	return ""
-}
-
-func codexTUISegment(text string) string {
-	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for i, line := range lines {
-		if !strings.Contains(line, "OpenAI Codex") {
-			continue
-		}
-		start := i
-		if i > 0 && looksLikeBoxBorder(lines[i-1]) {
-			start = i - 1
-		}
-		return strings.TrimSpace(strings.Join(lines[start:], "\n"))
-	}
-	return text
-}
-
-func looksLikeBoxBorder(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	return strings.Contains(trimmed, "─") &&
-		(strings.Contains(trimmed, "╭") || strings.Contains(trimmed, "┌") || strings.Contains(trimmed, "+"))
-}
-
 func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart string) string {
-	visibleSnapshot = normalizeSnapshotText(visibleSnapshot)
-	snapshotAtRoundStart = normalizeSnapshotText(snapshotAtRoundStart)
+	visibleSnapshot = trimVisibleText(visibleSnapshot)
+	snapshotAtRoundStart = trimVisibleText(snapshotAtRoundStart)
 	if visibleSnapshot == "" || snapshotAtRoundStart == "" {
 		return ""
 	}
@@ -348,36 +226,22 @@ func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart str
 		return ""
 	}
 	if strings.HasPrefix(visibleSnapshot, snapshotAtRoundStart) {
-		return strings.TrimSpace(strings.TrimPrefix(visibleSnapshot, snapshotAtRoundStart))
+		return trimVisibleText(strings.TrimPrefix(visibleSnapshot, snapshotAtRoundStart))
 	}
 	return ""
 }
 
-func visibleSnapshotHasInputEcho(visibleSnapshot string, lastInputText string) bool {
-	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
-	lastInputText = strings.TrimSpace(lastInputText)
-	if visibleSnapshot == "" || lastInputText == "" {
-		return false
+func trimVisibleText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	lines := strings.Split(text, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
 	}
-	return visibleTextFromLastInput(visibleSnapshot, lastInputText) != ""
-}
-
-func visibleSnapshotHasHardRoundAnchor(visibleSnapshot string, lastInputText string) bool {
-	visibleSnapshot = strings.TrimSpace(visibleSnapshot)
-	lastInputText = strings.TrimSpace(lastInputText)
-	if visibleSnapshot == "" || lastInputText == "" {
-		return false
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
 	}
-	if codexExitSegment(visibleSnapshot) != "" {
-		return true
-	}
-	if isTrustTUIScreen(visibleSnapshot) {
-		return true
-	}
-	if visibleTextFromLastShellInput(visibleSnapshot) != "" {
-		return true
-	}
-	return strings.EqualFold(lastInputText, "codex") && isFullScreenTUIScreen(visibleSnapshot)
+	return strings.Join(lines, "\n")
 }
 
 func normalizeSnapshotText(text string) string {
@@ -386,25 +250,31 @@ func normalizeSnapshotText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func isFullScreenTUIScreen(text string) bool {
-	return (strings.Contains(text, "OpenAI Codex") &&
-		strings.Contains(text, "model:") &&
-		strings.Contains(text, "directory:")) ||
-		isTrustTUIScreen(text)
-}
-
-func isTrustTUIScreen(text string) bool {
-	return strings.Contains(text, "Do you trust the contents of this directory?") &&
-		strings.Contains(text, "Press enter to continue")
-}
-
 func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) string {
 	lines := strings.Split(visibleSnapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isStructuredInputAnchorLine(lines[i], lastInputText) {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+	}
 	for i := len(lines) - 1; i >= 0; i-- {
 		if isInputEchoLine(lines[i], lastInputText) {
 			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 		}
 		if isWrappedInputEchoAt(lines, i, lastInputText) {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+	}
+	return ""
+}
+
+func visibleTextFromLastAnyInput(visibleSnapshot string) string {
+	lines := strings.Split(visibleSnapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if text, ok := inputEchoText(lines[i]); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		}
+		if text, ok := shellInputEchoText(lines[i]); ok && strings.TrimSpace(text) != "" {
 			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 		}
 	}
@@ -459,68 +329,6 @@ func visibleTextFromLastShellInput(visibleSnapshot string) string {
 	return ""
 }
 
-func currentRoundReplyText(roundReply []byte, lastInputText string) string {
-	text := SanitizeRoundReply(roundReply)
-	if text == "" || isLikelyCorruptedRoundReply(text) {
-		return ""
-	}
-	if lastInputText != "" {
-		if current := visibleTextFromLastInput(text, lastInputText); current != "" {
-			return current
-		}
-	}
-	if lastInputText != "" && !hasReplyLine(cleanupLarkNotifyText(text, lastInputText), lastInputText) {
-		return ""
-	}
-	return text
-}
-
-func isLikelyCorruptedRoundReply(text string) bool {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return false
-	}
-	runes := []rune(trimmed)
-	if len(runes) < 24 {
-		return false
-	}
-	if strings.Contains(trimmed, "•") && !strings.Contains(trimmed, "• ") {
-		return true
-	}
-	if len(strings.Fields(trimmed)) == 1 {
-		digits := 0
-		punct := 0
-		for _, r := range runes {
-			if unicode.IsDigit(r) {
-				digits++
-			}
-			if unicode.IsPunct(r) || unicode.IsSymbol(r) {
-				punct++
-			}
-		}
-		if digits+punct >= 4 {
-			return true
-		}
-	}
-	letters := 0
-	repeatedLetterTransitions := 0
-	var prevLetter rune
-	for _, r := range runes {
-		if unicode.IsLetter(r) {
-			letters++
-			if prevLetter == r {
-				repeatedLetterTransitions++
-			}
-			prevLetter = r
-			continue
-		}
-		if !unicode.IsSpace(r) {
-			prevLetter = 0
-		}
-	}
-	return letters >= 18 && repeatedLetterTransitions*4 >= letters
-}
-
 func startsWithInputEcho(text string, input string) bool {
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -546,6 +354,34 @@ func inputEchoText(line string) (string, bool) {
 		marker := " " + prompt + " "
 		if idx := strings.LastIndex(trimmed, marker); idx >= 0 {
 			return strings.TrimSpace(trimmed[idx+len(marker):]), true
+		}
+	}
+	return "", false
+}
+
+func isStructuredInputAnchorLine(line string, input string) bool {
+	raw, ok := inputEchoTextRaw(line)
+	if !ok || !strings.HasPrefix(raw, " ") {
+		return false
+	}
+	return strings.TrimSpace(raw) == strings.TrimSpace(input)
+}
+
+func inputEchoTextRaw(line string) (string, bool) {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	if rest, ok := trimPromptPrefixRaw(trimmedLeft, "›"); ok {
+		return rest, true
+	}
+	if rest, ok := trimPromptPrefixRaw(trimmedLeft, ">"); ok {
+		return rest, true
+	}
+	for _, prompt := range []string{"%", "$", "#", ">"} {
+		if rest, ok := trimPromptPrefixRaw(trimmedLeft, prompt); ok {
+			return rest, true
+		}
+		marker := " " + prompt + " "
+		if idx := strings.LastIndex(trimmedLeft, marker); idx >= 0 {
+			return strings.TrimRight(trimmedLeft[idx+len(marker):], "\r\n"), true
 		}
 	}
 	return "", false
@@ -582,6 +418,17 @@ func trimPromptPrefix(line string, prompt string) (string, bool) {
 	prefix := prompt + " "
 	if strings.HasPrefix(line, prefix) {
 		return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+	}
+	return "", false
+}
+
+func trimPromptPrefixRaw(line string, prompt string) (string, bool) {
+	if line == prompt {
+		return "", true
+	}
+	prefix := prompt + " "
+	if strings.HasPrefix(line, prefix) {
+		return strings.TrimRight(strings.TrimPrefix(line, prefix), "\r\n"), true
 	}
 	return "", false
 }
@@ -739,22 +586,12 @@ func hasReplyLine(text string, lastInputText string) bool {
 			}
 			continue
 		}
-		if isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
+		if isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
 			continue
 		}
 		return true
 	}
 	return input == ""
-}
-
-func countInputEchoLines(text string) int {
-	count := 0
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		if _, ok := inputEchoText(strings.TrimSpace(line)); ok {
-			count++
-		}
-	}
-	return count
 }
 
 func isInputEchoLine(line string, input string) bool {
@@ -781,6 +618,8 @@ func isCodexSuggestionLine(line string) bool {
 	case strings.HasPrefix(lower, "improve documentation in @filename"):
 		return true
 	case strings.HasPrefix(lower, "run /review on my current changes"):
+		return true
+	case strings.HasPrefix(lower, "use /skills to list available skills"):
 		return true
 	default:
 		return false

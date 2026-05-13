@@ -20,6 +20,15 @@ func TestRuntimeSessionAccumulatesComposerInputForNotificationAnchor(t *testing.
 	}
 }
 
+func TestRuntimeSessionKeepsStructuredMultilineInputForNotificationAnchor(t *testing.T) {
+	rt := &RuntimeSession{manager: NewManager(nil, nil)}
+	input := "不要每次都把\nmemory的内容输出出来\n好吗"
+	rt.MarkStructuredInputActivity(input)
+	if rt.lastInputText != input {
+		t.Fatalf("lastInputText = %q, want full multiline input", rt.lastInputText)
+	}
+}
+
 func TestRuntimeSessionStripsBracketedPasteControlsForNotificationAnchor(t *testing.T) {
 	rt := &RuntimeSession{manager: NewManager(nil, nil)}
 	rt.MarkInputActivity("\x1b[200~今天天气怎么样\x1b[201~\r")

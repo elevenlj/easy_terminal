@@ -115,6 +115,7 @@ class FakeElement {
   }
 
   querySelectorAll(selector) {
+    if (selector === "span") return this.children.filter((child) => child.tag === "span");
     const out = [];
     const visit = (node) => {
       if (selector.startsWith(".") && node.className.split(/\s+/).includes(selector.slice(1))) out.push(node);
@@ -144,6 +145,10 @@ class FakeElement {
 
   clear() {
     this.cleared = true;
+  }
+
+  getBoundingClientRect() {
+    return this.rect || { left: 0, width: 8 };
   }
 
   requestSubmit() {
@@ -274,6 +279,20 @@ const helpPanels = ["help-start", "help-terminal"].map((id, index) => {
   panel.className = index === 0 ? "help-panel active" : "help-panel";
   return panel;
 });
+let terminalDOMRows = [];
+
+function terminalRow(segments) {
+  const row = new FakeElement("", "div");
+  row.rect = { left: 0, width: 960 };
+  row.children = segments.map(([text, left]) => {
+    const span = new FakeElement("", "span");
+    span.textContent = text;
+    span.rect = { left, width: text.length * 8 };
+    return span;
+  });
+  row.textContent = segments.map(([text]) => text).join("");
+  return row;
+}
 
 const fetchCalls = [];
 const sentMessages = [];
@@ -288,6 +307,9 @@ const context = {
   setInterval() {},
   clearTimeout,
   setTimeout,
+  requestAnimationFrame(callback) {
+    return setTimeout(callback, 0);
+  },
   TextDecoder,
   URLSearchParams,
   FormData: class {
@@ -295,14 +317,20 @@ const context = {
   },
   WebSocket: FakeWebSocket,
   Terminal: class {
+    constructor() {
+      this.cols = 120;
+      this.rows = 36;
+    }
     loadAddon() {}
     open() {}
     onData() {}
     dispose() {}
-    write() {}
+    write(_text, callback) {
+      callback?.();
+    }
     clear() {}
     get buffer() {
-      return { active: { length: 0, getLine() { return null; } } };
+      return { active: { length: 0, viewportY: 0, getLine() { return null; } } };
     }
   },
   FitAddon: { FitAddon: class { fit() {} } },
@@ -315,6 +343,7 @@ const context = {
       return new FakeElement("", tag);
     },
     querySelectorAll(selector) {
+      if (selector === "#terminal .xterm-rows > div") return terminalDOMRows;
       if (selector === ".help-tab") return helpTabs;
       if (selector === ".help-panel") return helpPanels;
       if (selector === ".config-tab") return configTabs;
@@ -455,6 +484,56 @@ elements["composer-input"].value = "echo button";
 elements.composer.requestSubmit();
 assert.deepEqual(sentMessages.pop(), { type: "submit", data: "echo button" });
 assert.equal(elements["composer-input"].value, "");
+
+app.state.term = {
+  cols: 120,
+  rows: 2,
+  buffer: {
+    active: {
+      length: 4,
+      viewportY: 1,
+      getLine(index) {
+        const values = ["old hidden", "visible one", "visible two", "new hidden"];
+        return { translateToString: () => values[index] };
+      },
+    },
+  },
+};
+app.state.pendingTerminalWrite = Promise.resolve();
+await app.syncSnapshotNow();
+assert.deepEqual(sentMessages.pop(), { type: "snapshot", data: "visible one\nvisible two", source: "buffer" });
+
+terminalDOMRows = [
+  terminalRow([["/model", 0]]),
+  terminalRow([["/model choose what model and reasoning effort to use", 0]]),
+  terminalRow([["Select Model and Effort", 0]]),
+  terminalRow([["Access legacy models by running codex -m <model_name>", 0]]),
+  terminalRow([["› 1. gpt-5.5 (current)", 0], ["Frontier model", 240]]),
+  terminalRow([["  2. gpt-5.4", 0], ["Strong model", 240]]),
+  terminalRow([]),
+];
+await app.syncSnapshotNow();
+assert.deepEqual(sentMessages.pop(), {
+  type: "snapshot",
+  data: "/model\n/model choose what model and reasoning effort to use\nSelect Model and Effort\nAccess legacy models by running codex -m <model_name>\n› 1. gpt-5.5 (current)        Frontier model\n  2. gpt-5.4                  Strong model",
+  source: "dom",
+});
+
+terminalDOMRows = [
+  terminalRow([["Select Reasoning Level for gpt-5.5", 0]]),
+  terminalRow([["1. Low                  Fast responses with lighter reasoning", 0]]),
+  terminalRow([["2. Medium (default)     Balances speed and reasoning depth for everyday tasks", 0]]),
+  terminalRow([["3. High                 Greater reasoning depth for complex problems", 0]]),
+  terminalRow([["› 4. Extra high (current)  Extra high reasoning depth for complex problems", 0]]),
+  terminalRow([["Press enter to confirm or esc to go back", 0]]),
+];
+await app.syncSnapshotNow();
+assert.deepEqual(sentMessages.pop(), {
+  type: "snapshot",
+  data: "Select Reasoning Level for gpt-5.5\n1. Low                  Fast responses with lighter reasoning\n2. Medium (default)     Balances speed and reasoning depth for everyday tasks\n3. High                 Greater reasoning depth for complex problems\n› 4. Extra high (current)  Extra high reasoning depth for complex problems\nPress enter to confirm or esc to go back",
+  source: "dom",
+});
+terminalDOMRows = [];
 
 elements["help-open"].onclick();
 assert.equal(elements["help-dialog"].open, true, "help dialog should open from topbar button");

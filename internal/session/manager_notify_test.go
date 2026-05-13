@@ -2,6 +2,8 @@ package session
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -112,7 +114,7 @@ func TestWaitingNotificationWaitsForSnapshotAfterCurrentInput(t *testing.T) {
 	}
 }
 
-func TestWaitingNotificationCanUseRoundReplyWhenSnapshotDoesNotShowInput(t *testing.T) {
+func TestWaitingNotificationWaitsWhenFreshVisibleSnapshotIsMissing(t *testing.T) {
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil),
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
@@ -122,18 +124,17 @@ func TestWaitingNotificationCanUseRoundReplyWhenSnapshotDoesNotShowInput(t *test
 	rt.HandleOutput([]byte("current answer from pty\n"))
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
-	n, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	_, _, ok, reason := rt.waitingNotificationCandidateLocked()
 	rt.mu.Unlock()
-	if !ok {
-		t.Fatalf("expected round reply notification when snapshot has no input anchor, reason=%s", reason)
+	if ok {
+		t.Fatalf("raw round reply should not create notification content")
 	}
-	want := "new hidden tui input\ncurrent answer from pty"
-	if n.Content != want {
-		t.Fatalf("content = %q, want %q", n.Content, want)
+	if reason != "stale_visible_snapshot" {
+		t.Fatalf("reason = %q, want stale_visible_snapshot", reason)
 	}
 }
 
-func TestNotifyAfterStableSendsRoundReplyWhenSnapshotDoesNotShowInput(t *testing.T) {
+func TestNotifyAfterStableDoesNotSendRoundReplyWhenSnapshotDoesNotShowInput(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -150,15 +151,163 @@ func TestNotifyAfterStableSendsRoundReplyWhenSnapshotDoesNotShowInput(t *testing
 	rt.notifyAfterStable(version)
 
 	notes := notifier.notes()
-	if len(notes) != 1 {
-		t.Fatalf("expected one notification, got %#v", notes)
+	if len(notes) != 0 {
+		t.Fatalf("raw round reply should not be sent as notification content, got %#v", notes)
 	}
-	want := "hidden tui input\ncurrent answer from pty"
-	if notes[0].Content != want {
-		t.Fatalf("content = %q, want %q", notes[0].Content, want)
+}
+
+func TestWaitingNotificationUsesFreshVisibleListInsteadOfRawRoundReply(t *testing.T) {
+	SetLarkNotifyMaxLines(4)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil),
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
 	}
-	if strings.Contains(notes[0].Content, "old answer") {
-		t.Fatalf("old visible history leaked into notification: %q", notes[0].Content)
+	rt.SetVisibleSnapshot("menu command")
+	rt.MarkInputActivity("menu command\r")
+	rt.HandleOutput([]byte("Available options:1.Create session2.Attach session3.Quit\n"))
+	rt.SetVisibleSnapshot(strings.Join([]string{
+		"menu command",
+		"Available options:",
+		"1. Create session",
+		"2. Attach session",
+		"3. Quit",
+	}, "\n"))
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	n, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected visible list notification, reason=%s", reason)
+	}
+	want := strings.Join([]string{
+		"Available options:",
+		"1. Create session",
+		"2. Attach session",
+		"3. Quit",
+	}, "\n")
+	if n.Content != want {
+		t.Fatalf("notification should preserve visible list formatting:\n%q\nwant:\n%q", n.Content, want)
+	}
+}
+
+func TestWaitingNotificationKeepsCodexModelMenusFromVisibleSnapshot(t *testing.T) {
+	SetLarkNotifyMaxLines(5)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil),
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+	}
+	start := strings.Join([]string{
+		"╭────────────────────────────╮",
+		"│ >_ OpenAI Codex (v0.130.0) │",
+		"│ model: gpt-5.5 medium fast │",
+		"│ directory: ~/project       │",
+		"╰────────────────────────────╯",
+	}, "\n")
+	modelMenu := strings.Join([]string{
+		start,
+		"Select Model and Effort",
+		"Access legacy models by running codex -m <model_name> or in your config.toml",
+		"› 1. gpt-5.5 (current)   Frontier model for complex coding, research, and real-world work.",
+		"  2. gpt-5.4             Strong model for everyday coding.",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	rt.SetVisibleSnapshot(start)
+	rt.MarkInputActivity("/model\r")
+	rt.HandleOutput([]byte("/model choose what model and reasoning effort to useSelect Model and EffortAccess legacy models by running codex -m <model_name> or in your config.toml› 1. gpt-5.5 (current) Frontier model2.gpt-5.4Strong model"))
+	rt.SetVisibleSnapshot(modelMenu)
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	n, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected model menu notification, reason=%s", reason)
+	}
+	wantModel := strings.Join([]string{
+		"Select Model and Effort",
+		"Access legacy models by running codex -m <model_name> or in your config.toml",
+		"› 1. gpt-5.5 (current)   Frontier model for complex coding, research, and real-world work.",
+		"  2. gpt-5.4             Strong model for everyday coding.",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	if n.Content != wantModel {
+		t.Fatalf("model menu should preserve visible formatting:\n%q\nwant:\n%q", n.Content, wantModel)
+	}
+
+	SetLarkNotifyMaxLines(11)
+	reasoningMenu := strings.Join([]string{
+		start,
+		"Select Reasoning Level for gpt-5.5",
+		"1. Low                  Fast responses with lighter reasoning",
+		"2. Medium (default)     Balances speed and reasoning depth for everyday tasks",
+		"3. High                 Greater reasoning depth for complex problems",
+		"› 4. Extra high (current)  Extra high reasoning depth for complex problems",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	rt.MarkInputActivity("1\r")
+	rt.HandleOutput([]byte("1Select Reasoning Level for gpt-5.51.LowFast responses with lighter reasoning2.Medium(default)Balances speed and reasoning depth for everyday tasks3.HighGreater reasoning depth for complex problems› 4. Extra high (current) Extra high reasoning depthPress enter to confirm or esc to go back"))
+	rt.SetVisibleSnapshot(reasoningMenu)
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	n, _, ok, reason = rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected reasoning menu notification, reason=%s", reason)
+	}
+	wantReasoning := reasoningMenu
+	if n.Content != wantReasoning {
+		t.Fatalf("reasoning menu should preserve visible formatting:\n%q\nwant:\n%q", n.Content, wantReasoning)
+	}
+}
+
+func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T) {
+	notifier := &recordingNotifier{}
+	launcher := &recordingLauncher{}
+	browserRequested := make(chan struct{})
+	var m *Manager
+	m = NewManager(
+		nil,
+		launcher,
+		WithNotifier(notifier),
+		WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond),
+		WithNotificationUpdateCoalesce(0),
+		WithBrowserNeeded(func(sessionID string) {
+			select {
+			case <-browserRequested:
+			default:
+				close(browserRequested)
+			}
+			if rt, ok := m.GetRuntime(sessionID); ok {
+				rt.SetVisibleSnapshot("eleven ~ >  echo frontend-snapshot\nfrontend ok\neleven ~ >")
+			}
+		}),
+	)
+	sess, err := m.CreateSession(context.Background(), "no-browser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := m.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := m.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime session missing")
+	}
+
+	if err := SubmitStructuredInput(rt, "echo frontend-snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	launcher.terminals[0].readCh <- []byte("frontend ok\r\neleven ~ > ")
+
+	notes := waitForNotifierNotes(t, notifier, 1)
+	select {
+	case <-browserRequested:
+	default:
+		t.Fatal("frontend snapshot should be requested when no browser is open")
+	}
+	if notes[0].Content != "eleven ~ >  echo frontend-snapshot\nfrontend ok\neleven ~ >" {
+		t.Fatalf("notification should come from frontend snapshot, got %q", notes[0].Content)
 	}
 }
 
@@ -314,14 +463,16 @@ func TestNotifyIfStillWaitingIncrementsExistingUpdateNumber(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
-		manager:               m,
-		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
-		lastNotifiedMessageID: "msg-1",
-		notificationUpdateNo:  2,
-		lastInputText:         "echo hello",
-		snapshotAtRoundStart:  "$ echo hello",
-		roundReply:            []byte("old\nnew"),
-		visibleSnapshot:       "$ echo hello\nold\nnew\n$",
+		manager:                m,
+		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:  "msg-1",
+		notificationUpdateNo:   2,
+		lastInputText:          "echo hello",
+		snapshotAtRoundStart:   "$ echo hello",
+		snapshotAtRoundVersion: 1,
+		roundReply:             []byte("old\nnew"),
+		visibleSnapshot:        "$ echo hello\nold\nnew\n$",
+		visibleSnapshotVersion: 2,
 	}
 	rt.mu.Lock()
 	version := rt.notifyVersion
@@ -903,6 +1054,54 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   "Select Model and Effort\n› 1. gpt-5.5 (current)\n  2. gpt-5.4\n  3. gpt-5.4-mini",
+	}, "open-id", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var card struct {
+		Body struct {
+			Elements []struct {
+				Tag  string `json:"tag"`
+				Text struct {
+					Tag     string `json:"tag"`
+					Content string `json:"content"`
+				} `json:"text"`
+			} `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(content), &card); err != nil {
+		t.Fatal(err)
+	}
+	if len(card.Body.Elements) < 1 || card.Body.Elements[0].Tag != "div" || card.Body.Elements[0].Text.Tag != "plain_text" {
+		t.Fatalf("card should put terminal output in an expanded plain text element, got %#v", card.Body.Elements)
+	}
+	want := "Select Model and Effort\n› 1. gpt-5.5 (current)\n  2. gpt-5.4\n  3. gpt-5.4-mini"
+	if card.Body.Elements[0].Text.Content != want {
+		t.Fatalf("terminal output should keep visible line breaks, got %q", card.Body.Elements[0].Text.Content)
+	}
+}
+
+func TestLarkNotificationCardContentWarnsOnBufferFallback(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID:      "sess-1",
+		Name:           "A",
+		Content:        "line one\nline two",
+		SnapshotSource: "buffer",
+	}, "open-id", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "buffer") || !strings.Contains(content, "兜底") {
+		t.Fatalf("buffer fallback card should include a visible warning, got %s", content)
+	}
+}
+
 func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
@@ -916,8 +1115,8 @@ func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	if !strings.Contains(content, "A（Running）") {
 		t.Fatalf("card content should include running title suffix, got %s", content)
 	}
-	if !strings.Contains(content, `状态：\u003cfont color=\"red\"\u003eRunning\u003c/font\u003e`) {
-		t.Fatalf("running card should include red running status text, got %s", content)
+	if !strings.Contains(content, `状态：\u003cfont color=\"green\"\u003eRunning\u003c/font\u003e`) {
+		t.Fatalf("running card should include green running status text, got %s", content)
 	}
 	if !strings.Contains(content, `"template":"blue"`) || strings.Contains(content, `"background_style"`) {
 		t.Fatalf("running card should use default header and no body background, got %s", content)
@@ -980,14 +1179,14 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
 	}
-	if strings.Count(content, `"type":"primary"`) < 6 {
-		t.Fatalf("system shortcut buttons should use blue primary color, got %s", content)
+	if strings.Count(content, `"type":"primary"`) < 7 {
+		t.Fatalf("system and custom shortcut buttons should use blue primary color, got %s", content)
 	}
 	if strings.Contains(content, `"tag":"interactive_container"`) || strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
 		t.Fatalf("custom shortcut actions should use native tiny buttons, got %s", content)
 	}
-	if !strings.Contains(content, `"content":"状态","tag":"plain_text"`) || !strings.Contains(content, `"type":"default"`) {
-		t.Fatalf("custom shortcut label should use a default tiny button, got %s", content)
+	if !strings.Contains(content, `"content":"状态","tag":"plain_text"`) || !strings.Contains(content, `"type":"primary"`) {
+		t.Fatalf("custom shortcut label should use a blue tiny button, got %s", content)
 	}
 	if !strings.Contains(content, `"size":"tiny"`) {
 		t.Fatalf("card shortcut buttons should be small, got %s", content)
@@ -1228,6 +1427,41 @@ func TestRequestFreshSnapshotAsksSubscriberAndWaitsForUpdate(t *testing.T) {
 		t.Fatal("expected snapshot request event")
 	}
 	rt.SetVisibleSnapshot("> hello\n• world")
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("request should report a fresh snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:                NewManager(nil, nil),
+		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		visibleSnapshot:        "old snapshot",
+		visibleSnapshotVersion: 1,
+		subscribers:            make(map[chan RuntimeEvent]struct{}),
+	}
+	ch, cancel := rt.Subscribe()
+	defer cancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(time.Second)
+	}()
+
+	select {
+	case ev := <-ch:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("event type = %q, want snapshot request", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected snapshot request despite existing snapshot")
+	}
+	rt.SetVisibleSnapshot("fresh snapshot")
 	select {
 	case fresh := <-done:
 		if !fresh {

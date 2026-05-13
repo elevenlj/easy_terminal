@@ -47,6 +47,7 @@ type WaitingNotification struct {
 	AutoRefreshEnabled  bool
 	SuppressUpdateTip   bool
 	NotificationVersion int64
+	SnapshotSource      string
 }
 
 type LarkCustomShortcut struct {

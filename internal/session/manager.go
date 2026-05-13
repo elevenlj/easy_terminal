@@ -359,6 +359,9 @@ func (m *Manager) BindLarkChat(ctx context.Context, id string, chatID string) (S
 	}
 	rt.mu.Lock()
 	rt.session.LarkChatID = chatID
+	if chatID != "" {
+		rt.requireLarkChat = false
+	}
 	rt.session.UpdatedAt = time.Now().UTC()
 	s := rt.session
 	rt.mu.Unlock()
@@ -486,6 +489,7 @@ type RuntimeSession struct {
 	output                   []byte
 	roundReply               []byte
 	visibleSnapshot          string
+	visibleSnapshotSource    string
 	visibleSnapshotVersion   int64
 	snapshotAtRoundStart     string
 	snapshotAtRoundVersion   int64
@@ -497,6 +501,7 @@ type RuntimeSession struct {
 	notificationUpdateNo     int
 	notificationRunning      bool
 	suppressRunningMarker    bool
+	requireLarkChat          bool
 	notificationPatchVersion int64
 	autoRefreshEnabled       bool
 	autoRefreshMessageID     string
@@ -540,7 +545,14 @@ func (rt *RuntimeSession) Subscribe() (chan RuntimeEvent, func()) {
 	ch := make(chan RuntimeEvent, 64)
 	rt.mu.Lock()
 	rt.subscribers[ch] = struct{}{}
+	needsSnapshot := len(rt.snapshotWaiters) > 0
 	rt.mu.Unlock()
+	if needsSnapshot {
+		select {
+		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
+		default:
+		}
+	}
 	cancel := func() {
 		rt.mu.Lock()
 		if _, ok := rt.subscribers[ch]; ok {
@@ -603,15 +615,36 @@ func (rt *RuntimeSession) Resize(cols, rows uint16) error {
 }
 
 func (rt *RuntimeSession) SetVisibleSnapshot(data string) {
+	rt.SetVisibleSnapshotWithSource(data, "legacy")
+}
+
+func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source string) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "unknown"
+	}
 	rt.mu.Lock()
 	rt.visibleSnapshot = data
+	rt.visibleSnapshotSource = source
 	rt.visibleSnapshotVersion++
+	version := rt.visibleSnapshotVersion
+	sessionID := rt.session.ID
 	waiters := rt.snapshotWaiters
 	rt.snapshotWaiters = nil
 	rt.mu.Unlock()
+	log.Printf("visible snapshot updated session=%s source=%s version=%d len=%d lines=%d waiters=%d", sessionID, source, version, len(data), countLogLines(data), len(waiters))
 	for _, ch := range waiters {
 		close(ch)
 	}
+}
+
+func (rt *RuntimeSession) RequireLarkChatForNotifications() {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.requireLarkChat = true
+	rt.mu.Unlock()
 }
 
 func (rt *RuntimeSession) CurrentRoundContent() string {
@@ -666,6 +699,25 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.mu.Lock()
 	submitted := rt.recordInputLocked(data)
+	rt.markInputActivityLocked(submitted)
+	s := rt.session
+	rt.mu.Unlock()
+	_ = rt.manager.persist(context.Background(), s)
+}
+
+func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
+	rt.mu.Lock()
+	if cleaned := strings.TrimSpace(cleanInputForRecord(text)); cleaned != "" {
+		rt.lastInputText = cleaned
+	}
+	rt.inputLineBuffer = ""
+	rt.markInputActivityLocked(true)
+	s := rt.session
+	rt.mu.Unlock()
+	_ = rt.manager.persist(context.Background(), s)
+}
+
+func (rt *RuntimeSession) markInputActivityLocked(submitted bool) {
 	if submitted {
 		rt.snapshotAtRoundStart = rt.visibleSnapshot
 		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
@@ -685,9 +737,6 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.stopStartupNotifyTimerLocked()
-	s := rt.session
-	rt.mu.Unlock()
-	_ = rt.manager.persist(context.Background(), s)
 }
 
 func (rt *RuntimeSession) NotifyInputRunning() {
@@ -704,6 +753,10 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 	}
 	rt.mu.Lock()
 	if !rt.session.Live || !rt.session.NotifyOnWaiting {
+		rt.mu.Unlock()
+		return
+	}
+	if rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "" {
 		rt.mu.Unlock()
 		return
 	}
@@ -1269,8 +1322,8 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	if n.MessageID != "" {
 		action = "patch"
 	}
-	log.Printf("lark card write queued source=waiting action=%s session=%s message=%s running=%v placeholder=%v update_no=%d version=%d hash=%s content_len=%d preview=%q",
-		action, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, version, shortNotifyHash(contentHash), len(n.Content), previewLogText(n.Content, 160))
+	log.Printf("lark card write queued source=waiting action=%s session=%s message=%s running=%v placeholder=%v update_no=%d version=%d hash=%s snapshot_source=%s content_len=%d content_lines=%d preview=%q",
+		action, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, version, shortNotifyHash(contentHash), n.SnapshotSource, len(n.Content), countLogLines(n.Content), previewLogText(n.Content, 160))
 	rt.notificationPatchMu.Lock()
 	rt.mu.Lock()
 	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version {
@@ -1350,6 +1403,9 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 	switch {
 	case rt.manager.notifier == nil:
 		log.Printf("waiting notification running marker skipped session=%s reason=no_notifier", rt.session.ID)
+		return WaitingNotification{}, false
+	case rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "":
+		log.Printf("waiting notification running marker skipped session=%s reason=waiting_for_lark_chat", rt.session.ID)
 		return WaitingNotification{}, false
 	case rt.lastNotifiedMessageID == "":
 		log.Printf("waiting notification running marker skipped session=%s reason=no_message_id", rt.session.ID)
@@ -1443,6 +1499,9 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 }
 
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
+	if rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "" {
+		return WaitingNotification{}, "", false, "waiting_for_lark_chat"
+	}
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
@@ -1458,7 +1517,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID}, contentHash, true, "ready"
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
@@ -1470,9 +1529,6 @@ func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
 
 func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {
 	if strings.TrimSpace(rt.lastInputText) == "" || strings.TrimSpace(rt.visibleSnapshot) == "" {
-		return false
-	}
-	if currentRoundReplyText(rt.roundReply, rt.lastInputText) != "" {
 		return false
 	}
 	if rt.visibleSnapshotVersion <= rt.snapshotAtRoundVersion {
@@ -1512,6 +1568,15 @@ func previewLogText(text string, max int) string {
 		return text
 	}
 	return string(runes[:max]) + "..."
+}
+
+func countLogLines(text string) int {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
 }
 
 func (rt *RuntimeSession) stopNotifyTimerLocked() {
