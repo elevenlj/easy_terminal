@@ -1,0 +1,29 @@
+{
+  "name": "@elevenlj/easy-terminal",
+  "version": "0.1.0",
+  "description": "Local web terminal with Feishu remote session control.",
+  "license": "MIT",
+  "bin": {
+    "easy-terminal": "bin/easy-terminal.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "vendor/",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elevenlj/easy_terminal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/elevenlj/easy_terminal/issues"
+  },
+  "homepage": "https://github.com/elevenlj/easy_terminal#readme"
+}
