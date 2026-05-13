@@ -75,19 +75,6 @@ make test-all     # Go 测试 + 浏览器 E2E
 make tidy         # go mod tidy
 ```
 
-## 发布到 NPM
-
-当前 NPM 包名为 `@lijuneleven/easy-terminal`，安装后提供 `easy-terminal` 命令。
-
-发布前需要在 NPM 账号中创建 `NPM_TOKEN`，并配置到 GitHub 仓库 Secrets。之后推送版本标签即可自动发布：
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-NPM 安装脚本会优先从 GitHub Release 下载二进制，失败后从 Gitee Release 下载。默认 Gitee 仓库为 `eleven_lj/easy_terminal`。使用 Gitee 备用源时，需要在 Gitee 仓库发布同名版本和同名二进制文件，例如 `v0.1.1` 版本需要包含 `easy_terminal-darwin-arm64`、`easy_terminal-linux-amd64` 等文件。
-
 ## 运行环境
 
 必需环境：
