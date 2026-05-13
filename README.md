@@ -50,7 +50,7 @@ go run ./cmd --port 9090
 go run ./cmd -p 9090
 ```
 
-首次保存 Web 配置时会生成本机配置文件 `conf/config.local.json`。
+首次保存 Web 配置时会生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。
 
 构建二进制：
 
@@ -110,11 +110,11 @@ make tidy         # go mod tidy
 
 ## 运行数据
 
-默认运行时文件会写在项目目录下：
+默认运行时文件会写在用户目录下：
 
-- `easy_terminal.db`
-- `data/uploads/`
-- `log/easy_terminal.log`
-- `conf/config.local.json`
+- `~/.easy_terminal/easy_terminal.db`
+- `~/.easy_terminal/data/uploads/`
+- `~/.easy_terminal/log/easy_terminal.log`
+- `~/.easy_terminal/conf/config.local.json`
 
 这些文件已在 `.gitignore` 中忽略。

@@ -80,9 +80,9 @@ func run() error {
 		cfg.Port = opts.Port
 	}
 	configPath := defaultConfigPath()
-	dbPath := env("AGENT_MONITOR_DB", "./easy_terminal.db")
-	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", "./data/uploads")
-	logDir := env("AGENT_MONITOR_LOG_DIR", "./log")
+	dbPath := env("AGENT_MONITOR_DB", defaultDBPath())
+	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", defaultUploadsDir())
+	logDir := env("AGENT_MONITOR_LOG_DIR", defaultLogDir())
 	_ = os.MkdirAll(filepath.Dir(dbPath), 0o755)
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	_ = os.MkdirAll(logDir, 0o755)
@@ -213,7 +213,29 @@ func loadConfig() Config {
 }
 
 func defaultConfigPath() string {
-	return filepath.Join("conf", "config.local.json")
+	return filepath.Join(defaultDataDir(), "conf", "config.local.json")
+}
+
+func defaultDBPath() string {
+	return filepath.Join(defaultDataDir(), "easy_terminal.db")
+}
+
+func defaultUploadsDir() string {
+	return filepath.Join(defaultDataDir(), "data", "uploads")
+}
+
+func defaultLogDir() string {
+	return filepath.Join(defaultDataDir(), "log")
+}
+
+func defaultDataDir() string {
+	if dir := strings.TrimSpace(os.Getenv("EASY_TERMINAL_HOME")); dir != "" {
+		return dir
+	}
+	if dir, err := os.UserHomeDir(); err == nil && dir != "" {
+		return filepath.Join(dir, ".easy_terminal")
+	}
+	return ".easy_terminal"
 }
 
 type appConfigService struct {

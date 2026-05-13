@@ -102,6 +102,33 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	}
 }
 
+func TestDefaultPathsUseStableUserDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("EASY_TERMINAL_HOME", "")
+
+	if got := defaultConfigPath(); got != filepath.Join(home, ".easy_terminal", "conf", "config.local.json") {
+		t.Fatalf("default config path = %q", got)
+	}
+	if got := defaultDBPath(); got != filepath.Join(home, ".easy_terminal", "easy_terminal.db") {
+		t.Fatalf("default db path = %q", got)
+	}
+	if got := defaultUploadsDir(); got != filepath.Join(home, ".easy_terminal", "data", "uploads") {
+		t.Fatalf("default uploads dir = %q", got)
+	}
+	if got := defaultLogDir(); got != filepath.Join(home, ".easy_terminal", "log") {
+		t.Fatalf("default log dir = %q", got)
+	}
+}
+
+func TestDefaultPathsAllowHomeOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EASY_TERMINAL_HOME", dir)
+	if got := defaultConfigPath(); got != filepath.Join(dir, "conf", "config.local.json") {
+		t.Fatalf("default config path with override = %q", got)
+	}
+}
+
 func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	cfg := Config{

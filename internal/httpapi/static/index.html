@@ -332,7 +332,7 @@
             <h2>图片与文件</h2>
             <div class="help-grid">
               <article><h3>网页粘贴图片</h3><p>在终端区域粘贴图片，会上传到当前会话目录，并把图片路径写入终端。粘贴到下方输入框时，会把路径插入输入框。</p></article>
-              <article><h3>飞书图片</h3><p>从飞书发送图片时，图片会下载到 data/uploads/{session_id}/lark/，再把本地路径交给终端使用。</p></article>
+              <article><h3>飞书图片</h3><p>从飞书发送图片时，图片会下载到用户数据目录的 data/uploads/{session_id}/lark/，再把本地路径交给终端使用。</p></article>
               <article><h3>路径用途</h3><p>路径是给本机命令或终端程序读取图片用的。如果要分析图片，可以在路径后补充“请分析这张图”。</p></article>
               <article><h3>清理规则</h3><p>删除会话时，会同步删除该会话的上传目录。</p></article>
               <article><h3>数据库辅助文件</h3><p>easy_terminal.db-wal 和 easy_terminal.db-shm 是 SQLite 运行时文件。-wal 保存追加写入日志，-shm 保存共享索引和锁信息；服务运行时出现是正常的，不需要手动配置。</p></article>

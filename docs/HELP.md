@@ -10,13 +10,13 @@
    make run
    ```
 
-2. 打开 Web 页面，首次进入会直接进入配置页。保存后会生成本机配置文件 `conf/config.local.json`。
+2. 打开 Web 页面，首次进入会直接进入配置页。保存后会生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。
 
 3. 创建会话后即可在网页终端里输入命令；配置飞书后，也可以从飞书创建和继续会话。
 
 ## 首次配置引导
 
-首次进入 Web 端时，系统会直接打开配置页。这个状态会保存到 `conf/config.local.json`：
+首次进入 Web 端时，系统会直接打开配置页。这个状态会保存到 `~/.easy_terminal/conf/config.local.json`：
 
 - 选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令：更新 999999 号默认 Agent 启动预设。
 - 不选择默认 Agent：不配置 999999 号启动预设。
@@ -28,7 +28,7 @@
 2. 点击“测试飞书配置”，确认可以发送测试通知，并确认“群所有消息权限”已生效。
 3. 在“等待通知”页签里调整通知最大行数和过滤正则。
 4. 在“会话”页签里选择默认会话 Agent，或在“启动预设”页签里手动维护会话启动命令。
-5. 点击“保存”保存到 `conf/config.local.json`。
+5. 点击“保存”保存到 `~/.easy_terminal/conf/config.local.json`。
 
 ## 网页终端
 
@@ -173,7 +173,7 @@ pwd | ls -la | git status
 
 ## 配置文件
 
-主配置文件是 `conf/config.local.json`。首次在 Web 配置页点击“保存”时会自动写入。
+主配置文件是 `~/.easy_terminal/conf/config.local.json`。首次在 Web 配置页点击“保存”时会自动写入。
 
 常用字段：
 
@@ -203,9 +203,10 @@ pwd | ls -la | git status
 | --- | --- | --- |
 | `PORT` | 配置文件或 `8080` | HTTP 端口 |
 | `TERMINAL_WORKING_DIR` | 用户 home | 新终端默认工作目录 |
-| `AGENT_MONITOR_DB` | `./easy_terminal.db` | SQLite 数据库路径 |
-| `AGENT_MONITOR_UPLOADS_DIR` | `./data/uploads` | 上传目录 |
-| `AGENT_MONITOR_LOG_DIR` | `./log` | 日志目录 |
+| `EASY_TERMINAL_HOME` | `~/.easy_terminal` | 默认运行数据目录 |
+| `AGENT_MONITOR_DB` | `~/.easy_terminal/easy_terminal.db` | SQLite 数据库路径 |
+| `AGENT_MONITOR_UPLOADS_DIR` | `~/.easy_terminal/data/uploads` | 上传目录 |
+| `AGENT_MONITOR_LOG_DIR` | `~/.easy_terminal/log` | 日志目录 |
 | `LARK_APP_ID` | 配置文件 | 飞书 App ID |
 | `LARK_APP_SECRET` | 配置文件 | 飞书 App Secret |
 | `LARK_NOTIFY_RECEIVE_ID` | 配置文件 | 飞书接收用户 open_id |
@@ -254,10 +255,10 @@ WebSocket 客户端消息：
 
 默认运行时文件：
 
-- `easy_terminal.db`
-- `data/uploads/`
-- `log/easy_terminal.log`
-- `conf/config.local.json`
+- `~/.easy_terminal/easy_terminal.db`
+- `~/.easy_terminal/data/uploads/`
+- `~/.easy_terminal/log/easy_terminal.log`
+- `~/.easy_terminal/conf/config.local.json`
 
 `easy_terminal.db-wal` 和 `easy_terminal.db-shm` 是 SQLite WAL 模式的运行时辅助文件。`-wal` 保存追加写入日志，`-shm` 保存共享索引和锁信息；服务运行时看到它们是正常现象。
 
