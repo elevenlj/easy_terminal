@@ -35,6 +35,11 @@ const (
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
 )
 
+var defaultLarkNotifyDropLineRules = session.LarkNotifyDropLineRules{
+	{Title: "空行", Pattern: `^\s*$`},
+	{Title: "横线", Pattern: `^\s*[-‐-‒–—―─━═]{3,}\s*$`},
+}
+
 type Config struct {
 	Port                            string                                `json:"port"`
 	LarkAppID                       string                                `json:"lark_app_id"`
@@ -170,6 +175,7 @@ func loadConfig() Config {
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
 	}
 	if b, err := os.ReadFile(defaultConfigPath()); err == nil {
 		_ = json.Unmarshal(b, &cfg)

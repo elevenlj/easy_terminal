@@ -97,6 +97,9 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
 		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)
 	}
+	if len(cfg.LarkNotifyDropLineRules) != 2 || cfg.LarkNotifyDropLineRules[0].Title != "空行" || cfg.LarkNotifyDropLineRules[1].Title != "横线" {
+		t.Fatalf("default drop line rules = %#v", cfg.LarkNotifyDropLineRules)
+	}
 }
 
 func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
