@@ -28,6 +28,14 @@ npm install -g @lijuneleven/easy-terminal
 easy-terminal
 ```
 
+查看版本：
+
+```sh
+easy-terminal --version
+easy-terminal -v
+easy-terminal -version
+```
+
 开发启动：
 
 ```sh

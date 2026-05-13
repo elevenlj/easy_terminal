@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 	"easy_terminal/internal/session"
 	"easy_terminal/internal/store"
 )
+
+var version = "dev"
 
 const (
 	defaultLarkDefaultSessionName          = "默认会话"
@@ -62,6 +65,10 @@ func run() error {
 	opts, err := parseStartupOptions(os.Args[1:])
 	if err != nil {
 		return err
+	}
+	if opts.Version {
+		fmt.Printf("easy_terminal %s\n", version)
+		return nil
 	}
 	cfg := loadConfig()
 	if opts.Port != "" {
@@ -135,7 +142,8 @@ func run() error {
 }
 
 type startupOptions struct {
-	Port string
+	Port    string
+	Version bool
 }
 
 func parseStartupOptions(args []string) (startupOptions, error) {
@@ -144,6 +152,8 @@ func parseStartupOptions(args []string) (startupOptions, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Port, "port", "", "HTTP listen port")
 	fs.StringVar(&opts.Port, "p", "", "HTTP listen port")
+	fs.BoolVar(&opts.Version, "version", false, "print version")
+	fs.BoolVar(&opts.Version, "v", false, "print version")
 	if err := fs.Parse(args); err != nil {
 		return startupOptions{}, err
 	}

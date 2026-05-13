@@ -1,7 +1,9 @@
 .PHONY: build test test-browser test-all run tidy
 
+VERSION := $(shell node -p "require('./npm/package.json').version" 2>/dev/null || echo dev)
+
 build:
-	go build -o easy_terminal ./cmd
+	go build -ldflags="-X main.version=$(VERSION)" -o easy_terminal ./cmd
 
 test:
 	go test ./...

@@ -40,6 +40,18 @@ func TestParseStartupOptionsPort(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsVersion(t *testing.T) {
+	for _, arg := range []string{"--version", "-version", "-v"} {
+		opts, err := parseStartupOptions([]string{arg})
+		if err != nil {
+			t.Fatalf("parse %s: %v", arg, err)
+		}
+		if !opts.Version {
+			t.Fatalf("expected version for %s", arg)
+		}
+	}
+}
+
 func TestHeadlessChromeArgsUseStableViewport(t *testing.T) {
 	args := headlessChromeArgs("/tmp/profile", "http://localhost:8080/?session=sess-1")
 	for _, want := range []string{
