@@ -255,7 +255,14 @@ func TestWaitingNotificationKeepsCodexModelMenusFromVisibleSnapshot(t *testing.T
 	if !ok {
 		t.Fatalf("expected reasoning menu notification, reason=%s", reason)
 	}
-	wantReasoning := reasoningMenu
+	wantReasoning := strings.Join([]string{
+		"Select Reasoning Level for gpt-5.5",
+		"1. Low                  Fast responses with lighter reasoning",
+		"2. Medium (default)     Balances speed and reasoning depth for everyday tasks",
+		"3. High                 Greater reasoning depth for complex problems",
+		"› 4. Extra high (current)  Extra high reasoning depth for complex problems",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
 	if n.Content != wantReasoning {
 		t.Fatalf("reasoning menu should preserve visible formatting:\n%q\nwant:\n%q", n.Content, wantReasoning)
 	}
@@ -492,6 +499,46 @@ func TestNotifyIfStillWaitingIncrementsExistingUpdateNumber(t *testing.T) {
 	}
 }
 
+func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "msg-1"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:                     m,
+		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:               "关闭 8083",
+		lastNotifiedVisibleSnapshot: "stale previous round\nold footer",
+		snapshotAtRoundStart: strings.Join([]string{
+			"old output",
+			"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+		}, "\n"),
+		visibleSnapshot: strings.Join([]string{
+			"old output",
+			"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
+			"  (no output)",
+			"已关闭 8083 接口。",
+			"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+		}, "\n"),
+		visibleSnapshotVersion: 2,
+		snapshotAtRoundVersion: 1,
+		notifyVersion:          7,
+	}
+
+	rt.notifyIfStillWaiting(7)
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one notification, got %#v", notes)
+	}
+	want := strings.Join([]string{
+		"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
+		"  (no output)",
+		"已关闭 8083 接口。",
+	}, "\n")
+	if notes[0].Content != want {
+		t.Fatalf("notification should diff from round start snapshot:\n%q\nwant:\n%q", notes[0].Content, want)
+	}
+}
+
 func TestOutputAfterNotificationPatchesRunningTitleOnWaitingToRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
@@ -564,6 +611,60 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 	if rt.notificationUpdateNo != 2 {
 		t.Fatalf("runtime update marker should not increase on manual refresh, got %d", rt.notificationUpdateNo)
+	}
+}
+
+func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	visible := "$ echo hello\nhello\n$"
+	rt := &RuntimeSession{
+		manager:                     m,
+		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:       "bot-card",
+		lastNotifiedVisibleSnapshot: visible,
+	}
+	rt.SetVisibleSnapshot(visible)
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	if notes[0].Content != visible {
+		t.Fatalf("empty diff should fall back to current visible content, got %#v", notes[0])
+	}
+}
+
+func TestManualRefreshSchedulesAutoRefreshWhenEnabled(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithAutoRefreshInterval(20*time.Millisecond), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "bot-card",
+		autoRefreshEnabled:    true,
+		autoRefreshMessageID:  "bot-card",
+		autoRefreshStop:       make(chan struct{}),
+	}
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := waitForNotifierNotes(t, notifier, 2)
+	if len(notes) != 2 {
+		t.Fatalf("expected manual refresh plus one scheduled auto refresh, got %#v", notes)
+	}
+	if !notes[0].SuppressUpdateTip {
+		t.Fatalf("first refresh should be manual, got %#v", notes[0])
+	}
+	if notes[1].SuppressUpdateTip {
+		t.Fatalf("scheduled refresh should use auto refresh behavior, got %#v", notes[1])
 	}
 }
 

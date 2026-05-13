@@ -17,8 +17,11 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const MIN_TERMINAL_COLS = 80;
 const MIN_TERMINAL_ROWS = 20;
-const DEFAULT_TERMINAL_COLS = 120;
-const DEFAULT_TERMINAL_ROWS = 36;
+const STANDARD_TERMINAL_COLS = 120;
+const STANDARD_TERMINAL_ROWS = 36;
+const STANDARD_TERMINAL_FONT_FAMILY = "Menlo, Consolas, monospace";
+const STANDARD_TERMINAL_FONT_SIZE = 13;
+const STANDARD_TERMINAL_LINE_HEIGHT = 1.2;
 const DEFAULT_SESSION_NAME = "默认会话";
 const DEFAULT_AGENT_PRESET_CODE = "999999";
 const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
@@ -109,20 +112,21 @@ function initTerminal() {
   if (state.term) state.term.dispose();
   state.pendingTerminalWrite = Promise.resolve();
   state.term = new Terminal({
-    cols: DEFAULT_TERMINAL_COLS,
-    rows: DEFAULT_TERMINAL_ROWS,
+    cols: STANDARD_TERMINAL_COLS,
+    rows: STANDARD_TERMINAL_ROWS,
     cursorBlink: true,
     convertEol: true,
-    fontFamily: "Menlo, Consolas, monospace",
-    fontSize: 13,
+    fontFamily: STANDARD_TERMINAL_FONT_FAMILY,
+    fontSize: STANDARD_TERMINAL_FONT_SIZE,
+    lineHeight: STANDARD_TERMINAL_LINE_HEIGHT,
+    letterSpacing: 0,
     theme: { background: "#12110f", foreground: "#f4f1e8", cursor: "#f4f1e8" },
   });
-  state.fit = new FitAddon.FitAddon();
-  state.term.loadAddon(state.fit);
+  state.fit = null;
   state.term.open($("terminal"));
-  fitTerminalSafely();
-  requestAnimationFrame(() => fitTerminalSafely());
-  setTimeout(() => fitTerminalSafely(), 120);
+  enforceStandardTerminalSize();
+  requestAnimationFrame(() => enforceStandardTerminalSize());
+  setTimeout(() => enforceStandardTerminalSize(), 120);
   state.term.onData((data) => {
     sendWS({ type: "input", data });
   });
@@ -176,26 +180,17 @@ function sendWS(obj) {
 }
 
 function resizeTerm() {
-  if (!state.fit || !state.term) return;
-  fitTerminalSafely();
+  if (!state.term) return;
+  enforceStandardTerminalSize();
   if (state.term.cols >= MIN_TERMINAL_COLS && state.term.rows >= MIN_TERMINAL_ROWS) {
     sendWS({ type: "resize", cols: state.term.cols, rows: state.term.rows });
   }
 }
 
-function fitTerminalSafely() {
-  if (!state.fit || !state.term) return;
-  try {
-    state.fit.fit();
-  } catch {
-    state.term.resize(DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS);
-    return;
-  }
-  if (state.term.cols < MIN_TERMINAL_COLS || state.term.rows < MIN_TERMINAL_ROWS) {
-    state.term.resize(
-      Math.max(state.term.cols || 0, DEFAULT_TERMINAL_COLS),
-      Math.max(state.term.rows || 0, DEFAULT_TERMINAL_ROWS)
-    );
+function enforceStandardTerminalSize() {
+  if (!state.term || typeof state.term.resize !== "function") return;
+  if (state.term.cols !== STANDARD_TERMINAL_COLS || state.term.rows !== STANDARD_TERMINAL_ROWS) {
+    state.term.resize(STANDARD_TERMINAL_COLS, STANDARD_TERMINAL_ROWS);
   }
 }
 
@@ -245,7 +240,7 @@ function terminalVisibleSnapshotWithSource() {
   if (domSnapshot) return { data: domSnapshot, source: "dom" };
   const lines = [];
   const buffer = state.term.buffer.active;
-  const rows = state.term.rows || DEFAULT_TERMINAL_ROWS;
+  const rows = state.term.rows || STANDARD_TERMINAL_ROWS;
   const start = Math.max(0, buffer.viewportY || 0);
   const end = Math.min(buffer.length, start + rows);
   for (let i = start; i < end; i++) {
@@ -274,25 +269,76 @@ function terminalCellWidth() {
 
 function terminalDOMRowText(row, cellWidth) {
   const rowRect = row.getBoundingClientRect?.() || { left: 0 };
-  const chars = [];
+  const rowLeft = Number.isFinite(rowRect.left) ? rowRect.left : 0;
   const spans = Array.from(row.querySelectorAll?.("span") || []);
   if (!spans.length) {
     return normalizeTerminalDOMText(row.textContent || "").trimEnd();
   }
+  let line = "";
+  let cursorCol = 0;
+  let previousRight = rowLeft;
   for (const span of spans) {
     const text = normalizeTerminalDOMText(span.textContent || "");
     if (!text) continue;
     const rect = span.getBoundingClientRect?.();
-    const col = rect && Number.isFinite(rect.left) ? Math.max(0, Math.round((rect.left - rowRect.left) / cellWidth)) : chars.length;
-    for (let i = 0; i < text.length; i++) {
-      chars[col + i] = text[i];
+    if (rect && Number.isFinite(rect.left) && cellWidth > 0) {
+      const gapPx = line ? rect.left - previousRight : rect.left - rowLeft;
+      if (Number.isFinite(gapPx) && gapPx > cellWidth * 0.6) {
+        const gapCols = Math.max(0, Math.round(gapPx / cellWidth));
+        if (gapCols > 0) {
+          line += " ".repeat(gapCols);
+          cursorCol += gapCols;
+        }
+      }
+    }
+    line += text;
+    cursorCol += terminalTextColumns(text);
+    if (rect && Number.isFinite(rect.left)) {
+      previousRight = terminalRectRight(rect, rowLeft + cursorCol * cellWidth);
+    } else {
+      previousRight = rowLeft + cursorCol * cellWidth;
     }
   }
-  return Array.from({ length: chars.length }, (_, i) => chars[i] || " ").join("").trimEnd();
+  return line.trimEnd();
 }
 
 function normalizeTerminalDOMText(text) {
   return text.replace(/\u00a0/g, " ").replace(/\u200b/g, "");
+}
+
+function terminalRectRight(rect, fallback) {
+  if (Number.isFinite(rect.right)) return rect.right;
+  if (Number.isFinite(rect.left) && Number.isFinite(rect.width)) return rect.left + rect.width;
+  return fallback;
+}
+
+function terminalTextColumns(text) {
+  let cols = 0;
+  for (const char of Array.from(text)) {
+    cols += terminalCharColumns(char);
+  }
+  return cols;
+}
+
+function terminalCharColumns(char) {
+  const code = char.codePointAt(0);
+  if (!Number.isFinite(code)) return 0;
+  if ((code >= 0x0300 && code <= 0x036f) || (code >= 0xfe00 && code <= 0xfe0f)) return 0;
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    code === 0x2329 ||
+    code === 0x232a ||
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6)
+  ) {
+    return 2;
+  }
+  return 1;
 }
 
 async function syncSnapshotNow() {
@@ -301,7 +347,7 @@ async function syncSnapshotNow() {
   await state.pendingTerminalWrite.catch(() => {});
   let snapshot = "";
   for (let i = 0; i < 5; i++) {
-    fitTerminalSafely();
+    enforceStandardTerminalSize();
     await waitForNextPaint();
     await waitForNextPaint();
     const first = terminalVisibleSnapshotWithSource();
@@ -1479,5 +1525,13 @@ if (typeof window !== "undefined") {
     visibleSessions,
     syncSnapshotNow,
     terminalVisibleSnapshot,
+    resizeTerm,
+    standardTerminal: {
+      cols: STANDARD_TERMINAL_COLS,
+      rows: STANDARD_TERMINAL_ROWS,
+      fontFamily: STANDARD_TERMINAL_FONT_FAMILY,
+      fontSize: STANDARD_TERMINAL_FONT_SIZE,
+      lineHeight: STANDARD_TERMINAL_LINE_HEIGHT,
+    },
   };
 }

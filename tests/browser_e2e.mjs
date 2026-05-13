@@ -60,7 +60,9 @@ try {
   await waitFor(() => evalExpr("document.querySelectorAll('.session').length === 1"));
   await waitFor(() => evalExpr("document.querySelector('.session').className.includes('session-running')"));
   await waitFor(() => evalExpr("window.easyTerminalApp.state.active && window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
-  await waitFor(() => evalExpr("window.easyTerminalApp.state.term.cols >= 80 && window.easyTerminalApp.state.term.rows >= 20"));
+  await waitFor(() => evalExpr("window.easyTerminalApp.state.term.cols === 120 && window.easyTerminalApp.state.term.rows === 36"));
+  assert.equal(await evalExpr("window.easyTerminalApp.standardTerminal.cols"), 120, "browser should use the standard terminal width");
+  assert.equal(await evalExpr("window.easyTerminalApp.standardTerminal.rows"), 36, "browser should use the standard terminal height");
   await waitFor(() => fetchJSON(`http://localhost:${port}/api/sessions`).then((sessions) => sessions[0]?.status === "waiting"), 7000);
   await waitFor(() => evalExpr("document.querySelector('.session').className.includes('session-waiting')"), 7000);
 

@@ -156,19 +156,21 @@ func HasRenderableContent(data []byte) bool {
 	return false
 }
 
-func PickNotifyContent(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) string {
+func PickNotifyContent(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) string {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, _ := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
+	body, _ := selectNotifyBody(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText)
 	if body == "" {
 		return ""
 	}
 	body = trimVisibleText(body)
+	body = dropConfiguredLarkNotifyLines(body)
+	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
-func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, snapshotAtRoundStart string, roundReply []byte, lastInputText string) bool {
+func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, _ := selectNotifyBody(visibleSnapshot, snapshotAtRoundStart, roundReply, lastInputText)
+	body, _ := selectNotifyBody(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText)
 	if strings.TrimSpace(body) == "" {
 		return true
 	}
@@ -176,17 +178,17 @@ func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, snapshotAtRoundStart
 	return !hasReply || (containsTransientStatusLine(body) && !hasReply)
 }
 
-func selectNotifyBody(visibleSnapshot string, snapshotAtRoundStart string, _ []byte, lastInputText string) (string, bool) {
-	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+func selectNotifyBody(visibleSnapshot string, previousVisibleSnapshot string, _ []byte, lastInputText string) (string, bool) {
+	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
 	if strings.TrimSpace(visibleBody) == "" {
 		return "", false
 	}
 	return visibleBody, fromVisible
 }
 
-func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) bool {
+func NotifyContentNeedsConservativeDelay(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, fromVisible := currentRoundVisibleText(visibleSnapshot, snapshotAtRoundStart, lastInputText)
+	body, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
 	if !fromVisible || strings.TrimSpace(body) == "" {
 		return true
 	}
@@ -208,12 +210,158 @@ func NotifyContentNeedsConservativeDelay(visibleSnapshot string, snapshotAtRound
 	return false
 }
 
-func currentRoundVisibleText(visibleSnapshot string, snapshotAtRoundStart string, lastInputText string) (string, bool) {
+func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) (string, bool) {
 	visibleSnapshot = trimVisibleText(visibleSnapshot)
 	if visibleSnapshot == "" {
 		return "", false
 	}
+	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok {
+		return trimVisibleText(body), true
+	}
+	if body, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok {
+		return trimVisibleText(body), true
+	}
+	if strings.TrimSpace(lastInputText) != "" {
+		if body := visibleTextFromLastInput(visibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
+			return trimVisibleText(body), true
+		}
+	}
 	return visibleSnapshot, true
+}
+
+func visibleTextChangedSincePrevious(visibleSnapshot string, previousVisibleSnapshot string) (string, bool) {
+	visibleSnapshot = trimVisibleText(visibleSnapshot)
+	previousVisibleSnapshot = trimVisibleText(previousVisibleSnapshot)
+	if visibleSnapshot == "" || previousVisibleSnapshot == "" {
+		return "", false
+	}
+	currentLines := splitVisibleLines(visibleSnapshot)
+	previousLines := splitVisibleLines(previousVisibleSnapshot)
+	if len(currentLines) == 0 || len(previousLines) == 0 {
+		return "", false
+	}
+	currentNorm := normalizedVisibleLines(currentLines)
+	previousNorm := normalizedVisibleLines(previousLines)
+	prefix := 0
+	for prefix < len(currentNorm) && prefix < len(previousNorm) && currentNorm[prefix] == previousNorm[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(currentNorm)-prefix &&
+		suffix < len(previousNorm)-prefix &&
+		currentNorm[len(currentNorm)-1-suffix] == previousNorm[len(previousNorm)-1-suffix] {
+		suffix++
+	}
+	if prefix == len(currentLines) && prefix == len(previousLines) {
+		return "", true
+	}
+	start := prefix
+	end := len(currentLines) - suffix
+	for end < len(currentLines) && shouldKeepStableDiffSuffixLine(currentLines[end]) {
+		end++
+	}
+	if start > end {
+		start = end
+	}
+	if suffix == 0 {
+		if anchored, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok && strings.TrimSpace(anchored) != "" {
+			return anchored, true
+		}
+	}
+	return strings.Join(currentLines[start:end], "\n"), true
+}
+
+func shouldKeepStableDiffSuffixLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if text, ok := shellInputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
+		return true
+	}
+	if text, ok := inputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
+		return true
+	}
+	return strings.Contains(lower, "press enter") ||
+		strings.Contains(lower, "esc to go back") ||
+		strings.Contains(lower, "enter to confirm")
+}
+
+func normalizedVisibleLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = normalizeVisibleAnchorLine(line)
+	}
+	return out
+}
+
+func visibleTextAfterPreviousTailAnchor(visibleSnapshot string, previousVisibleSnapshot string, anchorLines int) (string, bool) {
+	previousAnchor := tailNonEmptyNormalizedLines(previousVisibleSnapshot, anchorLines)
+	if len(previousAnchor) == 0 {
+		return "", false
+	}
+	lines := splitVisibleLines(visibleSnapshot)
+	type indexedLine struct {
+		index int
+		text  string
+	}
+	current := make([]indexedLine, 0, len(lines))
+	for i, line := range lines {
+		normalized := normalizeVisibleAnchorLine(line)
+		if normalized != "" {
+			current = append(current, indexedLine{index: i, text: normalized})
+		}
+	}
+	if len(current) < len(previousAnchor) {
+		return "", false
+	}
+	for i := len(current) - len(previousAnchor); i >= 0; i-- {
+		matched := true
+		for j := range previousAnchor {
+			if current[i+j].text != previousAnchor[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			start := current[i+len(previousAnchor)-1].index + 1
+			if start >= len(lines) {
+				return "", true
+			}
+			return strings.Join(lines[start:], "\n"), true
+		}
+	}
+	return "", false
+}
+
+func tailNonEmptyNormalizedLines(text string, maxLines int) []string {
+	if maxLines <= 0 {
+		return nil
+	}
+	lines := splitVisibleLines(trimVisibleText(text))
+	out := make([]string, 0, maxLines)
+	for i := len(lines) - 1; i >= 0 && len(out) < maxLines; i-- {
+		normalized := normalizeVisibleAnchorLine(lines[i])
+		if normalized == "" {
+			continue
+		}
+		out = append(out, normalized)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+func splitVisibleLines(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.Split(text, "\n")
+}
+
+func normalizeVisibleAnchorLine(line string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
 }
 
 func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart string) string {

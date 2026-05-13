@@ -445,6 +445,11 @@ await Promise.resolve();
 
 const app = context.window.easyTerminalApp;
 assert.ok(app, "app test API is exposed");
+assert.equal(app.standardTerminal.cols, 120);
+assert.equal(app.standardTerminal.rows, 36);
+assert.equal(app.standardTerminal.fontFamily, "Menlo, Consolas, monospace");
+assert.equal(app.standardTerminal.fontSize, 13);
+assert.equal(app.standardTerminal.lineHeight, 1.2);
 
 await app.loadConfig();
 await app.maybeShowOnboarding();
@@ -479,6 +484,16 @@ app.state.socket = {
     sentMessages.push(JSON.parse(payload));
   },
 };
+app.state.term = {
+  cols: 160,
+  rows: 48,
+  resize(cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
+  },
+};
+app.resizeTerm();
+assert.deepEqual(sentMessages.pop(), { type: "resize", cols: 120, rows: 36 });
 
 elements["composer-input"].value = "echo button";
 elements.composer.requestSubmit();
@@ -531,6 +546,16 @@ await app.syncSnapshotNow();
 assert.deepEqual(sentMessages.pop(), {
   type: "snapshot",
   data: "Select Reasoning Level for gpt-5.5\n1. Low                  Fast responses with lighter reasoning\n2. Medium (default)     Balances speed and reasoning depth for everyday tasks\n3. High                 Greater reasoning depth for complex problems\n› 4. Extra high (current)  Extra high reasoning depth for complex problems\nPress enter to confirm or esc to go back",
+  source: "dom",
+});
+terminalDOMRows = [
+  terminalRow([["alpha", 0], ["beta", 40.3]]),
+  terminalRow([["left", 0], ["right", 80]]),
+];
+await app.syncSnapshotNow();
+assert.deepEqual(sentMessages.pop(), {
+  type: "snapshot",
+  data: "alphabeta\nleft      right",
   source: "dom",
 });
 terminalDOMRows = [];

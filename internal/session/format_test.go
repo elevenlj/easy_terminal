@@ -59,6 +59,81 @@ func TestPickNotifyContentFallsBackToVisibleTailWhenDiffCannotMatch(t *testing.T
 	}
 }
 
+func TestPickNotifyContentDiffsAfterPreviousTailAnchor(t *testing.T) {
+	previous := strings.Join([]string{
+		"old heading",
+		"old line 1",
+		"old line 2",
+		"old line 3",
+	}, "\n")
+	visible := previous + "\n" + strings.Join([]string{
+		"new line 1",
+		"",
+		"new line 2",
+	}, "\n")
+	got := PickNotifyContent(visible, previous, nil, "next")
+	want := "new line 1\n\nnew line 2"
+	if got != want {
+		t.Fatalf("content should be diffed after previous tail anchor:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
+	previous := strings.Join([]string{
+		"old output",
+		"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+	}, "\n")
+	visible := strings.Join([]string{
+		"old output",
+		"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
+		"  (no output)",
+		"已关闭 8083 接口。",
+		"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+	}, "\n")
+	got := PickNotifyContent(visible, previous, nil, "关闭 8083")
+	want := strings.Join([]string{
+		"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
+		"  (no output)",
+		"已关闭 8083 接口。",
+	}, "\n")
+	if got != want {
+		t.Fatalf("middle insertion before stable footer should be diffed:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesLastRepeatedPreviousTailAnchor(t *testing.T) {
+	previous := strings.Join([]string{
+		"anchor one",
+		"anchor two",
+		"anchor three",
+	}, "\n")
+	visible := strings.Join([]string{
+		"anchor one",
+		"anchor two",
+		"anchor three",
+		"old duplicate content",
+		"anchor one",
+		"anchor two",
+		"anchor three",
+		"new content only",
+	}, "\n")
+	got := PickNotifyContent(visible, previous, nil, "next")
+	if got != "new content only" {
+		t.Fatalf("last repeated anchor should be used, got %q", got)
+	}
+}
+
+func TestNotifyContentNeedsMoreSnapshotWhenPreviousTailAnchorHasNoNewContent(t *testing.T) {
+	previous := strings.Join([]string{
+		"anchor one",
+		"anchor two",
+		"anchor three",
+	}, "\n")
+	if !NotifyContentNeedsMoreSnapshot(previous, previous, nil, "next") {
+		t.Fatalf("matching previous tail anchor with no new content should wait")
+	}
+}
+
 func TestPickNotifyContentDoesNotUseRoundReplyWithoutVisibleSnapshot(t *testing.T) {
 	got := PickNotifyContent("", "", []byte("current answer only"), "missing input")
 	if got != "" {
@@ -167,6 +242,28 @@ func TestPickNotifyContentSanitizesEmail(t *testing.T) {
 	got := PickNotifyContent("contact me@example.com", "", nil, "")
 	if strings.Contains(got, "me@example.com") || !strings.Contains(got, "[email]") {
 		t.Fatalf("email was not sanitized: %q", got)
+	}
+}
+
+func TestPickNotifyContentAppliesDropLinePatterns(t *testing.T) {
+	if err := SetLarkNotifyDropLinePatterns([]string{`^noise:`, `secret`}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLinePatterns(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent(strings.Join([]string{
+		"keep first",
+		"noise: drop this",
+		"keep second",
+		"contains secret token",
+	}, "\n"), "", nil, "")
+	want := "keep first\nkeep second"
+	if got != want {
+		t.Fatalf("drop line patterns were not applied:\n%q\nwant:\n%q", got, want)
 	}
 }
 

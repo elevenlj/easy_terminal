@@ -480,41 +480,42 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 }
 
 type RuntimeSession struct {
-	mu                       sync.Mutex
-	notificationPatchMu      sync.Mutex
-	manager                  *Manager
-	session                  Session
-	terminal                 Terminal
-	process                  Waiter
-	output                   []byte
-	roundReply               []byte
-	visibleSnapshot          string
-	visibleSnapshotSource    string
-	visibleSnapshotVersion   int64
-	snapshotAtRoundStart     string
-	snapshotAtRoundVersion   int64
-	lastInputText            string
-	inputLineBuffer          string
-	lastNotifiedRoundHash    string
-	lastNotifiedMessageID    string
-	lastNotifiedContent      string
-	notificationUpdateNo     int
-	notificationRunning      bool
-	suppressRunningMarker    bool
-	requireLarkChat          bool
-	notificationPatchVersion int64
-	autoRefreshEnabled       bool
-	autoRefreshMessageID     string
-	autoRefreshStop          chan struct{}
-	startupNotifyMode        startupNotifyMode
-	subscribers              map[chan RuntimeEvent]struct{}
-	snapshotWaiters          []chan struct{}
-	nextSeq                  int64
-	stateVersion             int64
-	notifyVersion            int64
-	notifyRetryTimer         *time.Timer
-	notifyStableTimer        *time.Timer
-	startupNotifyTimer       *time.Timer
+	mu                          sync.Mutex
+	notificationPatchMu         sync.Mutex
+	manager                     *Manager
+	session                     Session
+	terminal                    Terminal
+	process                     Waiter
+	output                      []byte
+	roundReply                  []byte
+	visibleSnapshot             string
+	visibleSnapshotSource       string
+	visibleSnapshotVersion      int64
+	snapshotAtRoundStart        string
+	snapshotAtRoundVersion      int64
+	lastInputText               string
+	inputLineBuffer             string
+	lastNotifiedRoundHash       string
+	lastNotifiedMessageID       string
+	lastNotifiedContent         string
+	lastNotifiedVisibleSnapshot string
+	notificationUpdateNo        int
+	notificationRunning         bool
+	suppressRunningMarker       bool
+	requireLarkChat             bool
+	notificationPatchVersion    int64
+	autoRefreshEnabled          bool
+	autoRefreshMessageID        string
+	autoRefreshStop             chan struct{}
+	startupNotifyMode           startupNotifyMode
+	subscribers                 map[chan RuntimeEvent]struct{}
+	snapshotWaiters             []chan struct{}
+	nextSeq                     int64
+	stateVersion                int64
+	notifyVersion               int64
+	notifyRetryTimer            *time.Timer
+	notifyStableTimer           *time.Timer
+	startupNotifyTimer          *time.Timer
 }
 
 type RuntimeEvent struct {
@@ -651,7 +652,21 @@ func (rt *RuntimeSession) CurrentRoundContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+	return PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
+}
+
+func (rt *RuntimeSession) CurrentVisibleContent() string {
+	rt.RequestFreshSnapshot(800 * time.Millisecond)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return PickNotifyContent(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText)
+}
+
+func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
+	if strings.TrimSpace(rt.snapshotAtRoundStart) != "" {
+		return rt.snapshotAtRoundStart
+	}
+	return rt.lastNotifiedVisibleSnapshot
 }
 
 func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
@@ -828,7 +843,11 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 }
 
 func (rt *RuntimeSession) RefreshNotificationMessage(messageID string, preserveUpdateNo ...int) error {
-	return rt.refreshNotificationMessage(messageID, true, preserveUpdateNo...)
+	if err := rt.refreshNotificationMessage(messageID, true, preserveUpdateNo...); err != nil {
+		return err
+	}
+	rt.scheduleAutoRefreshOnce(messageID)
+	return nil
 }
 
 func (rt *RuntimeSession) AutoRefreshNotificationMessage(messageID string, preserveUpdateNo ...int) error {
@@ -849,7 +868,12 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		return errors.New("notification message is not available")
 	}
 	content := strings.TrimSpace(rt.CurrentRoundContent())
-	if content == "" {
+	hasSnapshotContent := content != ""
+	if !hasSnapshotContent {
+		content = strings.TrimSpace(rt.CurrentVisibleContent())
+		hasSnapshotContent = content != ""
+	}
+	if !hasSnapshotContent {
 		content = "当前轮暂无内容"
 	}
 	contentHash := notifyContentHash(content)
@@ -902,6 +926,9 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		}
 		rt.lastNotifiedContent = content
 		rt.lastNotifiedRoundHash = contentHash
+		if hasSnapshotContent {
+			rt.lastNotifiedVisibleSnapshot = rt.visibleSnapshot
+		}
 		if result.Updated {
 			rt.notificationUpdateNo = n.UpdateNo
 		}
@@ -988,6 +1015,40 @@ func (rt *RuntimeSession) autoRefreshLoop(stop <-chan struct{}) {
 		}
 		timer.Reset(rt.manager.autoRefreshDelay())
 	}
+}
+
+func (rt *RuntimeSession) scheduleAutoRefreshOnce(messageID string) {
+	if rt == nil || rt.manager == nil {
+		return
+	}
+	messageID = strings.TrimSpace(messageID)
+	rt.mu.Lock()
+	if !rt.autoRefreshEnabled || rt.autoRefreshStop == nil {
+		rt.mu.Unlock()
+		return
+	}
+	if messageID == "" {
+		messageID = rt.autoRefreshMessageID
+	}
+	if messageID == "" {
+		rt.mu.Unlock()
+		return
+	}
+	delay := rt.manager.autoRefreshDelay()
+	sessionID := rt.session.ID
+	rt.mu.Unlock()
+	time.AfterFunc(delay, func() {
+		rt.mu.Lock()
+		if !rt.autoRefreshEnabled || rt.autoRefreshMessageID != messageID || !rt.session.Live || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
+			rt.mu.Unlock()
+			return
+		}
+		updateNo := rt.notificationUpdateNo
+		rt.mu.Unlock()
+		if err := rt.AutoRefreshNotificationMessage(messageID, updateNo); err != nil {
+			log.Printf("lark card auto refresh after manual refresh failed session=%s message=%s: %v", sessionID, messageID, err)
+		}
+	})
 }
 
 func (rt *RuntimeSession) recordInputLocked(data string) bool {
@@ -1202,7 +1263,7 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 }
 
 func (rt *RuntimeSession) notifyStableDelayLocked() time.Duration {
-	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.lastInputText) {
+	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.lastInputText) {
 		return rt.manager.conservativeWaiting
 	}
 	return rt.manager.fastWaiting
@@ -1306,6 +1367,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	n.AutoRefreshEnabled = rt.autoRefreshEnabled
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion
+	notifiedVisibleSnapshot := rt.visibleSnapshot
 	roundInput := rt.lastInputText
 	roundSnapshotVersion := rt.snapshotAtRoundVersion
 	updateCoalesce := time.Duration(0)
@@ -1361,6 +1423,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 				rt.bindAutoRefreshMessageLocked(result.MessageID)
 			}
 			rt.lastNotifiedContent = n.Content
+			rt.lastNotifiedVisibleSnapshot = notifiedVisibleSnapshot
 			if result.Updated {
 				rt.notificationUpdateNo = n.UpdateNo
 			}
@@ -1370,6 +1433,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		rt.lastNotifiedMessageID = result.MessageID
 		rt.bindAutoRefreshMessageLocked(result.MessageID)
 		rt.lastNotifiedContent = n.Content
+		rt.lastNotifiedVisibleSnapshot = notifiedVisibleSnapshot
 		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
 	}
@@ -1398,7 +1462,7 @@ func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, stri
 func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, bool) {
 	content := strings.TrimSpace(rt.lastNotifiedContent)
 	if content == "" {
-		content = strings.TrimSpace(PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText))
+		content = strings.TrimSpace(PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText))
 	}
 	switch {
 	case rt.manager.notifier == nil:
@@ -1505,10 +1569,10 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
-	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText) {
+	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText) {
 		return WaitingNotification{}, "", false, "needs_more_snapshot"
 	}
-	content := PickNotifyContent(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+	content := PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
@@ -1524,7 +1588,7 @@ func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return true
 	}
-	return NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.snapshotAtRoundStart, rt.roundReply, rt.lastInputText)
+	return NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
 }
 
 func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {
