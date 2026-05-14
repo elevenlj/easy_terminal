@@ -472,15 +472,16 @@ func TestSubmitStructuredInputClearsPreviousNotificationBeforeEcho(t *testing.T)
 	notifier := &recordingNotifier{}
 	manager := NewManager(nil, nil, WithNotifier(notifier))
 	rt := &RuntimeSession{
-		manager:                manager,
-		session:                Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
-		lastNotifiedMessageID:  "msg-old",
-		lastNotifiedContent:    "old reply",
-		notificationUpdateNo:   0,
-		notificationRunning:    false,
-		snapshotAtRoundStart:   "old snapshot",
-		visibleSnapshot:        "old snapshot",
-		visibleSnapshotVersion: 1,
+		manager:                 manager,
+		session:                 Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:   "msg-old",
+		lastNotifiedContent:     "old reply",
+		notificationUpdateNo:    0,
+		notificationRunning:     false,
+		snapshotAtRoundStart:    "old snapshot",
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "old snapshot",
+		visibleSnapshotVersion:  1,
 	}
 	term := &recordingTerminal{readCh: make(chan []byte)}
 	term.onWrite = func(data string) {

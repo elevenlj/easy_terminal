@@ -493,6 +493,7 @@ type RuntimeSession struct {
 	visibleSnapshotVersion      int64
 	snapshotAtRoundStart        string
 	snapshotAtRoundVersion      int64
+	snapshotAtRoundStartSet     bool
 	lastInputText               string
 	inputLineBuffer             string
 	lastNotifiedRoundHash       string
@@ -663,7 +664,7 @@ func (rt *RuntimeSession) CurrentVisibleContent() string {
 }
 
 func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
-	if strings.TrimSpace(rt.snapshotAtRoundStart) != "" {
+	if rt.snapshotAtRoundStartSet {
 		return rt.snapshotAtRoundStart
 	}
 	return rt.lastNotifiedVisibleSnapshot
@@ -736,6 +737,7 @@ func (rt *RuntimeSession) markInputActivityLocked(submitted bool) {
 	if submitted {
 		rt.snapshotAtRoundStart = rt.visibleSnapshot
 		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
+		rt.snapshotAtRoundStartSet = true
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
 		rt.lastNotifiedMessageID = ""

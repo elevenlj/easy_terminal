@@ -449,7 +449,7 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 }
 
 func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateNo int) error {
-	content, err := larkUpdateTipCardContent(updateNo)
+	content, err := larkUpdateTipCardContent(updateNo, n.receiveID, n.mention)
 	if err != nil {
 		return err
 	}
@@ -480,12 +480,15 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 	return nil
 }
 
-func larkUpdateTipCardContent(updateNo int) (string, error) {
+func larkUpdateTipCardContent(updateNo int, receiveID string, mention bool) (string, error) {
+	elements := []map[string]any{}
+	if mention && strings.TrimSpace(receiveID) != "" {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + strings.TrimSpace(receiveID) + "></at>"})
+	}
+	elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", updateNo)}}})
 	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": false},
-		"elements": []map[string]any{
-			{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", updateNo)}}},
-		},
+		"config":   map[string]any{"wide_screen_mode": false},
+		"elements": elements,
 	}
 	b, err := json.Marshal(card)
 	return string(b), err

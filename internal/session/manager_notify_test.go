@@ -470,16 +470,17 @@ func TestNotifyIfStillWaitingIncrementsExistingUpdateNumber(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
-		manager:                m,
-		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
-		lastNotifiedMessageID:  "msg-1",
-		notificationUpdateNo:   2,
-		lastInputText:          "echo hello",
-		snapshotAtRoundStart:   "$ echo hello",
-		snapshotAtRoundVersion: 1,
-		roundReply:             []byte("old\nnew"),
-		visibleSnapshot:        "$ echo hello\nold\nnew\n$",
-		visibleSnapshotVersion: 2,
+		manager:                 m,
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:   "msg-1",
+		notificationUpdateNo:    2,
+		lastInputText:           "echo hello",
+		snapshotAtRoundStart:    "$ echo hello",
+		snapshotAtRoundVersion:  1,
+		snapshotAtRoundStartSet: true,
+		roundReply:              []byte("old\nnew"),
+		visibleSnapshot:         "$ echo hello\nold\nnew\n$",
+		visibleSnapshotVersion:  2,
 	}
 	rt.mu.Lock()
 	version := rt.notifyVersion
@@ -511,6 +512,7 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 			"old output",
 			"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
 		}, "\n"),
+		snapshotAtRoundStartSet: true,
 		visibleSnapshot: strings.Join([]string{
 			"old output",
 			"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
@@ -536,6 +538,31 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 	}, "\n")
 	if notes[0].Content != want {
 		t.Fatalf("notification should diff from round start snapshot:\n%q\nwant:\n%q", notes[0].Content, want)
+	}
+}
+
+func TestWaitingNotificationTreatsEmptyRoundStartAsCurrentRoundBaseline(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:                     NewManager(nil, nil),
+		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:               "ask",
+		lastNotifiedVisibleSnapshot: "> ask\nfirst",
+		snapshotAtRoundStart:        "",
+		snapshotAtRoundVersion:      0,
+		snapshotAtRoundStartSet:     true,
+		visibleSnapshot:             "> ask\nfirst\nsecond",
+		visibleSnapshotVersion:      1,
+	}
+
+	rt.mu.Lock()
+	n, _, ok := rt.waitingNotificationLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatal("expected notification to be ready")
+	}
+	want := "> ask\nfirst\nsecond"
+	if n.Content != want {
+		t.Fatalf("empty round baseline should not diff from last pushed snapshot:\n%q\nwant:\n%q", n.Content, want)
 	}
 }
 
@@ -614,6 +641,36 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 }
 
+func TestRefreshNotificationMessageUsesFullCurrentRoundWhenRoundBaselineIsEmpty(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:                     m,
+		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:               "ask",
+		lastNotifiedMessageID:       "bot-card",
+		lastNotifiedVisibleSnapshot: "> ask\nfirst",
+		snapshotAtRoundStart:        "",
+		snapshotAtRoundVersion:      0,
+		snapshotAtRoundStartSet:     true,
+		visibleSnapshot:             "> ask\nfirst\nsecond",
+		visibleSnapshotVersion:      1,
+	}
+
+	if err := rt.RefreshNotificationMessage("bot-card", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	want := "> ask\nfirst\nsecond"
+	if notes[0].Content != want {
+		t.Fatalf("manual refresh should use full current round content:\n%q\nwant:\n%q", notes[0].Content, want)
+	}
+}
+
 func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
@@ -636,6 +693,40 @@ func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t 
 	}
 	if notes[0].Content != visible {
 		t.Fatalf("empty diff should fall back to current visible content, got %#v", notes[0])
+	}
+}
+
+func TestTerminalOutputSnapshotIsUnaffectedByNotificationDiff(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:                 NewManager(nil, nil),
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:           "ask",
+		snapshotAtRoundStart:    "old screen\n> ask",
+		snapshotAtRoundVersion:  1,
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot: strings.Join([]string{
+			"old screen",
+			"> ask",
+			"first",
+			"second",
+		}, "\n"),
+		visibleSnapshotVersion: 2,
+	}
+	rt.HandleOutput([]byte("old terminal history\n"))
+	rt.HandleOutput([]byte("current terminal output\n"))
+
+	rt.mu.Lock()
+	n, _, ok := rt.waitingNotificationLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatal("expected notification to be ready")
+	}
+	if strings.Contains(n.Content, "old screen") {
+		t.Fatalf("notification should use diff content, got %q", n.Content)
+	}
+	out := string(rt.OutputSnapshot())
+	if !strings.Contains(out, "old terminal history") || !strings.Contains(out, "current terminal output") {
+		t.Fatalf("terminal output snapshot should remain full raw history, got %q", out)
 	}
 }
 
@@ -967,18 +1058,19 @@ func TestOutputDuringInFlightWaitingPatchPatchesRunningTitleAfterWaitingPatch(t 
 	notifier := newSequencingNotifier("msg-1")
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(time.Hour, time.Hour), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
-		manager:                m,
-		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
-		lastNotifiedMessageID:  "msg-1",
-		lastNotifiedContent:    "> echo hello\npartial",
-		notificationUpdateNo:   1,
-		notificationRunning:    false,
-		lastInputText:          "echo hello",
-		visibleSnapshot:        "> echo hello\npartial\ncomplete",
-		visibleSnapshotVersion: 1,
-		snapshotAtRoundStart:   "> echo hello",
-		roundReply:             []byte("partial\ncomplete"),
-		notifyVersion:          4,
+		manager:                 m,
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:   "msg-1",
+		lastNotifiedContent:     "> echo hello\npartial",
+		notificationUpdateNo:    1,
+		notificationRunning:     false,
+		lastInputText:           "echo hello",
+		visibleSnapshot:         "> echo hello\npartial\ncomplete",
+		visibleSnapshotVersion:  1,
+		snapshotAtRoundStart:    "> echo hello",
+		snapshotAtRoundStartSet: true,
+		roundReply:              []byte("partial\ncomplete"),
+		notifyVersion:           4,
 	}
 
 	done := make(chan struct{})
@@ -1311,7 +1403,7 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 }
 
 func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
-	content, err := larkUpdateTipCardContent(3)
+	content, err := larkUpdateTipCardContent(3, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1323,6 +1415,19 @@ func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
 	}
 	if strings.Contains(content, `"header"`) {
 		t.Fatalf("tip content should not include a header, got %s", content)
+	}
+}
+
+func TestLarkUpdateTipCardContentIncludesMentionWhenEnabled(t *testing.T) {
+	content, err := larkUpdateTipCardContent(3, "ou_1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, `\u003cat id=ou_1\u003e\u003c/at\u003e`) {
+		t.Fatalf("tip content should include mention when enabled, got %s", content)
+	}
+	if !strings.Contains(content, "已更新-3") {
+		t.Fatalf("tip content should include update marker, got %s", content)
 	}
 }
 

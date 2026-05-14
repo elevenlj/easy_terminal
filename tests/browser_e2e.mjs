@@ -81,6 +81,14 @@ try {
   const cjkSnapshot = await waitForTerminalSnapshot("中文快照_OK");
   assert.equal(cjkSnapshot.includes("\uFFFD"), false, "terminal snapshot should not contain replacement characters");
 
+  const activeSessionID = await evalExpr("window.easyTerminalApp.state.active");
+  await cdp.send("Page.navigate", { url: `http://localhost:${port}/?session=${encodeURIComponent(activeSessionID)}` });
+  await waitFor(() => evalExpr("Boolean(window.easyTerminalApp && document.querySelector('#session-name'))"));
+  await waitFor(() => evalExpr(`window.easyTerminalApp.state.active === ${JSON.stringify(activeSessionID)}`));
+  await waitFor(() => evalExpr("window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
+  const reconnectedSnapshot = await waitForTerminalSnapshot("中文快照_OK");
+  assert.ok(reconnectedSnapshot.includes("BROWSER_BUTTON_E2E"), "browser reconnect should keep earlier terminal history");
+
   await fillComposer("plain enter line");
   await keydownComposer({ key: "Enter", metaKey: false, ctrlKey: false });
   assert.equal(await evalExpr("document.querySelector('#composer-input').value"), "plain enter line", "plain Enter should not send");
