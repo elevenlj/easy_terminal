@@ -1,5 +1,6 @@
 # 启动
 easy_terminal --port xxx
+easy_terminal --config-dir /data/easy_terminal/conf
 
 # web
 * 首页

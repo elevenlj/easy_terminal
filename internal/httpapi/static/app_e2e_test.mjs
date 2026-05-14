@@ -516,7 +516,21 @@ app.state.term = {
 };
 app.state.pendingTerminalWrite = Promise.resolve();
 await app.syncSnapshotNow();
-assert.deepEqual(sentMessages.pop(), { type: "snapshot", data: "visible one\nvisible two", source: "buffer" });
+assert.deepEqual(sentMessages.pop(), { type: "snapshot", data: "old hidden\nvisible one\nvisible two\nnew hidden", source: "buffer" });
+
+app.state.term = {
+  cols: 120,
+  rows: 2,
+  buffer: {
+    active: {
+      length: 0,
+      viewportY: 0,
+      getLine() {
+        return null;
+      },
+    },
+  },
+};
 
 terminalDOMRows = [
   terminalRow([["/model", 0]]),

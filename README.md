@@ -50,7 +50,12 @@ go run ./cmd --port 9090
 go run ./cmd -p 9090
 ```
 
-首次保存 Web 配置时会生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。
+首次保存 Web 配置时会生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。需要固定配置文件目录时：
+
+```sh
+easy_terminal --config-dir /data/easy_terminal/conf
+EASY_TERMINAL_CONFIG_DIR=/data/easy_terminal/conf easy_terminal
+```
 
 构建二进制：
 
@@ -59,6 +64,7 @@ make build
 ./easy_terminal
 ./easy_terminal --port 9090
 ./easy_terminal -p 9090
+./easy_terminal --config-dir /data/easy_terminal/conf
 ```
 
 端口配置优先级为：启动参数 `--port` / `-p` > 环境变量 `PORT` > 配置文件 > 默认端口 `8080`。

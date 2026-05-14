@@ -81,6 +81,12 @@ try {
   const cjkSnapshot = await waitForTerminalSnapshot("中文快照_OK");
   assert.equal(cjkSnapshot.includes("\uFFFD"), false, "terminal snapshot should not contain replacement characters");
 
+  await fillComposer("for i in $(seq 1 50); do printf 'FULL_BUFFER_E2E_%02d\\n' \"$i\"; done");
+  await click("document.querySelector('#composer button').click()");
+  await waitForOutput("FULL_BUFFER_E2E_50");
+  const fullBufferSnapshot = await waitForTerminalSnapshot("FULL_BUFFER_E2E_01");
+  assert.ok(fullBufferSnapshot.includes("FULL_BUFFER_E2E_50"), "terminal snapshot should include full scrollback output");
+
   const activeSessionID = await evalExpr("window.easyTerminalApp.state.active");
   await cdp.send("Page.navigate", { url: `http://localhost:${port}/?session=${encodeURIComponent(activeSessionID)}` });
   await waitFor(() => evalExpr("Boolean(window.easyTerminalApp && document.querySelector('#session-name'))"));

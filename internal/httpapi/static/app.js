@@ -236,17 +236,24 @@ function terminalVisibleSnapshot() {
 
 function terminalVisibleSnapshotWithSource() {
   if (!state.term) return { data: "", source: "none" };
+  const bufferSnapshot = terminalBufferSnapshot();
+  if (bufferSnapshot) return { data: bufferSnapshot, source: "buffer" };
   const domSnapshot = terminalDOMVisibleSnapshot();
   if (domSnapshot) return { data: domSnapshot, source: "dom" };
+  return { data: "", source: "empty" };
+}
+
+function terminalBufferSnapshot() {
+  const buffer = state.term?.buffer?.active;
+  if (!buffer || typeof buffer.getLine !== "function" || !Number.isFinite(buffer.length)) return "";
   const lines = [];
-  const buffer = state.term.buffer.active;
-  const rows = state.term.rows || STANDARD_TERMINAL_ROWS;
-  const start = Math.max(0, buffer.viewportY || 0);
-  const end = Math.min(buffer.length, start + rows);
-  for (let i = start; i < end; i++) {
+  const end = Math.max(0, buffer.length);
+  for (let i = 0; i < end; i++) {
     lines.push(buffer.getLine(i)?.translateToString(true) || "");
   }
-  return { data: lines.join("\n"), source: "buffer" };
+  while (lines.length && lines[0].trim() === "") lines.shift();
+  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
+  return lines.join("\n");
 }
 
 function terminalDOMVisibleSnapshot() {

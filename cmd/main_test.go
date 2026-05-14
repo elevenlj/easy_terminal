@@ -40,6 +40,16 @@ func TestParseStartupOptionsPort(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsConfigDir(t *testing.T) {
+	opts, err := parseStartupOptions([]string{"--config-dir", "/tmp/easy-config"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ConfigDir != "/tmp/easy-config" {
+		t.Fatalf("expected config dir override, got %q", opts.ConfigDir)
+	}
+}
+
 func TestParseStartupOptionsVersion(t *testing.T) {
 	for _, arg := range []string{"--version", "-version", "-v"} {
 		opts, err := parseStartupOptions([]string{arg})
@@ -90,7 +100,7 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("SESSION_PRE_START_COMMAND", "")
 	t.Setenv("LARK_MENTION_ENABLED", "")
 
-	cfg := loadConfig()
+	cfg := loadConfig(filepath.Join(t.TempDir(), "config.local.json"))
 	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 100 {
 		t.Fatalf("numeric defaults = %d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines)
 	}
@@ -106,6 +116,7 @@ func TestDefaultPathsUseStableUserDataDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("EASY_TERMINAL_HOME", "")
+	t.Setenv("EASY_TERMINAL_CONFIG_DIR", "")
 
 	if got := defaultConfigPath(); got != filepath.Join(home, ".easy_terminal", "conf", "config.local.json") {
 		t.Fatalf("default config path = %q", got)
@@ -124,8 +135,20 @@ func TestDefaultPathsUseStableUserDataDir(t *testing.T) {
 func TestDefaultPathsAllowHomeOverride(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("EASY_TERMINAL_HOME", dir)
+	t.Setenv("EASY_TERMINAL_CONFIG_DIR", "")
 	if got := defaultConfigPath(); got != filepath.Join(dir, "conf", "config.local.json") {
 		t.Fatalf("default config path with override = %q", got)
+	}
+}
+
+func TestDefaultConfigPathAllowsConfigDirOverride(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EASY_TERMINAL_CONFIG_DIR", dir)
+	if got := defaultConfigPath(); got != filepath.Join(dir, "config.local.json") {
+		t.Fatalf("default config path with config dir override = %q", got)
+	}
+	if got := configPathFromDir(filepath.Join(dir, "custom")); got != filepath.Join(dir, "custom", "config.local.json") {
+		t.Fatalf("config path from cli dir = %q", got)
 	}
 }
 

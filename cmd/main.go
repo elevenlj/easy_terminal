@@ -75,11 +75,11 @@ func run() error {
 		fmt.Printf("easy_terminal %s\n", version)
 		return nil
 	}
-	cfg := loadConfig()
+	configPath := configPathFromDir(opts.ConfigDir)
+	cfg := loadConfig(configPath)
 	if opts.Port != "" {
 		cfg.Port = opts.Port
 	}
-	configPath := defaultConfigPath()
 	dbPath := env("AGENT_MONITOR_DB", defaultDBPath())
 	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", defaultUploadsDir())
 	logDir := env("AGENT_MONITOR_LOG_DIR", defaultLogDir())
@@ -147,8 +147,9 @@ func run() error {
 }
 
 type startupOptions struct {
-	Port    string
-	Version bool
+	Port      string
+	ConfigDir string
+	Version   bool
 }
 
 func parseStartupOptions(args []string) (startupOptions, error) {
@@ -157,15 +158,17 @@ func parseStartupOptions(args []string) (startupOptions, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&opts.Port, "port", "", "HTTP listen port")
 	fs.StringVar(&opts.Port, "p", "", "HTTP listen port")
+	fs.StringVar(&opts.ConfigDir, "config-dir", "", "config file directory")
 	fs.BoolVar(&opts.Version, "version", false, "print version")
 	fs.BoolVar(&opts.Version, "v", false, "print version")
 	if err := fs.Parse(args); err != nil {
 		return startupOptions{}, err
 	}
+	opts.ConfigDir = strings.TrimSpace(opts.ConfigDir)
 	return opts, nil
 }
 
-func loadConfig() Config {
+func loadConfig(path string) Config {
 	cfg := Config{
 		Port:                            "8080",
 		LarkMentionEnabled:              true,
@@ -177,7 +180,7 @@ func loadConfig() Config {
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
 		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
 	}
-	if b, err := os.ReadFile(defaultConfigPath()); err == nil {
+	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
 	cfg.Port = env("PORT", cfg.Port)
@@ -213,7 +216,22 @@ func loadConfig() Config {
 }
 
 func defaultConfigPath() string {
-	return filepath.Join(defaultDataDir(), "conf", "config.local.json")
+	return filepath.Join(defaultConfigDir(), "config.local.json")
+}
+
+func configPathFromDir(dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return defaultConfigPath()
+	}
+	return filepath.Join(dir, "config.local.json")
+}
+
+func defaultConfigDir() string {
+	if dir := strings.TrimSpace(os.Getenv("EASY_TERMINAL_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(defaultDataDir(), "conf")
 }
 
 func defaultDBPath() string {
