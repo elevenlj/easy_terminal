@@ -8,6 +8,11 @@ import (
 	"github.com/creack/pty"
 )
 
+const (
+	defaultTerminalCols uint16 = 120
+	defaultTerminalRows uint16 = 36
+)
+
 type Terminal interface {
 	Read([]byte) (int, error)
 	Write([]byte) (int, error)
@@ -52,7 +57,7 @@ func (l ShellLauncher) Launch(ctx context.Context) (ProcessHandle, error) {
 	}
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = dir
-	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 60, Cols: 240})
+	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: defaultTerminalRows, Cols: defaultTerminalCols})
 	if err != nil {
 		return nil, err
 	}
