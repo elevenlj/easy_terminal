@@ -344,6 +344,15 @@ textarea {
   padding-bottom: 58px;
 }
 
+.composer-shortcut {
+  position: absolute;
+  left: 16px;
+  bottom: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+
 .composer button {
   position: absolute;
   right: 14px;
