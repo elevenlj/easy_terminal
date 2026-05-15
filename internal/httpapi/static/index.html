@@ -50,7 +50,7 @@
       <div class="onboarding-body">
         <div class="onboarding-kicker">首次使用</div>
         <h2 id="onboarding-title">选择默认会话 Agent</h2>
-        <p>发送“开始”时会进入默认会话。先选择默认会话使用的 Agent；也可以跳过，之后在配置页或会话预设命令里覆盖。</p>
+        <p>发送“/start”或“开始”时会进入默认会话。先选择默认会话使用的 Agent；也可以跳过，之后在配置页或会话预设命令里覆盖。</p>
         <label class="onboarding-session-name">
           <span>默认会话名</span>
           <input id="onboarding-default-session-name" placeholder="默认会话">
@@ -97,7 +97,7 @@
             <div class="agent-preset">
               <div>
                 <strong>默认会话 Agent</strong>
-                <p>选择后会更新 999999 号启动预设；发送“开始 会话名”会默认启动它。0 号表示仅进入目录。</p>
+                <p>选择后会更新 999999 号启动预设；发送“/start 会话名”或“开始 会话名”会默认启动它。0 号表示仅进入目录。</p>
               </div>
               <div class="agent-preset-controls">
                 <select id="cfg-agent-preset">
@@ -206,7 +206,7 @@
             <div class="name-preset-editor">
               <div>
                 <strong>会话名预设</strong>
-                <p>为不同会话名配置启动命令。每个会话名下面可以有多条命令，飞书发送“开始 会话名”时会按顺序执行。</p>
+                <p>为不同会话名配置启动命令。每个会话名下面可以有多条命令，飞书发送“/start 会话名”或“开始 会话名”时会按顺序执行。</p>
               </div>
               <div class="name-preset-form">
                 <label><span>会话名</span><input id="preset-session-name" placeholder="例如：默认会话"></label>
@@ -282,10 +282,10 @@
               <p>扫码创建或选择已有应用时，会打开带应用模板的飞书确认页，由飞书流程补齐基础消息、发消息、长连接事件和卡片回调配置。群里直接发消息需要额外开通“获取群组中所有消息（敏感权限）”。</p>
             </div>
             <div class="help-steps">
-              <p><strong>开始 会话名</strong>：创建会话；未命中会话名预设时，进入默认工作目录并启动“默认会话 Agent”。</p>
-              <p><strong>开始 会话名 0</strong>：创建会话，只进入默认工作目录，不启动 Agent。</p>
-              <p><strong>开始 会话名 1</strong>：创建会话，并执行会话名后面数字对应的启动预设。</p>
-              <p><strong>开始 会话名 999999</strong>：创建会话，并显式启动“默认会话 Agent”。</p>
+              <p><strong>/start 会话名 / 开始 会话名</strong>：创建会话；未命中会话名预设时，进入默认工作目录并启动“默认会话 Agent”。</p>
+              <p><strong>/start 会话名 0 / 开始 会话名 0</strong>：创建会话，只进入默认工作目录，不启动 Agent。</p>
+              <p><strong>/start 会话名 1 / 开始 会话名 1</strong>：创建会话，并执行会话名后面数字对应的启动预设。</p>
+              <p><strong>/start 会话名 999999 / 开始 会话名 999999</strong>：创建会话，并显式启动“默认会话 Agent”。</p>
               <p><strong>直接在会话群聊发消息</strong>：消息会路由到绑定的终端会话。</p>
               <p><strong>回复等待通知</strong>：如果没有独立群聊，也可以通过回复通知继续对应会话。</p>
               <p><strong>/c</strong>：不写入终端，直接在飞书里返回当前轮内容。</p>
@@ -317,7 +317,7 @@
               <div><strong>测试飞书配置</strong><span>保存前可发送测试卡片，并检查“获取群组中所有消息（敏感权限）”是否真实生效。</span></div>
               <div><strong>App ID / App Secret</strong><span>飞书应用凭证，用于接收事件、发通知、创建群聊。</span></div>
               <div><strong>通知接收 ID</strong><span>接收主通知的用户 open_id。</span></div>
-              <div><strong>默认会话名</strong><span>发送“开始”但没有写会话名时使用，默认是“默认会话”。</span></div>
+              <div><strong>默认会话名</strong><span>发送“/start”或“开始”但没有写会话名时使用，默认是“默认会话”。</span></div>
               <div><strong>群聊前缀</strong><span>新建飞书会话群的名称前缀，默认是“ET · ”。</span></div>
               <div><strong>快速等待(ms)</strong><span>普通输出稳定后进入 waiting 的时间，默认 1000。</span></div>
               <div><strong>保守等待(ms)</strong><span>复杂交互场景进入 waiting 的时间，默认 3000。</span></div>

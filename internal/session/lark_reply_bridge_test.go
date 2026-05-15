@@ -1139,6 +1139,34 @@ func TestLarkReplyBridgeStartWithoutCodesUsesDefaultAgentPreset(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeSlashStartWithoutCodesUsesDefaultAgentPreset(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"999999": {Commands: []string{"codex --dangerously-bypass-approvals-and-sandbox"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-slash-start-no-code", "", "", "text", `{"text":"/start 测试"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{
+		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"codex --dangerously-bypass-approvals-and-sandbox\r",
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("slash start default workspace writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("slash start default workspace write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
 func TestLarkReplyBridgeStartCodeZeroOnlyEntersWorkspace(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

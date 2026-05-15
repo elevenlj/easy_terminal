@@ -804,7 +804,7 @@ func (b *LarkReplyBridge) bindSessionToLarkChat(ctx context.Context, sess Sessio
 
 func (b *LarkReplyBridge) parseLarkStartCommand(text string) (string, string, bool) {
 	text = strings.TrimSpace(text)
-	prefixes := []string{"/new", "新会话", "开始"}
+	prefixes := []string{"/start", "/new", "新会话", "开始"}
 	for _, prefix := range prefixes {
 		if text != prefix && !strings.HasPrefix(text, prefix+" ") {
 			continue
