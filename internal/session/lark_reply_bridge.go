@@ -1424,6 +1424,7 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 		enterLen = len(structuredInputEnterSequence)
 	}
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d", sessionID, len(text), pressEnter, enterLen)
+	rt.PrepareInputSnapshotBaseline()
 	rt.MarkStructuredInputActivity(text)
 	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err

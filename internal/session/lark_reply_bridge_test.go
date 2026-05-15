@@ -502,6 +502,89 @@ func TestSubmitStructuredInputClearsPreviousNotificationBeforeEcho(t *testing.T)
 	}
 }
 
+func TestSubmitStructuredInputRefreshesBaselineBeforeWrite(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	manager := NewManager(nil, nil)
+	rt := &RuntimeSession{
+		manager:                manager,
+		session:                Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true},
+		visibleSnapshot:        "old cached snapshot",
+		visibleSnapshotVersion: 1,
+		subscribers:            make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	ch, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+	go func() {
+		for i := 0; i < 2; i++ {
+			if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
+				rt.SetVisibleSnapshotWithSource("fresh baseline", "browser:buffer")
+			}
+		}
+	}()
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	term.onWrite = func(data string) {
+		if data != "new input" {
+			return
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		if rt.snapshotAtRoundStart != "fresh baseline" {
+			t.Fatalf("input baseline = %q, want fresh baseline", rt.snapshotAtRoundStart)
+		}
+	}
+	rt.terminal = term
+
+	if err := SubmitStructuredInput(rt, "new input"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSubmitStructuredInputFreshBaselineKeepsPreviousRoundsOutOfDiff(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	manager := NewManager(nil, nil)
+	rt := &RuntimeSession{
+		manager:                manager,
+		session:                Session{ID: "sess-1", Name: "TUI", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		terminal:               &recordingTerminal{readCh: make(chan []byte)},
+		visibleSnapshot:        "stale cached screen",
+		visibleSnapshotVersion: 1,
+		subscribers:            make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	ch, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+	go func() {
+		for i := 0; i < 2; i++ {
+			if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
+				rt.SetVisibleSnapshotWithSource("previous question\nprevious answer", "browser:buffer")
+			}
+		}
+	}()
+
+	if err := SubmitStructuredInput(rt, "next question"); err != nil {
+		t.Fatal(err)
+	}
+	rt.SetVisibleSnapshotWithSource("previous question\nprevious answer\n› next question\nnew answer", "browser:buffer")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	n, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected notification candidate, reason=%s", reason)
+	}
+	if strings.Contains(n.Content, "previous answer") {
+		t.Fatalf("current round diff should not include previous round, got %q", n.Content)
+	}
+	if !strings.Contains(n.Content, "new answer") {
+		t.Fatalf("current round diff should include new answer, got %q", n.Content)
+	}
+}
+
 func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -878,7 +961,7 @@ func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
 		t.Fatalf("unexpected response: %#v", resp)
 	}
 	notes := waitForNotifierNotes(t, notifier, 1)
-	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "hello\n$" {
 		t.Fatalf("manual refresh should patch clicked card, got %#v", notes)
 	}
 }
@@ -1482,7 +1565,7 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	if len(replies) != 1 {
 		t.Fatalf("expected one lark reply, got %#v", replies)
 	}
-	if !strings.Contains(replies[0], "> 今天天气怎么样") || !strings.Contains(replies[0], "你想查哪个城市") {
+	if strings.Contains(replies[0], "> 今天天气怎么样") || !strings.Contains(replies[0], "你想查哪个城市") {
 		t.Fatalf("reply did not include current round content: %#v", replies)
 	}
 }

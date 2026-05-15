@@ -82,9 +82,6 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	if mention {
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + receiveID + "></at>"})
 	}
-	if strings.EqualFold(strings.TrimSpace(note.SnapshotSource), "buffer") {
-		elements = append(elements, map[string]any{"tag": "markdown", "content": `⚠️ 本次终端快照使用 buffer 兜底，可能与浏览器可见终端存在细微差异。`})
-	}
 	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
 	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)

@@ -448,6 +448,10 @@ assert.ok(app, "app test API is exposed");
 assert.equal(app.standardTerminal.cols, 120);
 assert.equal(app.standardTerminal.rows, 36);
 assert.equal(app.standardTerminal.fontFamily, "Menlo, Consolas, monospace");
+assert.equal(app.terminalWebSocketURL("sess-1"), "ws://localhost:8080/api/sessions/sess-1/ws");
+context.location.search = "?session=sess-1&headless=1";
+assert.equal(app.terminalWebSocketURL("sess-1"), "ws://localhost:8080/api/sessions/sess-1/ws?headless=1");
+context.location.search = "";
 assert.equal(app.standardTerminal.fontSize, 13);
 assert.equal(app.standardTerminal.lineHeight, 1.2);
 
@@ -493,7 +497,15 @@ app.state.term = {
   },
 };
 app.resizeTerm();
-assert.deepEqual(sentMessages.pop(), { type: "resize", cols: 120, rows: 36 });
+assert.deepEqual(sentMessages.pop(), { type: "resize", cols: 160, rows: 48 });
+app.state.fit = {
+  fit() {
+    app.state.term.resize(132, 40);
+  },
+};
+app.resizeTerm();
+assert.deepEqual(sentMessages.pop(), { type: "resize", cols: 132, rows: 40 });
+app.state.fit = null;
 
 elements["composer-input"].value = "echo button";
 elements.composer.requestSubmit();
@@ -573,6 +585,7 @@ assert.deepEqual(sentMessages.pop(), {
   source: "dom",
 });
 terminalDOMRows = [];
+sentMessages.length = 0;
 
 elements["help-open"].onclick();
 assert.equal(elements["help-dialog"].open, true, "help dialog should open from topbar button");

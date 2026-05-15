@@ -50,6 +50,12 @@ func TestParseStartupOptionsConfigDir(t *testing.T) {
 	}
 }
 
+func TestParseStartupOptionsRejectsPositionalConfigDir(t *testing.T) {
+	if _, err := parseStartupOptions([]string{"/tmp/easy-config"}); err == nil {
+		t.Fatal("expected positional config dir to fail")
+	}
+}
+
 func TestParseStartupOptionsVersion(t *testing.T) {
 	for _, arg := range []string{"--version", "-version", "-v"} {
 		opts, err := parseStartupOptions([]string{arg})
@@ -149,6 +155,46 @@ func TestDefaultConfigPathAllowsConfigDirOverride(t *testing.T) {
 	}
 	if got := configPathFromDir(filepath.Join(dir, "custom")); got != filepath.Join(dir, "custom", "config.local.json") {
 		t.Fatalf("config path from cli dir = %q", got)
+	}
+}
+
+func TestEnsureConfigFileCreatesMissingDirectoryAndConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "conf", "config.local.json")
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected config file to be created: %v", err)
+	}
+	cfg := loadConfig(path)
+	if cfg.LarkDefaultSessionName != defaultLarkDefaultSessionName {
+		t.Fatalf("generated config default name = %q", cfg.LarkDefaultSessionName)
+	}
+}
+
+func TestConfigDirMissingFileDoesNotFallBackToDefaultConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("EASY_TERMINAL_HOME", "")
+	t.Setenv("EASY_TERMINAL_CONFIG_DIR", "")
+	if err := writeConfigFile(defaultConfigPath(), Config{
+		Port:                            "8080",
+		LarkDefaultSessionName:          "旧默认配置",
+		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
+		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
+		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
+		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	path := configPathFromDir(filepath.Join(t.TempDir(), "new-conf"))
+	if err := ensureConfigFile(path); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(path)
+	if cfg.LarkDefaultSessionName == "旧默认配置" {
+		t.Fatal("custom config dir should not fall back to the default config file")
 	}
 }
 

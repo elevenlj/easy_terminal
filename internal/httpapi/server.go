@@ -161,6 +161,25 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"content": string(out)}, nil)
+	case "current-round":
+		if os.Getenv("EASY_TERMINAL_E2E_DEBUG") != "1" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		rt, ok := s.manager.GetRuntime(id)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		content := rt.CachedCurrentRoundContent()
+		if r.URL.Query().Get("fresh") != "0" {
+			content = rt.CurrentRoundContent()
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"content": content}, nil)
 	case "uploads":
 		s.handleUpload(w, r, id)
 	case "ws":

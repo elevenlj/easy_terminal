@@ -28,7 +28,6 @@ func TestPickNotifyContentIgnoresRoundStartAndUsesVisibleTail(t *testing.T) {
 	}, "\n")
 	got := PickNotifyContent(visible, before, []byte("current answer1.first2.second"), "current question")
 	want := strings.Join([]string{
-		"> current question",
 		"current answer",
 		"1. first",
 		"2. second",
@@ -75,6 +74,53 @@ func TestPickNotifyContentDiffsAfterPreviousTailAnchor(t *testing.T) {
 	want := "new line 1\n\nnew line 2"
 	if got != want {
 		t.Fatalf("content should be diffed after previous tail anchor:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesInputAnchorBeforeSnapshotDiff(t *testing.T) {
+	previous := strings.Join([]string{
+		"› 上海呢",
+		"• 上海现在多云。",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› 上海呢",
+		"• 上海现在多云，晚间有小雨。",
+		"› 深圳呢",
+		"• 深圳现在阴天。",
+	}, "\n")
+	got := PickNotifyContent(visible, previous, nil, "深圳呢")
+	want := "• 深圳现在阴天。"
+	if got != want {
+		t.Fatalf("input anchor should prevent previous rounds leaking into notification:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesLatestRepeatedInputAnchor(t *testing.T) {
+	visible := strings.Join([]string{
+		"› 北京呢",
+		"• 北京旧结果。",
+		"› 北京呢",
+		"• 北京新结果。",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, "北京呢")
+	want := "• 北京新结果。"
+	if got != want {
+		t.Fatalf("latest repeated input should be used as anchor:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
+	input := "第一行\n第二行\n第三行"
+	visible := strings.Join([]string{
+		"› 第一行",
+		"第二行",
+		"第三行",
+		"• 多行输入后的回复。",
+	}, "\n")
+	got := PickNotifyContent(visible, "", nil, input)
+	want := "• 多行输入后的回复。"
+	if got != want {
+		t.Fatalf("multiline input anchor should be skipped from notification:\n%q\nwant:\n%q", got, want)
 	}
 }
 

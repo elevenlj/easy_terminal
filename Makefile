@@ -1,4 +1,4 @@
-.PHONY: build test test-browser test-all run tidy
+.PHONY: build test test-browser test-codex-tui test-all run tidy
 
 VERSION := $(shell node -p "require('./npm/package.json').version" 2>/dev/null || echo dev)
 
@@ -10,6 +10,9 @@ test:
 
 test-browser: build
 	node tests/browser_e2e.mjs
+
+test-codex-tui: build
+	node tests/codex_tui_e2e.mjs
 
 test-all: test test-browser
 

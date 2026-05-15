@@ -215,16 +215,16 @@ func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot str
 	if visibleSnapshot == "" {
 		return "", false
 	}
+	if strings.TrimSpace(lastInputText) != "" {
+		if body := visibleTextFromLastInput(visibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
+			return trimVisibleText(body), true
+		}
+	}
 	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok {
 		return trimVisibleText(body), true
 	}
 	if body, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok {
 		return trimVisibleText(body), true
-	}
-	if strings.TrimSpace(lastInputText) != "" {
-		if body := visibleTextFromLastInput(visibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
-			return trimVisibleText(body), true
-		}
 	}
 	return visibleSnapshot, true
 }
@@ -401,19 +401,30 @@ func normalizeSnapshotText(text string) string {
 func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) string {
 	lines := strings.Split(visibleSnapshot, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		if isStructuredInputAnchorLine(lines[i], lastInputText) {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
-	}
-	for i := len(lines) - 1; i >= 0; i-- {
-		if isInputEchoLine(lines[i], lastInputText) {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
-		if isWrappedInputEchoAt(lines, i, lastInputText) {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
+		if end, ok := inputAnchorEndLine(lines, i, lastInputText); ok {
+			if end+1 >= len(lines) {
+				return ""
+			}
+			return strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
 		}
 	}
 	return ""
+}
+
+func inputAnchorEndLine(lines []string, i int, lastInputText string) (int, bool) {
+	if strings.TrimSpace(lastInputText) == "" {
+		return i, false
+	}
+	if isStructuredInputAnchorLine(lines[i], lastInputText) {
+		return i, true
+	}
+	if isInputEchoLine(lines[i], lastInputText) {
+		return i, true
+	}
+	if end, ok := wrappedInputEchoEndAt(lines, i, lastInputText); ok {
+		return end, true
+	}
+	return i, false
 }
 
 func visibleTextFromLastAnyInput(visibleSnapshot string) string {
@@ -430,14 +441,19 @@ func visibleTextFromLastAnyInput(visibleSnapshot string) string {
 }
 
 func isWrappedInputEchoAt(lines []string, i int, lastInputText string) bool {
+	_, ok := wrappedInputEchoEndAt(lines, i, lastInputText)
+	return ok
+}
+
+func wrappedInputEchoEndAt(lines []string, i int, lastInputText string) (int, bool) {
 	text, ok := inputEchoText(lines[i])
 	if !ok {
-		return false
+		return i, false
 	}
 	target := compactAnchorText(lastInputText)
 	current := compactAnchorText(text)
 	if target == "" || current == "" || !strings.HasPrefix(target, current) {
-		return false
+		return i, false
 	}
 	for j := i + 1; j < len(lines) && j <= i+6; j++ {
 		trimmed := strings.TrimSpace(lines[j])
@@ -445,20 +461,20 @@ func isWrappedInputEchoAt(lines []string, i int, lastInputText string) bool {
 			continue
 		}
 		if _, ok := inputEchoText(trimmed); ok {
-			return false
+			return i, false
 		}
 		if strings.HasPrefix(trimmed, "• ") || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
-			return false
+			return i, false
 		}
 		current += compactAnchorText(trimmed)
-		if current == target || strings.HasPrefix(current, target) {
-			return true
+		if current == target {
+			return j, true
 		}
 		if !strings.HasPrefix(target, current) {
-			return false
+			return i, false
 		}
 	}
-	return false
+	return i, false
 }
 
 func compactAnchorText(text string) string {

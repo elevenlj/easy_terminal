@@ -76,6 +76,9 @@ func run() error {
 		return nil
 	}
 	configPath := configPathFromDir(opts.ConfigDir)
+	if err := ensureConfigFile(configPath); err != nil {
+		return err
+	}
 	cfg := loadConfig(configPath)
 	if opts.Port != "" {
 		cfg.Port = opts.Port
@@ -119,8 +122,10 @@ func run() error {
 		),
 		session.WithAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs)*time.Millisecond),
 		session.WithBrowserNeeded(headless.Ensure),
+		session.WithBrowserActive(headless.Stop),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 		session.WithSessionEnded(func(sessionID string) {
+			headless.Stop(sessionID)
 			_ = os.RemoveAll(filepath.Join(uploadsDir, sessionID))
 		}),
 	)
@@ -165,21 +170,14 @@ func parseStartupOptions(args []string) (startupOptions, error) {
 		return startupOptions{}, err
 	}
 	opts.ConfigDir = strings.TrimSpace(opts.ConfigDir)
+	if fs.NArg() > 0 {
+		return startupOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
 	return opts, nil
 }
 
 func loadConfig(path string) Config {
-	cfg := Config{
-		Port:                            "8080",
-		LarkMentionEnabled:              true,
-		LarkDefaultSessionName:          defaultLarkDefaultSessionName,
-		LarkSessionChatPrefix:           defaultLarkSessionChatPrefix,
-		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
-		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
-		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
-		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
-		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
-	}
+	cfg := defaultConfig()
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
@@ -213,6 +211,29 @@ func loadConfig(path string) Config {
 		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
 	}
 	return cfg
+}
+
+func defaultConfig() Config {
+	return Config{
+		Port:                            "8080",
+		LarkMentionEnabled:              true,
+		LarkDefaultSessionName:          defaultLarkDefaultSessionName,
+		LarkSessionChatPrefix:           defaultLarkSessionChatPrefix,
+		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
+		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
+		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
+		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
+	}
+}
+
+func ensureConfigFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return writeConfigFile(path, defaultConfig())
 }
 
 func defaultConfigPath() string {
@@ -413,13 +434,8 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 	}
 	m.mu.Lock()
 	if sess := m.sessions[sessionID]; sess != nil && sess.cmd != nil && sess.cmd.ProcessState == nil {
-		if time.Since(sess.started) < 15*time.Second {
-			m.mu.Unlock()
-			return
-		}
-		log.Printf("headless browser appears stale; restarting for terminal snapshots (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
-		_ = sess.cmd.Process.Kill()
-		delete(m.sessions, sessionID)
+		m.mu.Unlock()
+		return
 	}
 	m.mu.Unlock()
 
@@ -433,7 +449,7 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 		log.Printf("headless browser profile setup failed: %v", err)
 		return
 	}
-	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID)
+	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID) + "&headless=1"
 	cmd := exec.Command(chrome, headlessChromeArgs(profile, pageURL)...)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
@@ -455,6 +471,23 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 		m.mu.Unlock()
 		_ = os.RemoveAll(profile)
 	}()
+}
+
+func (m *headlessBrowserManager) Stop(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	sess := m.sessions[sessionID]
+	if sess != nil {
+		delete(m.sessions, sessionID)
+	}
+	m.mu.Unlock()
+	if sess == nil || sess.cmd == nil || sess.cmd.Process == nil || sess.cmd.ProcessState != nil {
+		return
+	}
+	log.Printf("headless browser stopped because real browser is active (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
+	_ = sess.cmd.Process.Kill()
 }
 
 func headlessChromeArgs(profile, pageURL string) []string {

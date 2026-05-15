@@ -12,8 +12,9 @@ import (
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 type wsBridge struct {
-	rt   *session.RuntimeSession
-	conn *websocket.Conn
+	rt       *session.RuntimeSession
+	conn     *websocket.Conn
+	headless bool
 }
 
 type clientMessage struct {
@@ -29,9 +30,10 @@ func serveWS(w http.ResponseWriter, r *http.Request, rt *session.RuntimeSession)
 	if err != nil {
 		return
 	}
-	b := &wsBridge{rt: rt, conn: conn}
+	headless := r.URL.Query().Get("headless") == "1"
+	b := &wsBridge{rt: rt, conn: conn, headless: headless}
 	_ = conn.WriteMessage(websocket.BinaryMessage, rt.OutputSnapshot())
-	ch, cancel := rt.Subscribe()
+	ch, cancel := rt.SubscribeWithMode(headless)
 	defer cancel()
 	defer conn.Close()
 	go b.readClient()
@@ -71,9 +73,16 @@ func (b *wsBridge) readClient() {
 		case "resize":
 			_ = b.rt.Resize(msg.Cols, msg.Rows)
 		case "snapshot":
-			b.rt.SetVisibleSnapshotWithSource(msg.Data, msg.Source)
+			b.rt.SetVisibleSnapshotWithSource(msg.Data, b.snapshotSource(msg.Source))
 		}
 	}
+}
+
+func (b *wsBridge) snapshotSource(source string) string {
+	if b.headless {
+		return "headless:" + source
+	}
+	return "browser:" + source
 }
 
 func filterTerminalResponses(data []byte) []byte {

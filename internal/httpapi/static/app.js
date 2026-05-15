@@ -12,6 +12,8 @@ const state = {
   startupJSONDirty: false,
   pendingTerminalWrite: Promise.resolve(),
   snapshotRequestSeq: 0,
+  lastSentTerminalSize: null,
+  terminalResizeObserver: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -110,7 +112,9 @@ function currentSession() {
 
 function initTerminal() {
   if (state.term) state.term.dispose();
+  state.terminalResizeObserver?.disconnect?.();
   state.pendingTerminalWrite = Promise.resolve();
+  state.lastSentTerminalSize = null;
   state.term = new Terminal({
     cols: STANDARD_TERMINAL_COLS,
     rows: STANDARD_TERMINAL_ROWS,
@@ -122,16 +126,18 @@ function initTerminal() {
     letterSpacing: 0,
     theme: { background: "#12110f", foreground: "#f4f1e8", cursor: "#f4f1e8" },
   });
-  state.fit = null;
+  state.fit = createFitAddon();
+  if (state.fit) state.term.loadAddon(state.fit);
   state.term.open($("terminal"));
-  enforceStandardTerminalSize();
-  requestAnimationFrame(() => enforceStandardTerminalSize());
-  setTimeout(() => enforceStandardTerminalSize(), 120);
+  resizeTerm();
+  requestAnimationFrame(() => resizeTerm());
+  setTimeout(() => resizeTerm(), 120);
   state.term.onData((data) => {
     sendWS({ type: "input", data });
   });
   window.removeEventListener("resize", resizeTerm);
   window.addEventListener("resize", resizeTerm);
+  observeTerminalSize();
 }
 
 function selectSession(id) {
@@ -152,8 +158,7 @@ function selectSession(id) {
 function connectWS(id) {
   if (state.socket) state.socket.close();
   initTerminal();
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/api/sessions/${id}/ws`);
+  const ws = new WebSocket(terminalWebSocketURL(id));
   state.socket = ws;
   ws.binaryType = "arraybuffer";
   ws.onopen = () => resizeTerm();
@@ -173,24 +178,79 @@ function connectWS(id) {
   ws.onclose = () => setTimeout(loadSessions, 300);
 }
 
+function terminalWebSocketURL(id) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const params = new URLSearchParams(location.search || "");
+  const suffix = params.get("headless") === "1" ? "?headless=1" : "";
+  return `${proto}://${location.host}/api/sessions/${id}/ws${suffix}`;
+}
+
 function sendWS(obj) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
     state.socket.send(JSON.stringify(obj));
+    return true;
   }
+  return false;
 }
 
 function resizeTerm() {
   if (!state.term) return;
-  enforceStandardTerminalSize();
-  if (state.term.cols >= MIN_TERMINAL_COLS && state.term.rows >= MIN_TERMINAL_ROWS) {
-    sendWS({ type: "resize", cols: state.term.cols, rows: state.term.rows });
+  const size = fitTerminalToContainer();
+  if (!size) return;
+  sendTerminalResize(size.cols, size.rows);
+}
+
+function observeTerminalSize() {
+  state.terminalResizeObserver = null;
+  if (typeof ResizeObserver === "undefined") return;
+  try {
+    const target = $("terminal")?.parentElement || $("terminal");
+    if (!target) return;
+    state.terminalResizeObserver = new ResizeObserver(() => resizeTerm());
+    state.terminalResizeObserver.observe(target);
+  } catch {
+    state.terminalResizeObserver = null;
   }
 }
 
-function enforceStandardTerminalSize() {
-  if (!state.term || typeof state.term.resize !== "function") return;
-  if (state.term.cols !== STANDARD_TERMINAL_COLS || state.term.rows !== STANDARD_TERMINAL_ROWS) {
+function createFitAddon() {
+  try {
+    if (typeof FitAddon === "undefined" || !FitAddon?.FitAddon) return null;
+    return new FitAddon.FitAddon();
+  } catch {
+    return null;
+  }
+}
+
+function fitTerminalToContainer() {
+  if (!state.term) return null;
+  const before = {
+    cols: Math.floor(Number(state.term.cols)),
+    rows: Math.floor(Number(state.term.rows)),
+  };
+  try {
+    state.fit?.fit?.();
+  } catch {}
+  if ((!state.term.cols || !state.term.rows) && typeof state.term.resize === "function") {
     state.term.resize(STANDARD_TERMINAL_COLS, STANDARD_TERMINAL_ROWS);
+  }
+  const cols = Math.floor(Number(state.term.cols));
+  const rows = Math.floor(Number(state.term.rows));
+  if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) {
+    const fallbackCols = before.cols >= MIN_TERMINAL_COLS ? before.cols : STANDARD_TERMINAL_COLS;
+    const fallbackRows = before.rows >= MIN_TERMINAL_ROWS ? before.rows : STANDARD_TERMINAL_ROWS;
+    state.term.resize?.(fallbackCols, fallbackRows);
+    return { cols: fallbackCols, rows: fallbackRows };
+  }
+  return { cols, rows };
+}
+
+function sendTerminalResize(cols, rows) {
+  if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) return;
+  const last = state.lastSentTerminalSize;
+  if (last && last.cols === cols && last.rows === rows) return;
+  if (sendWS({ type: "resize", cols, rows })) {
+    state.lastSentTerminalSize = { cols, rows };
   }
 }
 
@@ -354,7 +414,7 @@ async function syncSnapshotNow() {
   await state.pendingTerminalWrite.catch(() => {});
   let snapshot = "";
   for (let i = 0; i < 5; i++) {
-    enforceStandardTerminalSize();
+    resizeTerm();
     await waitForNextPaint();
     await waitForNextPaint();
     const first = terminalVisibleSnapshotWithSource();
@@ -1533,6 +1593,7 @@ if (typeof window !== "undefined") {
     visibleSessions,
     syncSnapshotNow,
     terminalVisibleSnapshot,
+    terminalWebSocketURL,
     resizeTerm,
     standardTerminal: {
       cols: STANDARD_TERMINAL_COLS,

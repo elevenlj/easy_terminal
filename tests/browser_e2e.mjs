@@ -9,8 +9,8 @@ import { spawn } from "node:child_process";
 
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const bin = path.join(root, "easy_terminal");
-const port = 18080;
-const chromePort = 19223;
+const port = process.env.E2E_PORT ? Number(process.env.E2E_PORT) : await freePort();
+const chromePort = process.env.E2E_CHROME_PORT ? Number(process.env.E2E_CHROME_PORT) : await freePort();
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "easy-terminal-e2e-"));
 
 let server;
@@ -60,7 +60,8 @@ try {
   await waitFor(() => evalExpr("document.querySelectorAll('.session').length === 1"));
   await waitFor(() => evalExpr("document.querySelector('.session').className.includes('session-running')"));
   await waitFor(() => evalExpr("window.easyTerminalApp.state.active && window.easyTerminalApp.state.socket && window.easyTerminalApp.state.socket.readyState === WebSocket.OPEN"));
-  await waitFor(() => evalExpr("window.easyTerminalApp.state.term.cols === 120 && window.easyTerminalApp.state.term.rows === 36"));
+  const browserTerminalSize = await waitForTerminalSize();
+  assert.ok(browserTerminalSize.cols >= 80 && browserTerminalSize.rows >= 20, "browser should fit terminal to the visible shell");
   assert.equal(await evalExpr("window.easyTerminalApp.standardTerminal.cols"), 120, "browser should use the standard terminal width");
   assert.equal(await evalExpr("window.easyTerminalApp.standardTerminal.rows"), 36, "browser should use the standard terminal height");
   await waitFor(() => fetchJSON(`http://localhost:${port}/api/sessions`).then((sessions) => sessions[0]?.status === "waiting"), 7000);
@@ -69,6 +70,10 @@ try {
   await clickNotify();
   const notifyResponse = await fetchJSON(`http://localhost:${port}/api/sessions`);
   assert.equal(notifyResponse[0].notify_on_waiting, true, "notification toggle should PATCH notify_on_waiting=true");
+
+  await fillComposer("stty size");
+  await click("document.querySelector('#composer button').click()");
+  await waitForOutput(`${browserTerminalSize.rows} ${browserTerminalSize.cols}`);
 
   await fillComposer("echo BROWSER_BUTTON_E2E");
   await click("document.querySelector('#composer button').click()");
@@ -103,6 +108,8 @@ try {
   await keydownComposer({ key: "Enter", metaKey: true, ctrlKey: false });
   await waitForOutput("BROWSER_CMD_ENTER_E2E");
 
+  await runTUILikeSnapshotE2E();
+
   await pasteImageIntoTerminal();
   await waitForOutput("/data/uploads/");
   await waitForOutput(".png");
@@ -122,8 +129,8 @@ try {
   console.log("browser e2e ok");
 } finally {
   await cdp?.close().catch(() => {});
-  chrome?.kill("SIGTERM");
-  server?.kill("SIGTERM");
+  await terminateProcess(chrome);
+  await terminateProcess(server);
   await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 }
 }
@@ -163,6 +170,56 @@ async function keydownComposer(event) {
     }));
     true
   `);
+}
+
+async function runTUILikeSnapshotE2E() {
+  const screen1 = [
+    "\x1b[2J\x1b[3J\x1b[H",
+    "Codex Mock TUI\n",
+    "• Working (1s • esc to interrupt)\n",
+  ].join("");
+  const screen2 = [
+    "\x1b[2J\x1b[3J\x1b[H",
+    "Select Model and Effort\n",
+    "Access legacy models by running codex -m <model_name> or in your config.toml\n",
+    "› 1. gpt-5.5 (current)   Frontier model for complex coding, research, and real-world work.\n",
+    "  2. gpt-5.4             Strong model for everyday coding.\n",
+    "  3. gpt-5.4-mini        Small, fast, and cost-efficient model for simpler coding tasks.\n",
+    "Press enter to confirm or esc to go back\n",
+    "TUI_FINAL_READY\n",
+  ].join("");
+  const script = [
+    `process.stdout.write(${JSON.stringify(screen1)})`,
+    `setTimeout(() => process.stdout.write(${JSON.stringify(screen2)}), 120)`,
+  ].join("; ");
+  await fillComposer(`node -e ${shellSingleQuote(script)}`);
+  await click("document.querySelector('#composer button').click()");
+  await waitForOutput("TUI_FINAL_READY");
+  const snapshot = await waitForTerminalSnapshot("TUI_FINAL_READY");
+  assertVisibleLinesInOrder(snapshot, [
+    "Select Model and Effort",
+    "Access legacy models by running codex -m <model_name> or in your config.toml",
+    "› 1. gpt-5.5 (current)   Frontier model for complex coding, research, and real-world work.",
+    "  2. gpt-5.4             Strong model for everyday coding.",
+    "  3. gpt-5.4-mini        Small, fast, and cost-efficient model for simpler coding tasks.",
+    "Press enter to confirm or esc to go back",
+    "TUI_FINAL_READY",
+  ]);
+  assert.equal(snapshot.includes("Working (1s"), false, "TUI snapshot should use the final repaint, not stale transient text");
+}
+
+function shellSingleQuote(text) {
+  return "'" + String(text).replace(/'/g, "'\\''") + "'";
+}
+
+function assertVisibleLinesInOrder(snapshot, expectedLines) {
+  const lines = snapshot.split(/\r?\n/).map((line) => line.trimEnd());
+  let cursor = 0;
+  for (const expected of expectedLines) {
+    const index = lines.findIndex((line, i) => i >= cursor && line === expected);
+    assert.notEqual(index, -1, `terminal snapshot should contain visual line: ${expected}`);
+    cursor = index + 1;
+  }
 }
 
 async function pasteImageIntoTerminal() {
@@ -209,6 +266,15 @@ async function waitForTerminalSnapshot(text) {
   return snapshot;
 }
 
+async function waitForTerminalSize() {
+  let size = null;
+  await waitFor(async () => {
+    size = await evalExpr("({ cols: window.easyTerminalApp.state.term?.cols || 0, rows: window.easyTerminalApp.state.term?.rows || 0 })");
+    return size.cols >= 80 && size.rows >= 20;
+  }, 8000);
+  return size;
+}
+
 async function openQuickDialogAndAdd(text) {
   await click("document.querySelector('.add-quick').click()");
   await waitFor(() => evalExpr("document.querySelector('#quick-dialog').open === true"));
@@ -253,6 +319,18 @@ async function fetchJSON(url, options) {
   return res.json();
 }
 
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address();
+      const portNumber = typeof address === "object" && address ? address.port : 0;
+      srv.close(() => resolve(portNumber));
+    });
+  });
+}
+
 async function waitForHTTP(url, timeoutMs = 10000) {
   await waitFor(async () => {
     try {
@@ -284,6 +362,36 @@ function pipeLogs(proc, name) {
   });
   proc.stderr?.on("data", (chunk) => {
     if (process.env.E2E_VERBOSE) process.stderr.write(`[${name}] ${chunk}`);
+  });
+}
+
+async function terminateProcess(proc) {
+  if (!proc) return;
+  if (proc.exitCode === null && proc.signalCode === null) {
+    proc.kill("SIGTERM");
+    if (!(await waitForProcessExit(proc, 3000))) {
+      proc.kill("SIGKILL");
+      await waitForProcessExit(proc, 3000);
+    }
+  }
+  proc.stdout?.destroy();
+  proc.stderr?.destroy();
+}
+
+function waitForProcessExit(proc, timeoutMs) {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      proc.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    proc.once("exit", onExit);
   });
 }
 
@@ -374,6 +482,7 @@ class CDPClient {
 
   async close() {
     this.socket.end();
+    this.socket.destroy();
   }
 }
 

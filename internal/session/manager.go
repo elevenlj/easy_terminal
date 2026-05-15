@@ -26,6 +26,7 @@ const (
 	defaultNotifyRetryDelay              = time.Second
 	defaultNotifySnapshotTimeout         = 1200 * time.Millisecond
 	defaultNotifySnapshotDeadline        = 2500 * time.Millisecond
+	defaultInputBaselineSnapshotDeadline = 2500 * time.Millisecond
 	defaultStartupPresetSettleDelay      = 2 * time.Second
 )
 
@@ -65,6 +66,7 @@ type Manager struct {
 	preStartCommand     string
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
+	onBrowserActive     func(string)
 	onNotificationSent  func(string)
 	onSessionEnded      func(string)
 }
@@ -131,6 +133,10 @@ func WithBrowserNeeded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onBrowserNeeded = fn }
 }
 
+func WithBrowserActive(fn func(string)) ManagerOption {
+	return func(m *Manager) { m.onBrowserActive = fn }
+}
+
 func WithSessionEnded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onSessionEnded = fn }
 }
@@ -178,6 +184,13 @@ func (m *Manager) EnsureBrowser(sessionID string) {
 		return
 	}
 	go m.onBrowserNeeded(sessionID)
+}
+
+func (m *Manager) BrowserActive(sessionID string) {
+	if m.onBrowserActive == nil || sessionID == "" {
+		return
+	}
+	go m.onBrowserActive(sessionID)
 }
 
 func (m *Manager) SetNotificationSentHook(fn func(string)) {
@@ -228,7 +241,7 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 		session:     sess,
 		terminal:    handle.Terminal(),
 		process:     handle.Process(),
-		subscribers: make(map[chan RuntimeEvent]struct{}),
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
 	}
 	if m.store != nil {
 		if err := m.store.CreateSession(ctx, sess); err != nil {
@@ -509,7 +522,7 @@ type RuntimeSession struct {
 	autoRefreshMessageID        string
 	autoRefreshStop             chan struct{}
 	startupNotifyMode           startupNotifyMode
-	subscribers                 map[chan RuntimeEvent]struct{}
+	subscribers                 map[chan RuntimeEvent]runtimeSubscriber
 	snapshotWaiters             []chan struct{}
 	nextSeq                     int64
 	stateVersion                int64
@@ -522,6 +535,10 @@ type RuntimeSession struct {
 type RuntimeEvent struct {
 	Type string
 	Data []byte
+}
+
+type runtimeSubscriber struct {
+	Headless bool
 }
 
 const (
@@ -544,11 +561,22 @@ func (rt *RuntimeSession) OutputSnapshot() []byte {
 }
 
 func (rt *RuntimeSession) Subscribe() (chan RuntimeEvent, func()) {
+	return rt.SubscribeWithMode(false)
+}
+
+func (rt *RuntimeSession) SubscribeWithMode(headless bool) (chan RuntimeEvent, func()) {
 	ch := make(chan RuntimeEvent, 64)
 	rt.mu.Lock()
-	rt.subscribers[ch] = struct{}{}
+	if rt.subscribers == nil {
+		rt.subscribers = make(map[chan RuntimeEvent]runtimeSubscriber)
+	}
+	rt.subscribers[ch] = runtimeSubscriber{Headless: headless}
 	needsSnapshot := len(rt.snapshotWaiters) > 0
+	sessionID := rt.session.ID
 	rt.mu.Unlock()
+	if !headless && rt.manager != nil {
+		rt.manager.BrowserActive(sessionID)
+	}
 	if needsSnapshot {
 		select {
 		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
@@ -626,6 +654,12 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 		source = "unknown"
 	}
 	rt.mu.Lock()
+	if isHeadlessSnapshotSource(source) && rt.hasRealSubscriberLocked() {
+		sessionID := rt.session.ID
+		rt.mu.Unlock()
+		log.Printf("visible snapshot ignored session=%s source=%s reason=real_browser_active len=%d", sessionID, source, len(data))
+		return
+	}
 	rt.visibleSnapshot = data
 	rt.visibleSnapshotSource = source
 	rt.visibleSnapshotVersion++
@@ -640,6 +674,10 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 	}
 }
 
+func isHeadlessSnapshotSource(source string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "headless:")
+}
+
 func (rt *RuntimeSession) RequireLarkChatForNotifications() {
 	if rt == nil {
 		return
@@ -651,6 +689,10 @@ func (rt *RuntimeSession) RequireLarkChatForNotifications() {
 
 func (rt *RuntimeSession) CurrentRoundContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
+	return rt.CachedCurrentRoundContent()
+}
+
+func (rt *RuntimeSession) CachedCurrentRoundContent() string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
@@ -681,14 +723,19 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	}
 	before := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
-	needsBrowser := len(rt.subscribers) == 0 && rt.manager.onBrowserNeeded != nil
-	if len(rt.subscribers) == 0 && !needsBrowser {
+	hasSubscribers := len(rt.subscribers) > 0
+	hasRealSubscribers := rt.hasRealSubscriberLocked()
+	needsBrowser := !hasSubscribers && rt.manager != nil && rt.manager.onBrowserNeeded != nil
+	if !hasSubscribers && !needsBrowser {
 		rt.mu.Unlock()
 		return false
 	}
 	waiter := make(chan struct{})
 	rt.snapshotWaiters = append(rt.snapshotWaiters, waiter)
-	for ch := range rt.subscribers {
+	for ch, sub := range rt.subscribers {
+		if hasRealSubscribers && sub.Headless {
+			continue
+		}
 		select {
 		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
 		default:
@@ -707,9 +754,24 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	rt.mu.Lock()
 	fresh := rt.visibleSnapshotVersion > before
 	subscriberCount := len(rt.subscribers)
+	realSubscriberCount := rt.realSubscriberCountLocked()
 	rt.mu.Unlock()
-	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d needed_browser=%v timeout=%s", sessionID, fresh, subscriberCount, needsBrowser, timeout)
+	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d real_subscribers=%d needed_browser=%v timeout=%s", sessionID, fresh, subscriberCount, realSubscriberCount, needsBrowser, timeout)
 	return fresh
+}
+
+func (rt *RuntimeSession) hasRealSubscriberLocked() bool {
+	return rt.realSubscriberCountLocked() > 0
+}
+
+func (rt *RuntimeSession) realSubscriberCountLocked() int {
+	count := 0
+	for _, sub := range rt.subscribers {
+		if !sub.Headless {
+			count++
+		}
+	}
+	return count
 }
 
 func (rt *RuntimeSession) MarkInputActivity(data string) {
@@ -731,6 +793,34 @@ func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 	s := rt.session
 	rt.mu.Unlock()
 	_ = rt.manager.persist(context.Background(), s)
+}
+
+func (rt *RuntimeSession) PrepareInputSnapshotBaseline() bool {
+	return rt.prepareInputSnapshotBaseline(defaultInputBaselineSnapshotDeadline)
+}
+
+func (rt *RuntimeSession) prepareInputSnapshotBaseline(deadline time.Duration) bool {
+	if deadline <= 0 {
+		return false
+	}
+	expires := time.Now().Add(deadline)
+	fresh := rt.RequestFreshSnapshot(minDuration(defaultNotifySnapshotTimeout, deadline))
+	remaining := time.Until(expires)
+	if remaining <= 0 {
+		return fresh
+	}
+	secondTimeout := minDuration(600*time.Millisecond, remaining)
+	if secondTimeout > 0 && rt.RequestFreshSnapshot(secondTimeout) {
+		fresh = true
+	}
+	return fresh
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (rt *RuntimeSession) markInputActivityLocked(submitted bool) {

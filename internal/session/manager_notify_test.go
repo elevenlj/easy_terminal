@@ -50,7 +50,7 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 	if duplicateOK {
 		t.Fatal("same full-round notification should be deduped")
 	}
-	if first.Content != "> 今天天气怎么样\n• 你想查哪个城市的天气？" {
+	if first.Content != "• 你想查哪个城市的天气？" {
 		t.Fatalf("first content = %q", first.Content)
 	}
 
@@ -66,7 +66,7 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 	if secondHash == firstHash {
 		t.Fatal("updated full-round notification should have a different hash")
 	}
-	want := "> 今天天气怎么样\n• 你想查哪个城市的天气？\n• 成都今天晴转多云。"
+	want := "• 你想查哪个城市的天气？\n• 成都今天晴转多云。"
 	if second.Content != want {
 		t.Fatalf("second content = %q, want %q", second.Content, want)
 	}
@@ -108,7 +108,7 @@ func TestWaitingNotificationWaitsForSnapshotAfterCurrentInput(t *testing.T) {
 	if !ok {
 		t.Fatal("expected notification after a fresh snapshot for the current input")
 	}
-	want := "eleven ~ > cdx\nzsh: command not found: cdx\neleven ~ >"
+	want := "zsh: command not found: cdx\neleven ~ >"
 	if n.Content != want {
 		t.Fatalf("content = %q, want %q", n.Content, want)
 	}
@@ -272,6 +272,8 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 	notifier := &recordingNotifier{}
 	launcher := &recordingLauncher{}
 	browserRequested := make(chan struct{})
+	var snapshotRequests int
+	var snapshotMu sync.Mutex
 	var m *Manager
 	m = NewManager(
 		nil,
@@ -285,7 +287,15 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 			default:
 				close(browserRequested)
 			}
+			snapshotMu.Lock()
+			snapshotRequests++
+			requestNo := snapshotRequests
+			snapshotMu.Unlock()
 			if rt, ok := m.GetRuntime(sessionID); ok {
+				if requestNo <= 2 {
+					rt.SetVisibleSnapshot("eleven ~ >")
+					return
+				}
 				rt.SetVisibleSnapshot("eleven ~ >  echo frontend-snapshot\nfrontend ok\neleven ~ >")
 			}
 		}),
@@ -313,7 +323,10 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 	default:
 		t.Fatal("frontend snapshot should be requested when no browser is open")
 	}
-	if notes[0].Content != "eleven ~ >  echo frontend-snapshot\nfrontend ok\neleven ~ >" {
+	if len(notes) == 0 {
+		t.Fatal("expected notification from post-input frontend snapshot")
+	}
+	if notes[0].Content != "frontend ok\neleven ~ >" {
 		t.Fatalf("notification should come from frontend snapshot, got %q", notes[0].Content)
 	}
 }
@@ -362,7 +375,7 @@ func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("expected stable notification, got %#v", notes)
 	}
-	if notes[0].Content != "$ echo hello\nhello\n$" {
+	if notes[0].Content != "hello\n$" {
 		t.Fatalf("unexpected stable notification content: %q", notes[0].Content)
 	}
 }
@@ -560,7 +573,7 @@ func TestWaitingNotificationTreatsEmptyRoundStartAsCurrentRoundBaseline(t *testi
 	if !ok {
 		t.Fatal("expected notification to be ready")
 	}
-	want := "> ask\nfirst\nsecond"
+	want := "first\nsecond"
 	if n.Content != want {
 		t.Fatalf("empty round baseline should not diff from last pushed snapshot:\n%q\nwant:\n%q", n.Content, want)
 	}
@@ -630,7 +643,7 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	if notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" || notes[0].Running {
+	if notes[0].MessageID != "bot-card" || notes[0].Content != "hello\n$" || notes[0].Running {
 		t.Fatalf("manual refresh should patch clicked card with current round, got %#v", notes[0])
 	}
 	if notes[0].UpdateNo != 2 || !notes[0].SuppressUpdateTip {
@@ -665,7 +678,7 @@ func TestRefreshNotificationMessageUsesFullCurrentRoundWhenRoundBaselineIsEmpty(
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	want := "> ask\nfirst\nsecond"
+	want := "first\nsecond"
 	if notes[0].Content != want {
 		t.Fatalf("manual refresh should use full current round content:\n%q\nwant:\n%q", notes[0].Content, want)
 	}
@@ -826,7 +839,7 @@ func TestRefreshNotificationMessagePreventsStaleRunningPlaceholderOverwrite(t *t
 	if len(notes) != 1 {
 		t.Fatalf("refresh should be the only card patch, got %#v", notes)
 	}
-	if notes[0].Content == RunningNotificationPlaceholder || notes[0].Content != "$ echo hello\nhello\n$" {
+	if notes[0].Content == RunningNotificationPlaceholder || notes[0].Content != "hello\n$" {
 		t.Fatalf("stale running placeholder should not overwrite refresh content, got %#v", notes[0])
 	}
 }
@@ -887,7 +900,7 @@ func TestOutputPatchesRunningTitleFromCurrentRoundOnWaitingToRunning(t *testing.
 	rt.HandleOutput([]byte("still running\n"))
 
 	running := waitForRunningNotes(t, notifier, 1)
-	if len(running) != 1 || running[0].MessageID != "bot-card" || running[0].Content != "$ echo hello\nhello\n$" || !running[0].Running {
+	if len(running) != 1 || running[0].MessageID != "bot-card" || running[0].Content != "hello\n$" || !running[0].Running {
 		t.Fatalf("terminal output should patch current round title as running, got %#v", running)
 	}
 }
@@ -939,7 +952,7 @@ func TestManualRefreshAllowsWaitingToRunningTitleMarker(t *testing.T) {
 	rt.HandleOutput([]byte("late output\n"))
 
 	notes := notifier.notes()
-	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "hello\n$" {
 		t.Fatalf("manual refresh should patch current content, got %#v", notes)
 	}
 	if running := waitForRunningNotes(t, notifier, 1); len(running) != 1 || running[0].MessageID != "bot-card" || !running[0].Running {
@@ -984,7 +997,7 @@ func TestManualRefreshWithConcurrentOutputPatchesRunningTitleAfterRefresh(t *tes
 	}
 
 	notes := notifier.notes()
-	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "$ echo hello\nhello\n$" {
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "hello\n$" {
 		t.Fatalf("manual refresh should patch current content, got %#v", notes)
 	}
 	if running := waitForBlockingRunningNotes(t, notifier, 1); len(running) != 1 || running[0].MessageID != "bot-card" || !running[0].Running {
@@ -1280,7 +1293,7 @@ func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
 	}
 }
 
-func TestLarkNotificationCardContentWarnsOnBufferFallback(t *testing.T) {
+func TestLarkNotificationCardContentDoesNotWarnOnBufferFallback(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID:      "sess-1",
 		Name:           "A",
@@ -1290,8 +1303,8 @@ func TestLarkNotificationCardContentWarnsOnBufferFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "buffer") || !strings.Contains(content, "兜底") {
-		t.Fatalf("buffer fallback card should include a visible warning, got %s", content)
+	if strings.Contains(content, "buffer 兜底") || strings.Contains(content, "细微差异") {
+		t.Fatalf("buffer fallback card should not include a visible warning, got %s", content)
 	}
 }
 
@@ -1614,7 +1627,7 @@ func TestRequestFreshSnapshotAsksSubscriberAndWaitsForUpdate(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:     NewManager(nil, nil),
 		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
-		subscribers: make(map[chan RuntimeEvent]struct{}),
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
 	}
 	ch, cancel := rt.Subscribe()
 	defer cancel()
@@ -1649,7 +1662,7 @@ func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
 		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
 		visibleSnapshot:        "old snapshot",
 		visibleSnapshotVersion: 1,
-		subscribers:            make(map[chan RuntimeEvent]struct{}),
+		subscribers:            make(map[chan RuntimeEvent]runtimeSubscriber),
 	}
 	ch, cancel := rt.Subscribe()
 	defer cancel()
@@ -1675,6 +1688,83 @@ func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestRequestFreshSnapshotPrefersRealBrowserOverHeadless(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	headlessCh, headlessCancel := rt.SubscribeWithMode(true)
+	defer headlessCancel()
+	realCh, realCancel := rt.SubscribeWithMode(false)
+	defer realCancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(time.Second)
+	}()
+
+	select {
+	case ev := <-realCh:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("event type = %q, want snapshot request", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected real browser snapshot request")
+	}
+	select {
+	case ev := <-headlessCh:
+		t.Fatalf("headless should not receive snapshot request while real browser is active: %#v", ev)
+	default:
+	}
+	rt.SetVisibleSnapshotWithSource("fresh from browser", "browser:buffer")
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("request should report a fresh browser snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestHeadlessSnapshotIgnoredWhenRealBrowserActive(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:         NewManager(nil, nil),
+		session:         Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		visibleSnapshot: "browser baseline",
+		subscribers:     make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	_, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+
+	rt.SetVisibleSnapshotWithSource("stale headless", "headless:buffer")
+	if rt.visibleSnapshot != "browser baseline" {
+		t.Fatalf("headless snapshot should be ignored while real browser is active, got %q", rt.visibleSnapshot)
+	}
+}
+
+func TestRealBrowserSubscriptionReportsActiveBrowser(t *testing.T) {
+	active := make(chan string, 1)
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil, WithBrowserActive(func(sessionID string) {
+			active <- sessionID
+		})),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	_, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+	select {
+	case got := <-active:
+		if got != "sess-1" {
+			t.Fatalf("active browser session = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected active browser callback")
 	}
 }
 
@@ -1712,7 +1802,7 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("expected retry to send once after snapshot becomes ready, got %#v", notes)
 	}
-	if notes[0].Content != "> 今天天气怎么样\n• 你想查哪个城市的天气？例如：上海、北京。" {
+	if notes[0].Content != "• 你想查哪个城市的天气？例如：上海、北京。" {
 		t.Fatalf("unexpected retry notification content: %q", notes[0].Content)
 	}
 }
@@ -1786,7 +1876,7 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("final startup preset notification should send once after settle, got %#v", notes)
 	}
-	if notes[0].Content != "$ echo setup\nsetup done\n$" {
+	if notes[0].Content != "setup done\n$" {
 		t.Fatalf("final startup notification content = %q", notes[0].Content)
 	}
 	rt.mu.Lock()

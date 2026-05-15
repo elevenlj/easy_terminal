@@ -50,7 +50,7 @@ go run ./cmd --port 9090
 go run ./cmd -p 9090
 ```
 
-首次保存 Web 配置时会生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。需要固定配置文件目录时：
+启动时会自动生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。需要固定配置文件目录时：
 
 ```sh
 easy_terminal --config-dir /data/easy_terminal/conf

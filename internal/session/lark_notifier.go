@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 type LarkNotifier struct {
@@ -25,9 +24,6 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 	}
 	content := larkTerminalPlainText(note.Content)
 	elements := []map[string]any{}
-	if strings.EqualFold(strings.TrimSpace(note.SnapshotSource), "buffer") {
-		elements = append(elements, map[string]any{"tag": "markdown", "content": "⚠️ 本次终端快照使用 buffer 兜底，可能与浏览器可见终端存在细微差异。"})
-	}
 	if note.UpdateNo > 0 {
 		content += fmt.Sprintf("\n\n已更新-%d", note.UpdateNo)
 	}
