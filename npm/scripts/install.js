@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const https = require("https");
+const { spawn } = require("child_process");
 const { pipeline } = require("stream/promises");
 const { createWriteStream } = require("fs");
 
@@ -15,7 +16,7 @@ const giteeRepo = process.env.EASY_TERMINAL_GITEE_REPO || "eleven_lj/easy_termin
 const version = packageJson.version;
 const platform = process.platform;
 const arch = process.arch;
-const requestTimeoutMs = Number(process.env.EASY_TERMINAL_DOWNLOAD_TIMEOUT_MS || 30000);
+const requestTimeoutMs = Number(process.env.EASY_TERMINAL_DOWNLOAD_TIMEOUT_MS || 120000);
 
 const platformMap = {
   darwin: "darwin",
@@ -89,6 +90,45 @@ async function download(downloadUrl, redirects = 0) {
   }
 }
 
+async function downloadWithCurl(downloadUrl) {
+  await fs.promises.mkdir(vendorDir, { recursive: true });
+
+  await new Promise((resolve, reject) => {
+    const timeoutSeconds = Math.max(1, Math.ceil(requestTimeoutMs / 1000));
+    const child = spawn("curl", [
+      "-fL",
+      "--connect-timeout",
+      "20",
+      "--max-time",
+      String(timeoutSeconds),
+      "-H",
+      "User-Agent: easy-terminal-npm",
+      "-o",
+      outPath,
+      downloadUrl
+    ], {
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error((stderr.trim() || `curl exited with code ${code}`).split("\n").slice(-1)[0]));
+    });
+  });
+
+  if (targetPlatform !== "windows") {
+    await fs.promises.chmod(outPath, 0o755);
+  }
+}
+
 async function main() {
   const failures = [];
 
@@ -96,7 +136,12 @@ async function main() {
     try {
       console.log(`[easy-terminal] downloading ${assetName}`);
       console.log(`[easy-terminal] source: ${url}`);
-      await download(url);
+      try {
+        await downloadWithCurl(url);
+      } catch (curlErr) {
+        console.warn(`[easy-terminal] curl download failed, trying node downloader`);
+        await download(url);
+      }
       console.log(`[easy-terminal] installed binary to ${outPath}`);
       return;
     } catch (err) {
