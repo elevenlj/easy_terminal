@@ -35,7 +35,7 @@ type LarkReplyBridge struct {
 	mu                      sync.Mutex
 	seenMessages            map[string]time.Time
 	pendingFiles            map[string][]pendingLarkAttachment
-	pipelines               map[string][]string
+	pipelines               map[string][]larkPipelineInput
 	replyText               func(context.Context, string, string) error
 	downloadFile            func(context.Context, string, string, larkAttachmentRef) (pendingLarkAttachment, error)
 	addReaction             func(context.Context, string, string) error
@@ -58,6 +58,11 @@ type SessionStartPreset struct {
 	Commands []string `json:"commands"`
 }
 
+type larkPipelineInput struct {
+	Text          string
+	MentionOpenID string
+}
+
 type larkRouteContext struct {
 	MessageID    string
 	ParentID     string
@@ -71,7 +76,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 	b := &LarkReplyBridge{
 		appID: appID, appSecret: appSecret, manager: manager, uploadsDir: uploadsDir,
 		sessionChatPrefix: defaultLarkSessionChatPrefix,
-		seenMessages:      make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]string),
+		seenMessages:      make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]larkPipelineInput),
 	}
 	if manager != nil {
 		manager.SetNotificationSentHook(b.OnNotificationSent)
@@ -275,7 +280,7 @@ func (b *LarkReplyBridge) handleCardCustomShortcut(ctx context.Context, value ma
 		return larkCardToast("warning", "指令为空"), nil
 	}
 	b.manager.EnsureBrowser(sessionID)
-	if err := SubmitStructuredInput(rt, command); err != nil {
+	if err := SubmitStructuredInputWithMention(rt, command, rt.NotificationMentionOpenID()); err != nil {
 		return nil, err
 	}
 	rt.NotifyInputRunning()
@@ -534,8 +539,8 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 			return sessionID, nil
 		}
 		b.manager.EnsureBrowser(sessionID)
-		b.enqueuePipeline(sessionID, parts[1:])
-		if err := SubmitStructuredInput(rt, text); err != nil {
+		b.enqueuePipeline(sessionID, parts[1:], routeCtx.SenderOpenID)
+		if err := SubmitStructuredInputWithMention(rt, text, routeCtx.SenderOpenID); err != nil {
 			return sessionID, err
 		}
 		b.clearPendingFiles(sessionID)
@@ -562,7 +567,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 					log.Printf("lark start presets failed session=%s codes=%q: %v", s.ID, presetCodes, presetErr)
 				}
 			}
-			b.enqueuePipeline(s.ID, parts[1:])
+			b.enqueuePipeline(s.ID, parts[1:], routeCtx.SenderOpenID)
 			b.notifyInputRunning(s.ID)
 		}
 		return s.ID, err
@@ -582,6 +587,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 			}
 			return sessionID, nil
 		}
+		rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
 		if err := rt.WriteInput("\x03"); err != nil {
 			return sessionID, err
 		}
@@ -630,8 +636,8 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		rt, _ = b.manager.GetRuntime(sessionID)
 	}
 	b.manager.EnsureBrowser(sessionID)
-	b.enqueuePipeline(sessionID, parts[1:])
-	if err := SubmitStructuredInput(rt, text); err != nil {
+	b.enqueuePipeline(sessionID, parts[1:], routeCtx.SenderOpenID)
+	if err := SubmitStructuredInputWithMention(rt, text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
 	}
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
@@ -681,6 +687,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	b.manager.EnsureBrowser(sessionID)
 	input := formatLarkAttachmentInput(files)
 	if strings.TrimSpace(text) == "" {
+		rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
 		if err := rt.WriteInput(input + " "); err != nil {
 			return sessionID, err
 		}
@@ -699,8 +706,8 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 		}
 		b.clearPendingFiles(sessionID)
 	}
-	b.enqueuePipeline(sessionID, parts[1:])
-	if err := SubmitStructuredInput(rt, input+" "+text); err != nil {
+	b.enqueuePipeline(sessionID, parts[1:], routeCtx.SenderOpenID)
+	if err := SubmitStructuredInputWithMention(rt, input+" "+text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
 	}
 	b.clearPendingFiles(sessionID)
@@ -725,6 +732,7 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 	if routeCtx.ChatID != "" && routeCtx.ChatType == "group" {
 		if rt, ok := b.manager.GetRuntime(s.ID); ok {
 			rt.RequireLarkChatForNotifications()
+			rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
 		}
 		updated, err := b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
 		if err != nil {
@@ -739,6 +747,7 @@ func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name 
 	}
 	if rt, ok := b.manager.GetRuntime(s.ID); ok {
 		rt.RequireLarkChatForNotifications()
+		rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
 	}
 	log.Printf("lark reply bridge creating dedicated chat session=%s name=%q owner=%s", s.ID, s.Name, routeCtx.SenderOpenID)
 	chatID, err := b.createChat(ctx, s.ID, s.Name, routeCtx.SenderOpenID)
@@ -1056,7 +1065,7 @@ func slugForShellPath(value string) string {
 
 func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
 	next := b.popPipeline(sessionID)
-	if next == "" {
+	if next.Text == "" {
 		return
 	}
 	rt, ok := b.manager.GetRuntime(sessionID)
@@ -1064,7 +1073,7 @@ func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
 		return
 	}
 	b.manager.EnsureBrowser(sessionID)
-	if err := SubmitStructuredInput(rt, next); err != nil {
+	if err := SubmitStructuredInputWithMention(rt, next.Text, next.MentionOpenID); err != nil {
 		log.Printf("lark reply bridge failed to continue pipeline for %s: %v", sessionID, err)
 	}
 	rt.NotifyInputRunning()
@@ -1081,14 +1090,14 @@ func (b *LarkReplyBridge) notifyInputRunning(sessionID string) {
 	rt.NotifyInputRunning()
 }
 
-func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string) {
+func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string, mentionOpenID string) {
 	if sessionID == "" || len(parts) == 0 {
 		return
 	}
-	cleaned := make([]string, 0, len(parts))
+	cleaned := make([]larkPipelineInput, 0, len(parts))
 	for _, part := range parts {
 		if part = strings.TrimSpace(part); part != "" {
-			cleaned = append(cleaned, part)
+			cleaned = append(cleaned, larkPipelineInput{Text: part, MentionOpenID: strings.TrimSpace(mentionOpenID)})
 		}
 	}
 	if len(cleaned) == 0 {
@@ -1099,12 +1108,12 @@ func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string) {
 	b.pipelines[sessionID] = append(b.pipelines[sessionID], cleaned...)
 }
 
-func (b *LarkReplyBridge) popPipeline(sessionID string) string {
+func (b *LarkReplyBridge) popPipeline(sessionID string) larkPipelineInput {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	queue := b.pipelines[sessionID]
 	if len(queue) == 0 {
-		return ""
+		return larkPipelineInput{}
 	}
 	next := queue[0]
 	if len(queue) == 1 {
@@ -1392,6 +1401,10 @@ func PrepareStructuredInput(text string) string {
 }
 
 func SubmitStructuredInput(rt *RuntimeSession, text string) error {
+	return SubmitStructuredInputWithMention(rt, text, "")
+}
+
+func SubmitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string) error {
 	if rt == nil {
 		return fmt.Errorf("runtime not found")
 	}
@@ -1404,6 +1417,7 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	}
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d", sessionID, len(text), pressEnter, enterLen)
 	rt.PrepareInputSnapshotBaseline()
+	rt.SetNotificationMentionOpenID(mentionOpenID)
 	rt.MarkStructuredInputActivity(text)
 	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err

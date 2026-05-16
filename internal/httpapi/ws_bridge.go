@@ -66,6 +66,7 @@ func (b *wsBridge) readClient() {
 		case "input":
 			filtered := filterTerminalResponses([]byte(msg.Data))
 			if len(filtered) > 0 {
+				b.rt.SetNotificationMentionOpenID("")
 				_ = b.rt.WriteInput(string(filtered))
 			}
 		case "submit":

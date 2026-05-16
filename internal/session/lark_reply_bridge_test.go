@@ -233,6 +233,50 @@ func TestLarkReplyBridgeRoutesByDedicatedChatID(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeGroupInputMentionsSender(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-running"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-group"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil || !ok {
+		t.Fatalf("UpdateNotifyOnWaiting ok=%v err=%v", ok, err)
+	}
+
+	err = bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-group-mention", "", "", "text", `{"text":"pwd | whoami"}`, "group", "oc-group", "ou-bob"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := notifier.notes()
+	if len(notes) == 0 {
+		t.Fatal("expected running notification")
+	}
+	got := notes[len(notes)-1]
+	if got.MentionOpenID != "ou-bob" || got.ChatID != "oc-group" || !got.Running {
+		t.Fatalf("group notification should mention sender, got %#v", got)
+	}
+
+	bridge.OnNotificationSent(sess.ID)
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime not found")
+	}
+	if got := rt.NotificationMentionOpenID(); got != "ou-bob" {
+		t.Fatalf("pipeline input should keep sender mention, got %q", got)
+	}
+}
+
 func TestLarkReplyBridgeIgnoresStaleDedicatedChatRegistry(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

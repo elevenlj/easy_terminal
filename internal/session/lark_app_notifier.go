@@ -86,8 +86,9 @@ func (n *LarkAppNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotifi
 
 func larkNotificationCardContent(note WaitingNotification, receiveID string, mention bool, customShortcuts ...LarkCustomShortcut) (string, error) {
 	elements := []map[string]any{}
-	if mention {
-		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + receiveID + "></at>"})
+	mentionID := larkNotificationMentionID(note, receiveID)
+	if mention && mentionID != "" {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + mentionID + "></at>"})
 	}
 	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
@@ -108,6 +109,13 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	}
 	b, err := json.Marshal(card)
 	return string(b), err
+}
+
+func larkNotificationMentionID(note WaitingNotification, receiveID string) string {
+	if id := strings.TrimSpace(note.MentionOpenID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(receiveID)
 }
 
 func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomShortcut {
@@ -399,7 +407,7 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	}
 	tipSent := false
 	if note.UpdateNo > 0 && !note.SuppressUpdateTip {
-		if err := n.sendUpdateTipOnce(note.MessageID, note.ChatID, note.UpdateNo); err == nil {
+		if err := n.sendUpdateTipOnce(note.MessageID, note.ChatID, note.UpdateNo, larkNotificationMentionID(note, n.receiveID)); err == nil {
 			tipSent = true
 		}
 	}
@@ -435,7 +443,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, updateNo int) error {
+func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, updateNo int, mentionID string) error {
 	if messageID == "" || updateNo <= 0 {
 		return nil
 	}
@@ -456,9 +464,11 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 
 	send := n.sendUpdateTip
 	if n.tipSender != nil {
-		send = n.tipSender
+		send = func(messageID string, chatID string, updateNo int, _ string) error {
+			return n.tipSender(messageID, chatID, updateNo)
+		}
 	}
-	if err := retryLarkVoid(func() error { return send(messageID, chatID, updateNo) }); err != nil {
+	if err := retryLarkVoid(func() error { return send(messageID, chatID, updateNo, mentionID) }); err != nil {
 		return err
 	}
 
@@ -473,8 +483,8 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateNo int) error {
-	content, err := larkUpdateTipCardContent(updateNo, n.receiveID, n.mention)
+func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateNo int, mentionID string) error {
+	content, err := larkUpdateTipCardContent(updateNo, mentionID, n.mention)
 	if err != nil {
 		return err
 	}

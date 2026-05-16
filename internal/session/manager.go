@@ -517,6 +517,7 @@ type RuntimeSession struct {
 	lastNotifiedMessageID       string
 	lastNotifiedContent         string
 	lastNotifiedVisibleSnapshot string
+	notificationMentionOpenID   string
 	notificationUpdateNo        int
 	notificationRunning         bool
 	notificationWindowInputText string
@@ -693,6 +694,24 @@ func (rt *RuntimeSession) RequireLarkChatForNotifications() {
 	rt.mu.Unlock()
 }
 
+func (rt *RuntimeSession) SetNotificationMentionOpenID(openID string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.notificationMentionOpenID = strings.TrimSpace(openID)
+	rt.mu.Unlock()
+}
+
+func (rt *RuntimeSession) NotificationMentionOpenID() string {
+	if rt == nil {
+		return ""
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.notificationMentionOpenID
+}
+
 func (rt *RuntimeSession) CurrentRoundContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	return rt.CachedCurrentRoundContent()
@@ -786,6 +805,7 @@ func (rt *RuntimeSession) disabledNotificationLocked(messageID string) (WaitingN
 		Content:            content,
 		MessageID:          messageID,
 		ChatID:             rt.session.LarkChatID,
+		MentionOpenID:      rt.notificationMentionOpenID,
 		UpdateNo:           rt.notificationUpdateNo,
 		Running:            false,
 		Disabled:           true,
@@ -1004,6 +1024,7 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		Content:             content,
 		MessageID:           rt.lastNotifiedMessageID,
 		ChatID:              rt.session.LarkChatID,
+		MentionOpenID:       rt.notificationMentionOpenID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
@@ -1112,6 +1133,7 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		Content:             content,
 		MessageID:           messageID,
 		ChatID:              rt.session.LarkChatID,
+		MentionOpenID:       rt.notificationMentionOpenID,
 		UpdateNo:            updateNo,
 		Running:             running,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
@@ -1718,6 +1740,7 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		Content:             content,
 		MessageID:           rt.lastNotifiedMessageID,
 		ChatID:              rt.session.LarkChatID,
+		MentionOpenID:       rt.notificationMentionOpenID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
@@ -1745,6 +1768,7 @@ func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, 
 		Content:             rt.lastNotifiedContent,
 		MessageID:           rt.lastNotifiedMessageID,
 		ChatID:              rt.session.LarkChatID,
+		MentionOpenID:       rt.notificationMentionOpenID,
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             false,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
@@ -1874,7 +1898,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

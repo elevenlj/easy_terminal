@@ -42,6 +42,7 @@ type WaitingNotification struct {
 	Content             string
 	MessageID           string
 	ChatID              string
+	MentionOpenID       string
 	UpdateNo            int
 	Running             bool
 	Disabled            bool

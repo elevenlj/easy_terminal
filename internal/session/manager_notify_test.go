@@ -1314,6 +1314,24 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationCardContentMentionsRoundSender(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID:     "sess-1",
+		Name:          "A",
+		Content:       "done",
+		MentionOpenID: "ou_asker",
+	}, "ou_owner", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, `\u003cat id=ou_asker\u003e\u003c/at\u003e`) {
+		t.Fatalf("card content should mention asker, got %s", content)
+	}
+	if strings.Contains(content, `ou_owner`) {
+		t.Fatalf("card content should not mention fallback receiver when asker is known, got %s", content)
+	}
+}
+
 func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
@@ -1657,16 +1675,16 @@ func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
 		return nil
 	}
 
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 2); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 2, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.sendUpdateTipOnce("msg-2", "oc_2", 1); err != nil {
+	if err := notifier.sendUpdateTipOnce("msg-2", "oc_2", 1, ""); err != nil {
 		t.Fatal(err)
 	}
 
