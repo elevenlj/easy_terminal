@@ -157,8 +157,13 @@ func HasRenderableContent(data []byte) bool {
 }
 
 func PickNotifyContent(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) string {
+	return pickNotifyContentWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, "")
+}
+
+func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) string {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, _ := selectNotifyBody(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText)
+	windowStartInputText = strings.TrimSpace(windowStartInputText)
+	body, _ := selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText)
 	if body == "" {
 		return ""
 	}
@@ -169,9 +174,17 @@ func PickNotifyContent(visibleSnapshot string, previousVisibleSnapshot string, r
 }
 
 func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) bool {
+	return notifyContentNeedsMoreSnapshotWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, "")
+}
+
+func notifyContentNeedsMoreSnapshotWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, _ := selectNotifyBody(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText)
+	windowStartInputText = strings.TrimSpace(windowStartInputText)
+	body, _ := selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText)
 	if strings.TrimSpace(body) == "" {
+		return true
+	}
+	if windowStartInputText != "" && lastInputText != "" && !containsInputEchoLine(trimVisibleText(body), lastInputText) {
 		return true
 	}
 	hasReply := hasReplyLine(trimVisibleText(body), lastInputText)
@@ -179,6 +192,16 @@ func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, previousVisibleSnaps
 }
 
 func selectNotifyBody(visibleSnapshot string, previousVisibleSnapshot string, _ []byte, lastInputText string) (string, bool) {
+	return selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, nil, lastInputText, "")
+}
+
+func selectNotifyBodyWithWindow(visibleSnapshot string, previousVisibleSnapshot string, _ []byte, lastInputText string, windowStartInputText string) (string, bool) {
+	if strings.TrimSpace(windowStartInputText) != "" {
+		visibleBody, fromVisible := currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, windowStartInputText)
+		if strings.TrimSpace(visibleBody) != "" {
+			return trimVisibleText(visibleBody), fromVisible
+		}
+	}
 	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
 	if strings.TrimSpace(visibleBody) == "" {
 		return "", false
@@ -187,9 +210,23 @@ func selectNotifyBody(visibleSnapshot string, previousVisibleSnapshot string, _ 
 }
 
 func NotifyContentNeedsConservativeDelay(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) bool {
+	return notifyContentNeedsConservativeDelayWithWindow(visibleSnapshot, previousVisibleSnapshot, lastInputText, "")
+}
+
+func notifyContentNeedsConservativeDelayWithWindow(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, windowStartInputText string) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
-	body, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
+	windowStartInputText = strings.TrimSpace(windowStartInputText)
+	var body string
+	var fromVisible bool
+	if windowStartInputText != "" {
+		body, fromVisible = currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, windowStartInputText)
+	} else {
+		body, fromVisible = currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
+	}
 	if !fromVisible || strings.TrimSpace(body) == "" {
+		return true
+	}
+	if windowStartInputText != "" && lastInputText != "" && !containsInputEchoLine(trimVisibleText(body), lastInputText) {
 		return true
 	}
 	if containsTransientStatusLine(body) {
@@ -208,6 +245,23 @@ func NotifyContentNeedsConservativeDelay(visibleSnapshot string, previousVisible
 		}
 	}
 	return false
+}
+
+func currentWindowVisibleText(visibleSnapshot string, previousVisibleSnapshot string, windowStartInputText string) (string, bool) {
+	visibleSnapshot = trimVisibleText(visibleSnapshot)
+	if visibleSnapshot == "" {
+		return "", false
+	}
+	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok && strings.TrimSpace(body) != "" {
+		return trimVisibleText(body), true
+	}
+	if body, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok && strings.TrimSpace(body) != "" {
+		return trimVisibleText(body), true
+	}
+	if body := visibleTextFromInputStart(visibleSnapshot, windowStartInputText); strings.TrimSpace(body) != "" {
+		return trimVisibleText(body), true
+	}
+	return visibleSnapshot, true
 }
 
 func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) (string, bool) {
@@ -406,6 +460,16 @@ func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) stri
 				return ""
 			}
 			return strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
+		}
+	}
+	return ""
+}
+
+func visibleTextFromInputStart(visibleSnapshot string, inputText string) string {
+	lines := strings.Split(visibleSnapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if _, ok := inputAnchorEndLine(lines, i, inputText); ok {
+			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
 		}
 	}
 	return ""
@@ -727,8 +791,20 @@ func isTransientStatusLine(line string) bool {
 
 func hasReplyLine(text string, lastInputText string) bool {
 	input := strings.TrimSpace(lastInputText)
-	sawInput := false
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	start := 0
+	requireAfterInput := false
+	if input != "" {
+		for i := len(lines) - 1; i >= 0; i-- {
+			if end, ok := inputAnchorEndLine(lines, i, input); ok {
+				start = end + 1
+				requireAfterInput = true
+				break
+			}
+		}
+	}
+	sawInput := requireAfterInput
+	for _, line := range lines[start:] {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
@@ -753,9 +829,26 @@ func hasReplyLine(text string, lastInputText string) bool {
 		if isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
 			continue
 		}
+		if requireAfterInput && !sawInput {
+			continue
+		}
 		return true
 	}
 	return input == ""
+}
+
+func containsInputEchoLine(text string, input string) bool {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if _, ok := inputAnchorEndLine(lines, i, input); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isInputEchoLine(line string, input string) bool {

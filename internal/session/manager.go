@@ -28,7 +28,11 @@ const (
 	defaultNotifySnapshotDeadline        = 2500 * time.Millisecond
 	defaultInputBaselineSnapshotDeadline = 2500 * time.Millisecond
 	defaultStartupPresetSettleDelay      = 2 * time.Second
+	defaultNotificationSendAttempts      = 3
+	defaultNotificationSendRetryDelay    = 120 * time.Millisecond
 )
+
+var errNotificationMessageDisabled = errors.New("notification message is disabled")
 
 type startupNotifyMode int
 
@@ -515,6 +519,8 @@ type RuntimeSession struct {
 	lastNotifiedVisibleSnapshot string
 	notificationUpdateNo        int
 	notificationRunning         bool
+	notificationWindowInputText string
+	frozenNotificationMessages  map[string]struct{}
 	suppressRunningMarker       bool
 	requireLarkChat             bool
 	notificationPatchVersion    int64
@@ -695,14 +701,14 @@ func (rt *RuntimeSession) CurrentRoundContent() string {
 func (rt *RuntimeSession) CachedCurrentRoundContent() string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
+	return rt.currentNotifyContentLocked()
 }
 
 func (rt *RuntimeSession) CurrentVisibleContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return PickNotifyContent(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText)
+	return pickNotifyContentWithWindow(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
 }
 
 func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
@@ -710,6 +716,82 @@ func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
 		return rt.snapshotAtRoundStart
 	}
 	return rt.lastNotifiedVisibleSnapshot
+}
+
+func (rt *RuntimeSession) currentNotifyContentLocked() string {
+	return pickNotifyContentWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+}
+
+func (rt *RuntimeSession) NotificationMessageFrozen(messageID string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.notificationMessageFrozenLocked(messageID)
+}
+
+func (rt *RuntimeSession) ValidateNotificationAction(messageID string) error {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.validateNotificationActionLocked(messageID)
+}
+
+func (rt *RuntimeSession) validateNotificationActionLocked(messageID string) error {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return nil
+	}
+	if rt.notificationMessageFrozenLocked(messageID) {
+		return errNotificationMessageDisabled
+	}
+	if rt.lastNotifiedMessageID != "" && rt.lastNotifiedMessageID != messageID {
+		return errNotificationMessageDisabled
+	}
+	return nil
+}
+
+func (rt *RuntimeSession) notificationMessageFrozenLocked(messageID string) bool {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" || len(rt.frozenNotificationMessages) == 0 {
+		return false
+	}
+	_, ok := rt.frozenNotificationMessages[messageID]
+	return ok
+}
+
+func (rt *RuntimeSession) freezeNotificationMessageLocked(messageID string) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return
+	}
+	if rt.frozenNotificationMessages == nil {
+		rt.frozenNotificationMessages = make(map[string]struct{})
+	}
+	rt.frozenNotificationMessages[messageID] = struct{}{}
+	if rt.autoRefreshMessageID == messageID {
+		rt.autoRefreshMessageID = ""
+	}
+}
+
+func (rt *RuntimeSession) disabledNotificationLocked(messageID string) (WaitingNotification, bool) {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" || rt.manager == nil || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
+		return WaitingNotification{}, false
+	}
+	content := strings.TrimSpace(rt.lastNotifiedContent)
+	if content == "" {
+		content = RunningNotificationPlaceholder
+	}
+	return WaitingNotification{
+		SessionID:          rt.session.ID,
+		Name:               rt.session.Name,
+		Content:            content,
+		MessageID:          messageID,
+		ChatID:             rt.session.LarkChatID,
+		UpdateNo:           rt.notificationUpdateNo,
+		Running:            false,
+		Disabled:           true,
+		AutoRefreshEnabled: false,
+		SuppressUpdateTip:  true,
+	}, true
 }
 
 func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
@@ -776,22 +858,30 @@ func (rt *RuntimeSession) realSubscriberCountLocked() int {
 
 func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.mu.Lock()
+	previousInput := rt.lastInputText
 	submitted := rt.recordInputLocked(data)
-	rt.markInputActivityLocked(submitted)
+	disabledNote, disabledOK := rt.markInputActivityLocked(submitted, previousInput)
 	s := rt.session
 	rt.mu.Unlock()
+	if disabledOK {
+		go rt.updateDisabledNotification(disabledNote)
+	}
 	_ = rt.manager.persist(context.Background(), s)
 }
 
 func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 	rt.mu.Lock()
+	previousInput := rt.lastInputText
 	if cleaned := strings.TrimSpace(cleanInputForRecord(text)); cleaned != "" {
 		rt.lastInputText = cleaned
 	}
 	rt.inputLineBuffer = ""
-	rt.markInputActivityLocked(true)
+	disabledNote, disabledOK := rt.markInputActivityLocked(true, previousInput)
 	s := rt.session
 	rt.mu.Unlock()
+	if disabledOK {
+		go rt.updateDisabledNotification(disabledNote)
+	}
 	_ = rt.manager.persist(context.Background(), s)
 }
 
@@ -823,11 +913,28 @@ func minDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-func (rt *RuntimeSession) markInputActivityLocked(submitted bool) {
+func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput string) (WaitingNotification, bool) {
+	var disabledNote WaitingNotification
+	disabledOK := false
 	if submitted {
-		rt.snapshotAtRoundStart = rt.visibleSnapshot
-		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
-		rt.snapshotAtRoundStartSet = true
+		overlapRunningCard := rt.notificationRunning && rt.lastNotifiedMessageID != ""
+		if overlapRunningCard {
+			disabledNote, disabledOK = rt.disabledNotificationLocked(rt.lastNotifiedMessageID)
+			rt.freezeNotificationMessageLocked(rt.lastNotifiedMessageID)
+		}
+		if overlapRunningCard && rt.snapshotAtRoundStartSet {
+			if strings.TrimSpace(rt.notificationWindowInputText) == "" {
+				rt.notificationWindowInputText = strings.TrimSpace(previousInput)
+			}
+			if strings.TrimSpace(rt.notificationWindowInputText) == "" {
+				rt.notificationWindowInputText = strings.TrimSpace(rt.lastInputText)
+			}
+		} else {
+			rt.snapshotAtRoundStart = rt.visibleSnapshot
+			rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
+			rt.snapshotAtRoundStartSet = true
+			rt.notificationWindowInputText = ""
+		}
 		rt.roundReply = nil
 		rt.lastNotifiedRoundHash = ""
 		rt.lastNotifiedMessageID = ""
@@ -844,6 +951,7 @@ func (rt *RuntimeSession) markInputActivityLocked(submitted bool) {
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.stopStartupNotifyTimerLocked()
+	return disabledNote, disabledOK
 }
 
 func (rt *RuntimeSession) NotifyInputRunning() {
@@ -868,6 +976,13 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		return
 	}
 	messageID = strings.TrimSpace(messageID)
+	if messageID != "" && rt.notificationMessageFrozenLocked(messageID) {
+		log.Printf("lark card write skipped source=%s action=running_anchor session=%s message=%s reason=frozen_message", source, rt.session.ID, messageID)
+		messageID = ""
+	}
+	if rt.lastNotifiedMessageID != "" && rt.notificationMessageFrozenLocked(rt.lastNotifiedMessageID) {
+		rt.lastNotifiedMessageID = ""
+	}
 	if messageID != "" {
 		rt.lastNotifiedMessageID = messageID
 	}
@@ -907,7 +1022,7 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		return
 	}
 	rt.mu.Unlock()
-	result, err := rt.manager.notifier.NotifyWaiting(n)
+	result, err := rt.notifyWaitingWithRetry(n)
 	rt.notificationPatchMu.Unlock()
 	if err != nil {
 		log.Printf("running notification send failed session=%s message=%s: %v", n.SessionID, n.MessageID, err)
@@ -959,6 +1074,12 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if messageID == "" {
 		return errors.New("notification message is not available")
 	}
+	rt.mu.Lock()
+	if rt.notificationMessageFrozenLocked(messageID) {
+		rt.mu.Unlock()
+		return errors.New("notification message is frozen")
+	}
+	rt.mu.Unlock()
 	content := strings.TrimSpace(rt.CurrentRoundContent())
 	hasSnapshotContent := content != ""
 	if !hasSnapshotContent {
@@ -973,6 +1094,10 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if !rt.session.Live || !rt.session.NotifyOnWaiting {
 		rt.mu.Unlock()
 		return errors.New("notification is not enabled")
+	}
+	if rt.notificationMessageFrozenLocked(messageID) {
+		rt.mu.Unlock()
+		return errors.New("notification message is frozen")
 	}
 	running := rt.session.Status == StatusRunning
 	updateNo := rt.notificationUpdateNo
@@ -1002,7 +1127,14 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	log.Printf("lark card write queued source=%s action=patch session=%s message=%s running=%v placeholder=%v update_no=%d content_len=%d", source, n.SessionID, n.MessageID, n.Running, n.Content == RunningNotificationPlaceholder, n.UpdateNo, len(n.Content))
 
 	rt.notificationPatchMu.Lock()
-	result, err := rt.manager.notifier.NotifyWaiting(n)
+	rt.mu.Lock()
+	if rt.notificationMessageFrozenLocked(messageID) {
+		rt.mu.Unlock()
+		rt.notificationPatchMu.Unlock()
+		return errors.New("notification message is frozen")
+	}
+	rt.mu.Unlock()
+	result, err := rt.notifyWaitingWithRetry(n)
 	rt.notificationPatchMu.Unlock()
 	if err != nil {
 		return err
@@ -1054,6 +1186,9 @@ func (rt *RuntimeSession) ToggleAutoRefresh(messageID string) (bool, error) {
 	}
 	if messageID == "" {
 		return false, errors.New("notification message is not available")
+	}
+	if rt.notificationMessageFrozenLocked(messageID) {
+		return false, errors.New("notification message is frozen")
 	}
 	if rt.autoRefreshEnabled {
 		rt.stopAutoRefreshLocked()
@@ -1355,7 +1490,7 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 }
 
 func (rt *RuntimeSession) notifyStableDelayLocked() time.Duration {
-	if NotifyContentNeedsConservativeDelay(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.lastInputText) {
+	if notifyContentNeedsConservativeDelayWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.lastInputText, rt.notificationWindowInputText) {
 		return rt.manager.conservativeWaiting
 	}
 	return rt.manager.fastWaiting
@@ -1498,7 +1633,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		return
 	}
 	rt.mu.Unlock()
-	result, err := rt.manager.notifier.NotifyWaiting(n)
+	result, err := rt.notifyWaitingWithRetry(n)
 	rt.notificationPatchMu.Unlock()
 	if err != nil {
 		log.Printf("waiting notification send failed session=%s version=%d hash=%s: %v", n.SessionID, version, shortNotifyHash(contentHash), err)
@@ -1554,7 +1689,7 @@ func (rt *RuntimeSession) waitingNotificationLocked() (WaitingNotification, stri
 func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, bool) {
 	content := strings.TrimSpace(rt.lastNotifiedContent)
 	if content == "" {
-		content = strings.TrimSpace(PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText))
+		content = strings.TrimSpace(rt.currentNotifyContentLocked())
 	}
 	switch {
 	case rt.manager.notifier == nil:
@@ -1626,6 +1761,12 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 	defer rt.notificationPatchMu.Unlock()
 	rt.mu.Lock()
 	currentMessageID := rt.lastNotifiedMessageID
+	if rt.notificationMessageFrozenLocked(note.MessageID) {
+		rt.mu.Unlock()
+		log.Printf("waiting notification running marker skipped session=%s message=%s running=%v reason=frozen_message",
+			note.SessionID, note.MessageID, running)
+		return
+	}
 	if currentMessageID != "" && currentMessageID != note.MessageID {
 		rt.mu.Unlock()
 		log.Printf("waiting notification running marker skipped session=%s message=%s current_message=%s running=%v reason=stale_message",
@@ -1640,7 +1781,7 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 		return
 	}
 	rt.mu.Unlock()
-	if err := notifier.UpdateWaitingRunning(note, running); err != nil {
+	if err := rt.updateWaitingRunningWithRetry(notifier, note, running); err != nil {
 		log.Printf("waiting notification running marker failed session=%s message=%s running=%v: %v", note.SessionID, note.MessageID, running, err)
 		if running {
 			rt.mu.Lock()
@@ -1654,6 +1795,66 @@ func (rt *RuntimeSession) updateNotificationRunning(note WaitingNotification, ru
 	log.Printf("waiting notification running marker updated session=%s message=%s running=%v", note.SessionID, note.MessageID, running)
 }
 
+func (rt *RuntimeSession) updateDisabledNotification(note WaitingNotification) {
+	if rt == nil || rt.manager == nil || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
+		return
+	}
+	note.MessageID = strings.TrimSpace(note.MessageID)
+	if note.MessageID == "" {
+		return
+	}
+	note.Running = false
+	note.Disabled = true
+	note.AutoRefreshEnabled = false
+	note.SuppressUpdateTip = true
+	rt.notificationPatchMu.Lock()
+	defer rt.notificationPatchMu.Unlock()
+	rt.mu.Lock()
+	if !rt.notificationMessageFrozenLocked(note.MessageID) {
+		rt.mu.Unlock()
+		return
+	}
+	rt.mu.Unlock()
+	if _, err := rt.notifyWaitingWithRetry(note); err != nil {
+		log.Printf("disabled notification update failed session=%s message=%s: %v", note.SessionID, note.MessageID, err)
+		return
+	}
+	log.Printf("disabled notification updated session=%s message=%s", note.SessionID, note.MessageID)
+}
+
+func (rt *RuntimeSession) notifyWaitingWithRetry(note WaitingNotification) (WaitingNotificationResult, error) {
+	if rt == nil || rt.manager == nil || rt.manager.notifier == nil {
+		return WaitingNotificationResult{}, errors.New("lark notifier is not configured")
+	}
+	var lastErr error
+	for attempt := 1; attempt <= defaultNotificationSendAttempts; attempt++ {
+		result, err := rt.manager.notifier.NotifyWaiting(note)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if attempt < defaultNotificationSendAttempts {
+			time.Sleep(time.Duration(attempt) * defaultNotificationSendRetryDelay)
+		}
+	}
+	return WaitingNotificationResult{}, lastErr
+}
+
+func (rt *RuntimeSession) updateWaitingRunningWithRetry(notifier WaitingRunningNotifier, note WaitingNotification, running bool) error {
+	var lastErr error
+	for attempt := 1; attempt <= defaultNotificationSendAttempts; attempt++ {
+		if err := notifier.UpdateWaitingRunning(note, running); err != nil {
+			lastErr = err
+			if attempt < defaultNotificationSendAttempts {
+				time.Sleep(time.Duration(attempt) * defaultNotificationSendRetryDelay)
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
 	if rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "" {
 		return WaitingNotification{}, "", false, "waiting_for_lark_chat"
@@ -1661,10 +1862,10 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
-	if NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText) {
+	if notifyContentNeedsMoreSnapshotWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText) {
 		return WaitingNotification{}, "", false, "needs_more_snapshot"
 	}
-	content := PickNotifyContent(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
+	content := rt.currentNotifyContentLocked()
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
@@ -1680,7 +1881,7 @@ func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return true
 	}
-	return NotifyContentNeedsMoreSnapshot(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText)
+	return notifyContentNeedsMoreSnapshotWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
 }
 
 func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {

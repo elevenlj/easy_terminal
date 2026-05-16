@@ -10,9 +10,15 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+)
+
+const (
+	larkAPIRetryAttempts = 3
+	larkAPIRetryDelay    = 120 * time.Millisecond
 )
 
 type LarkAppNotifier struct {
@@ -84,9 +90,11 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	}
 	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
-	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
-	if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
-		elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
+	if !note.Disabled {
+		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
+		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
+			elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
+		}
 	}
 	card := map[string]any{
 		"schema": "2.0",
@@ -286,7 +294,7 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 }
 
 func larkNotificationTitle(note WaitingNotification) string {
-	if note.Running {
+	if note.Running && !note.Disabled {
 		return note.Name + "（Running）"
 	}
 	return note.Name
@@ -296,6 +304,9 @@ func larkNotificationStatusLine(note WaitingNotification) string {
 	prefix := ""
 	if note.UpdateNo > 0 {
 		prefix = fmt.Sprintf("已更新-%d · ", note.UpdateNo)
+	}
+	if note.Disabled {
+		return prefix + "状态：disabled"
 	}
 	if note.Running {
 		return prefix + `状态：<font color="green">Running</font>`
@@ -328,7 +339,7 @@ func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doHTTPRequestWithRetry(req)
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
@@ -364,7 +375,9 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 			Content(content).
 			Build()).
 		Build()
-	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
+	resp, err := retryLarkPatchMessage(func() (*larkim.PatchMessageResp, error) {
+		return n.client.Im.V1.Message.Patch(context.Background(), req)
+	})
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
@@ -396,7 +409,9 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 			Content(content).
 			Build()).
 		Build()
-	resp, err := n.client.Im.V1.Message.Patch(context.Background(), req)
+	resp, err := retryLarkPatchMessage(func() (*larkim.PatchMessageResp, error) {
+		return n.client.Im.V1.Message.Patch(context.Background(), req)
+	})
 	if err != nil {
 		return err
 	}
@@ -430,7 +445,7 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 	if n.tipSender != nil {
 		send = n.tipSender
 	}
-	if err := send(messageID, chatID, updateNo); err != nil {
+	if err := retryLarkVoid(func() error { return send(messageID, chatID, updateNo) }); err != nil {
 		return err
 	}
 
@@ -467,7 +482,9 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 			Content(content).
 			Build()).
 		Build()
-	resp, err := n.client.Im.V1.Message.Create(context.Background(), req)
+	resp, err := retryLarkCreateMessage(func() (*larkim.CreateMessageResp, error) {
+		return n.client.Im.V1.Message.Create(context.Background(), req)
+	})
 	if err != nil {
 		return err
 	}
@@ -498,7 +515,7 @@ func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error)
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doHTTPRequestWithRetry(req)
 	if err != nil {
 		return "", err
 	}
@@ -518,4 +535,93 @@ func (n *LarkAppNotifier) tenantAccessToken(ctx context.Context) (string, error)
 		return "", errors.New(data.Msg)
 	}
 	return data.TenantAccessToken, nil
+}
+
+func doHTTPRequestWithRetry(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= larkAPIRetryAttempts; attempt++ {
+		cloned := req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			cloned.Body = body
+		}
+		resp, err := http.DefaultClient.Do(cloned)
+		if err == nil && resp != nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			lastErr = fmt.Errorf("%s: %s", resp.Status, string(body))
+		} else {
+			lastErr = err
+		}
+		if attempt < larkAPIRetryAttempts {
+			time.Sleep(time.Duration(attempt) * larkAPIRetryDelay)
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("lark request failed")
+	}
+	return nil, lastErr
+}
+
+func retryLarkPatchMessage(fn func() (*larkim.PatchMessageResp, error)) (*larkim.PatchMessageResp, error) {
+	var lastResp *larkim.PatchMessageResp
+	err := retryLarkVoid(func() error {
+		resp, err := fn()
+		lastResp = resp
+		if err != nil {
+			return err
+		}
+		if resp == nil {
+			return errors.New("lark patch message API returned empty response")
+		}
+		if resp != nil && !resp.Success() && retryableLarkCode(resp.Code) {
+			return fmt.Errorf("lark patch message API returned code %d: %s", resp.Code, resp.Msg)
+		}
+		return nil
+	})
+	return lastResp, err
+}
+
+func retryLarkCreateMessage(fn func() (*larkim.CreateMessageResp, error)) (*larkim.CreateMessageResp, error) {
+	var lastResp *larkim.CreateMessageResp
+	err := retryLarkVoid(func() error {
+		resp, err := fn()
+		lastResp = resp
+		if err != nil {
+			return err
+		}
+		if resp == nil {
+			return errors.New("lark create message API returned empty response")
+		}
+		if resp != nil && !resp.Success() && retryableLarkCode(resp.Code) {
+			return fmt.Errorf("lark create message API returned code %d: %s", resp.Code, resp.Msg)
+		}
+		return nil
+	})
+	return lastResp, err
+}
+
+func retryLarkVoid(fn func() error) error {
+	var lastErr error
+	for attempt := 1; attempt <= larkAPIRetryAttempts; attempt++ {
+		if err := fn(); err != nil {
+			lastErr = err
+			if attempt < larkAPIRetryAttempts {
+				time.Sleep(time.Duration(attempt) * larkAPIRetryDelay)
+			}
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+func retryableLarkCode(code int) bool {
+	return code == 99991400 || code == 99991663 || code >= 50000000
 }

@@ -52,6 +52,7 @@ var structuredInputNumericOnlyRE = regexp.MustCompile(`^\d+$`)
 
 const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
+const larkDisabledCardToastContent = "已失效，请点击最新卡片的按钮"
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
@@ -265,25 +266,13 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string
 }
 
 func (b *LarkReplyBridge) handleCardCustomShortcut(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
-	if sessionID == "" && openMessageID != "" {
-		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
-			sessionID = id
-		}
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
 	}
 	command := strings.TrimSpace(fmt.Sprint(value["command"]))
 	if command == "" {
 		return larkCardToast("warning", "指令为空"), nil
-	}
-	if sessionID == "" {
-		return larkCardToast("warning", "未找到会话"), nil
-	}
-	if b.manager == nil {
-		return larkCardToast("warning", "会话不在线"), nil
-	}
-	rt, exists := b.manager.GetRuntime(sessionID)
-	if !exists {
-		return larkCardToast("warning", "会话不在线"), nil
 	}
 	b.manager.EnsureBrowser(sessionID)
 	if err := SubmitStructuredInput(rt, command); err != nil {
@@ -295,26 +284,14 @@ func (b *LarkReplyBridge) handleCardCustomShortcut(ctx context.Context, value ma
 }
 
 func (b *LarkReplyBridge) handleCardShortcut(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
-	if sessionID == "" && openMessageID != "" {
-		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
-			sessionID = id
-		}
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
 	}
 	key := strings.TrimSpace(fmt.Sprint(value["key"]))
 	seq, _, ok := larkShortcutInputSequence(key)
 	if !ok {
 		return larkCardToast("warning", "不支持的快捷键"), nil
-	}
-	if sessionID == "" {
-		return larkCardToast("warning", "未找到会话"), nil
-	}
-	if b.manager == nil {
-		return larkCardToast("warning", "会话不在线"), nil
-	}
-	rt, exists := b.manager.GetRuntime(sessionID)
-	if !exists {
-		return larkCardToast("warning", "会话不在线"), nil
 	}
 	if err := rt.WriteInput(seq); err != nil {
 		return nil, err
@@ -328,21 +305,9 @@ func (b *LarkReplyBridge) handleCardShortcut(ctx context.Context, value map[stri
 }
 
 func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
-	if sessionID == "" && openMessageID != "" {
-		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
-			sessionID = id
-		}
-	}
-	if sessionID == "" {
-		return larkCardToast("warning", "未找到会话"), nil
-	}
-	if b.manager == nil {
-		return larkCardToast("warning", "会话不在线"), nil
-	}
-	rt, exists := b.manager.GetRuntime(sessionID)
-	if !exists {
-		return larkCardToast("warning", "会话不在线"), nil
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
 	}
 	if openMessageID != "" {
 		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
@@ -359,21 +324,9 @@ func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[strin
 }
 
 func (b *LarkReplyBridge) handleCardToggleAutoRefresh(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
-	if sessionID == "" && openMessageID != "" {
-		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
-			sessionID = id
-		}
-	}
-	if sessionID == "" {
-		return larkCardToast("warning", "未找到会话"), nil
-	}
-	if b.manager == nil {
-		return larkCardToast("warning", "会话不在线"), nil
-	}
-	rt, exists := b.manager.GetRuntime(sessionID)
-	if !exists {
-		return larkCardToast("warning", "会话不在线"), nil
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
 	}
 	if openMessageID != "" {
 		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
@@ -402,6 +355,32 @@ func (b *LarkReplyBridge) handleCardToggleAutoRefresh(ctx context.Context, value
 
 func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {
 	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: kind, Content: content}}
+}
+
+func (b *LarkReplyBridge) resolveCardActionRuntime(value map[string]interface{}, openMessageID string) (string, *RuntimeSession, *callback.CardActionTriggerResponse) {
+	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
+	if sessionID == "" && openMessageID != "" {
+		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
+			sessionID = id
+		}
+	}
+	if sessionID == "" {
+		return "", nil, larkCardToast("warning", "未找到会话")
+	}
+	if b.manager == nil {
+		return sessionID, nil, larkCardToast("warning", "会话不在线")
+	}
+	rt, exists := b.manager.GetRuntime(sessionID)
+	if !exists {
+		return sessionID, nil, larkCardToast("warning", "会话不在线")
+	}
+	if err := rt.ValidateNotificationAction(openMessageID); err != nil {
+		if errors.Is(err, errNotificationMessageDisabled) {
+			return sessionID, rt, larkCardToast("warning", larkDisabledCardToastContent)
+		}
+		return sessionID, rt, larkCardToast("warning", err.Error())
+	}
+	return sessionID, rt, nil
 }
 
 func larkShortcutInputSequence(key string) (string, string, bool) {

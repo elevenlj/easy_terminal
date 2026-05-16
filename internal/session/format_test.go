@@ -109,6 +109,22 @@ func TestPickNotifyContentUsesLatestRepeatedInputAnchor(t *testing.T) {
 	}
 }
 
+func TestNotifyContentNeedsMoreSnapshotUsesLatestRepeatedInputInWindow(t *testing.T) {
+	visible := strings.Join([]string{
+		"> ask",
+		"old answer",
+		"> ask",
+	}, "\n")
+	if !notifyContentNeedsMoreSnapshotWithWindow(visible, "", nil, "ask", "ask") {
+		t.Fatalf("window should wait when the latest repeated input has no reply")
+	}
+
+	visible += "\nnew answer"
+	if notifyContentNeedsMoreSnapshotWithWindow(visible, "", nil, "ask", "ask") {
+		t.Fatalf("window should be ready once the latest repeated input has a reply")
+	}
+}
+
 func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
 	input := "第一行\n第二行\n第三行"
 	visible := strings.Join([]string{

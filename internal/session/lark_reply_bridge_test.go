@@ -828,6 +828,74 @@ func TestLarkReplyBridgeFollowupCreatesRunningCard(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeOverlappingFollowupFreezesRunningCardEndToEnd(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{createMessageIDs: []string{"card-start", "card-2", "card-3"}}
+	manager := NewManager(
+		nil,
+		launcher,
+		WithNotifier(notifier),
+		WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond),
+		WithNotificationUpdateCoalesce(0),
+	)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-overlap", "", "", "text", `{"text":"开始 Overlap"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime("sess-1")
+	if !ok {
+		t.Fatal("runtime session missing")
+	}
+	rt.SetVisibleSnapshot("chat\n>")
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-second-overlap", "m-start-overlap", "", "text", `{"text":"second question"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rt.SetVisibleSnapshot("chat\n>\n> second question\npartial second answer")
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-third-overlap", "m-second-overlap", "", "text", `{"text":"third question"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !rt.NotificationMessageFrozen("card-2") {
+		t.Fatal("previous running card should be frozen")
+	}
+
+	rt.SetVisibleSnapshot("chat\n>\n> second question\npartial second answer\n> third question\nfinal third answer\n>")
+	launcher.terminals[0].readCh <- []byte("final third answer\r\n")
+
+	notes := waitForNotifierNotes(t, notifier, 6)
+	if len(notes) != 6 {
+		t.Fatalf("expected three running cards, two disabled updates, and one final update, got %#v", notes)
+	}
+	runningCreates := 0
+	disabledStart := false
+	disabledSecond := false
+	finalLatest := false
+	want := "> second question\npartial second answer\n> third question\nfinal third answer\n>"
+	for _, note := range notes {
+		if note.MessageID == "" && note.Content == RunningNotificationPlaceholder && note.Running {
+			runningCreates++
+		}
+		if note.MessageID == "card-start" && note.Disabled && !note.Running {
+			disabledStart = true
+		}
+		if note.MessageID == "card-2" && note.Disabled && !note.Running {
+			disabledSecond = true
+		}
+		if note.MessageID == "card-3" && note.Content == want && !note.Running && !note.Disabled {
+			finalLatest = true
+		}
+	}
+	if runningCreates != 3 || !disabledStart || !disabledSecond || !finalLatest {
+		t.Fatalf("overlap should disable old cards and update latest card, got %#v", notes)
+	}
+}
+
 func TestLarkReplyBridgeCardShortcutSendsCtrlC(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -1019,6 +1087,71 @@ func TestLarkReplyBridgeCardToggleAutoRefreshWaitsForInterval(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeDisabledCardActionsAreBlockedEndToEnd(t *testing.T) {
+	tests := []struct {
+		name  string
+		value map[string]interface{}
+	}{
+		{
+			name: "shortcut",
+			value: map[string]interface{}{
+				"easy_terminal_action": "shortcut",
+				"key":                  "ctrl_c",
+			},
+		},
+		{
+			name: "custom shortcut",
+			value: map[string]interface{}{
+				"easy_terminal_action": "custom_shortcut",
+				"command":              "git status",
+			},
+		},
+		{
+			name: "refresh",
+			value: map[string]interface{}{
+				"easy_terminal_action": "refresh",
+			},
+		},
+		{
+			name: "toggle auto refresh",
+			value: map[string]interface{}{
+				"easy_terminal_action": "toggle_auto_refresh",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bridge, rt, launcher, notifier, sessionID := newDisabledCardBridge(t)
+			tt.value["session_id"] = sessionID
+			event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+				Action:  &callback.CallBackAction{Value: tt.value},
+				Context: &callback.Context{OpenMessageID: "old-card"},
+			}}
+
+			resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp == nil || resp.Toast == nil || resp.Toast.Content != larkDisabledCardToastContent {
+				t.Fatalf("disabled card should return disabled toast, got %#v", resp)
+			}
+			if parts := launcher.terminals[0].writeParts(); len(parts) != 0 {
+				t.Fatalf("disabled card should not write terminal input, got %#v", parts)
+			}
+			if notes := notifier.notes(); len(notes) != 0 {
+				t.Fatalf("disabled card should not update notifications, got %#v", notes)
+			}
+			rt.mu.Lock()
+			autoRefreshEnabled := rt.autoRefreshEnabled
+			lastInputText := rt.lastInputText
+			rt.mu.Unlock()
+			if autoRefreshEnabled || lastInputText != "" {
+				t.Fatalf("disabled card should not mutate runtime action state, auto=%v input=%q", autoRefreshEnabled, lastInputText)
+			}
+		})
+	}
+}
+
 func waitForNotifierNotes(t *testing.T, notifier *recordingNotifier, want int) []WaitingNotification {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -1030,6 +1163,34 @@ func waitForNotifierNotes(t *testing.T, notifier *recordingNotifier, want int) [
 		time.Sleep(10 * time.Millisecond)
 	}
 	return notifier.notes()
+}
+
+func newDisabledCardBridge(t *testing.T) (*LarkReplyBridge, *RuntimeSession, *recordingLauncher, *recordingNotifier, string) {
+	t.Helper()
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "latest-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier), WithAutoRefreshInterval(80*time.Millisecond))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Disabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime not found")
+	}
+	rt.mu.Lock()
+	rt.lastNotifiedMessageID = "latest-card"
+	rt.lastNotifiedContent = "latest content"
+	rt.frozenNotificationMessages = map[string]struct{}{"old-card": {}}
+	rt.mu.Unlock()
+	defaultLarkMessageRegistry.remember(sess.ID, "old-card")
+	defaultLarkMessageRegistry.remember(sess.ID, "latest-card")
+	return bridge, rt, launcher, notifier, sess.ID
 }
 
 func TestLarkReplyBridgeCardCustomShortcutSubmitsCommand(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -798,6 +799,59 @@ func TestAutoRefreshRebindsToNewRunningCard(t *testing.T) {
 	}
 }
 
+func TestOverlappingRunningInputFreezesPreviousCardAndCarriesWindowStart(t *testing.T) {
+	notifier := &recordingNotifier{createMessageIDs: []string{"card-2", "card-3"}}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.SetVisibleSnapshot("chat\n>")
+
+	rt.MarkInputActivity("second question\r")
+	rt.NotifyInputRunning()
+	rt.SetVisibleSnapshot("chat\n>\n> second question\npartial second answer")
+
+	rt.MarkInputActivity("third question\r")
+	rt.NotifyInputRunning()
+	if !rt.NotificationMessageFrozen("card-2") {
+		t.Fatal("previous running card should be frozen after overlapping input")
+	}
+	if err := rt.RefreshNotificationMessage("card-2"); err == nil {
+		t.Fatal("frozen card should reject manual refresh")
+	}
+
+	rt.SetVisibleSnapshot("chat\n>\n> second question\npartial second answer\n> third question\nfinal third answer\n>")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+	rt.notifyIfStillWaiting(version)
+
+	notes := waitForNotifierNotes(t, notifier, 4)
+	if len(notes) != 4 {
+		t.Fatalf("expected two running creates, one disabled update, and one final update, got %#v", notes)
+	}
+	runningCreates := 0
+	disabledOldCard := false
+	finalLatestCard := false
+	want := "> second question\npartial second answer\n> third question\nfinal third answer\n>"
+	for _, note := range notes {
+		if note.MessageID == "" && note.Content == RunningNotificationPlaceholder && note.Running {
+			runningCreates++
+		}
+		if note.MessageID == "card-2" && note.Disabled && !note.Running {
+			disabledOldCard = true
+		}
+		if note.MessageID == "card-3" && note.Content == want && !note.Running && !note.Disabled {
+			finalLatestCard = true
+		}
+	}
+	if runningCreates != 2 || !disabledOldCard || !finalLatestCard {
+		t.Fatalf("overlap should disable old card and patch latest card, got %#v", notes)
+	}
+}
+
 func TestRefreshNotificationMessagePreventsStaleRunningPlaceholderOverwrite(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
@@ -1415,6 +1469,78 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationCardContentDisabledRemovesButtons(t *testing.T) {
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   RunningNotificationPlaceholder,
+		Running:   true,
+		Disabled:  true,
+	}, "ou_1", false, LarkCustomShortcut{Label: "状态", Command: "git status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, "状态：disabled") {
+		t.Fatalf("disabled card should include disabled status, got %s", content)
+	}
+	for _, forbidden := range []string{`"tag":"button"`, `"easy_terminal_action"`, `"custom_shortcut"`, `"content":"刷新"`, `"content":"Ctrl-C"`, "A（Running）"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("disabled card should remove buttons and running title, found %q in %s", forbidden, content)
+		}
+	}
+}
+
+func TestRefreshNotificationMessageRetriesNotifierFailures(t *testing.T) {
+	notifier := &flakyNotifier{
+		recordingNotifier: recordingNotifier{messageID: "bot-card"},
+		failNotify:        2,
+	}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+	if got := notifier.notifyAttemptCount(); got != 3 {
+		t.Fatalf("refresh should retry notifier failures, got %d attempts", got)
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || notes[0].Content != "hello\n$" {
+		t.Fatalf("refresh should patch card after retry, got %#v", notes)
+	}
+}
+
+func TestUpdateNotificationRunningRetriesNotifierFailures(t *testing.T) {
+	notifier := &flakyNotifier{failRunning: 2}
+	m := NewManager(nil, nil, WithNotifier(notifier))
+	rt := &RuntimeSession{
+		manager:                  m,
+		session:                  Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:    "bot-card",
+		notificationPatchVersion: 1,
+	}
+	rt.updateNotificationRunning(WaitingNotification{
+		SessionID:           "sess-1",
+		Name:                "A",
+		Content:             "done",
+		MessageID:           "bot-card",
+		NotificationVersion: 1,
+	}, true)
+
+	if got := notifier.runningAttemptCount(); got != 3 {
+		t.Fatalf("running update should retry notifier failures, got %d attempts", got)
+	}
+	notes := notifier.runningNotes()
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].Running {
+		t.Fatalf("running update should succeed after retry, got %#v", notes)
+	}
+}
+
 func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
 	content, err := larkUpdateTipCardContent(3, "", false)
 	if err != nil {
@@ -1888,10 +2014,13 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 }
 
 type recordingNotifier struct {
-	mu           sync.Mutex
-	items        []WaitingNotification
-	runningItems []WaitingNotification
-	messageID    string
+	mu               sync.Mutex
+	items            []WaitingNotification
+	runningItems     []WaitingNotification
+	messageID        string
+	messageIDs       []string
+	createMessageIDs []string
+	createIndex      int
 }
 
 func (n *recordingNotifier) Available() bool { return true }
@@ -1899,8 +2028,19 @@ func (n *recordingNotifier) Available() bool { return true }
 func (n *recordingNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	index := len(n.items)
 	n.items = append(n.items, note)
-	messageID := n.messageID
+	messageID := note.MessageID
+	if messageID == "" && n.createIndex < len(n.createMessageIDs) {
+		messageID = n.createMessageIDs[n.createIndex]
+		n.createIndex++
+	}
+	if messageID == "" && index < len(n.messageIDs) {
+		messageID = n.messageIDs[index]
+	}
+	if messageID == "" && n.messageID != "" {
+		messageID = n.messageID
+	}
 	if messageID == "" {
 		messageID = "msg-recording"
 	}
@@ -1935,6 +2075,50 @@ func (n *recordingNotifier) runningNotes() []WaitingNotification {
 	cp := make([]WaitingNotification, len(n.runningItems))
 	copy(cp, n.runningItems)
 	return cp
+}
+
+type flakyNotifier struct {
+	recordingNotifier
+	failNotify      int
+	failRunning     int
+	notifyAttempts  int
+	runningAttempts int
+}
+
+func (n *flakyNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificationResult, error) {
+	n.mu.Lock()
+	n.notifyAttempts++
+	if n.failNotify > 0 {
+		n.failNotify--
+		n.mu.Unlock()
+		return WaitingNotificationResult{}, errors.New("temporary notify failure")
+	}
+	n.mu.Unlock()
+	return n.recordingNotifier.NotifyWaiting(note)
+}
+
+func (n *flakyNotifier) UpdateWaitingRunning(note WaitingNotification, running bool) error {
+	n.mu.Lock()
+	n.runningAttempts++
+	if n.failRunning > 0 {
+		n.failRunning--
+		n.mu.Unlock()
+		return errors.New("temporary running failure")
+	}
+	n.mu.Unlock()
+	return n.recordingNotifier.UpdateWaitingRunning(note, running)
+}
+
+func (n *flakyNotifier) notifyAttemptCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.notifyAttempts
+}
+
+func (n *flakyNotifier) runningAttemptCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.runningAttempts
 }
 
 type runningNoteRecorder interface {
