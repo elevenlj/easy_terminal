@@ -74,6 +74,7 @@ textarea {
 }
 
 .sidebar {
+  height: 100vh;
   min-height: 100vh;
   padding: 28px 26px;
   border-right: 1px solid var(--line);
@@ -81,6 +82,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  overflow: hidden;
 }
 
 .eyebrow {
@@ -100,6 +102,7 @@ textarea {
   margin-top: auto;
   padding-top: 18px;
   display: flex;
+  flex: 0 0 auto;
   justify-content: flex-start;
 }
 
@@ -128,8 +131,15 @@ textarea {
 
 .sessions {
   display: grid;
+  flex: 1 1 auto;
   gap: 14px;
+  align-content: start;
+  min-height: 0;
   margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .session {
@@ -1197,9 +1207,16 @@ dialog::backdrop {
   }
 
   .sidebar {
+    height: auto;
     min-height: auto;
+    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .sessions {
+    flex: 0 1 auto;
+    max-height: min(46vh, 420px);
   }
 
   .sidebar-footer {
