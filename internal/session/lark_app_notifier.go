@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	larkAPIRetryAttempts = 3
-	larkAPIRetryDelay    = 120 * time.Millisecond
+	larkAPIRetryAttempts            = 3
+	larkAPIRetryDelay               = 120 * time.Millisecond
+	larkCustomShortcutButtonsPerRow = 3
 )
 
 type LarkAppNotifier struct {
@@ -93,7 +94,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	if !note.Disabled {
 		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
-			elements = append(elements, larkCustomShortcutActionElement(note.SessionID, shortcuts))
+			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
 		}
 	}
 	card := map[string]any{
@@ -250,6 +251,18 @@ func larkRefreshButtonColumn(sessionID string, updateNo int) map[string]any {
 			},
 		},
 	}
+}
+
+func larkCustomShortcutActionElements(sessionID string, shortcuts []LarkCustomShortcut) []map[string]any {
+	rows := make([]map[string]any, 0, (len(shortcuts)+larkCustomShortcutButtonsPerRow-1)/larkCustomShortcutButtonsPerRow)
+	for start := 0; start < len(shortcuts); start += larkCustomShortcutButtonsPerRow {
+		end := start + larkCustomShortcutButtonsPerRow
+		if end > len(shortcuts) {
+			end = len(shortcuts)
+		}
+		rows = append(rows, larkCustomShortcutActionElement(sessionID, shortcuts[start:end]))
+	}
+	return rows
 }
 
 func larkCustomShortcutActionElement(sessionID string, shortcuts []LarkCustomShortcut) map[string]any {

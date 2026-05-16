@@ -1490,6 +1490,85 @@ func TestLarkNotificationCardContentDisabledRemovesButtons(t *testing.T) {
 	}
 }
 
+func TestLarkNotificationCardContentWrapsCustomShortcutButtons(t *testing.T) {
+	shortcuts := []LarkCustomShortcut{
+		{Label: "cdx启动", Command: "cdx"},
+		{Label: "查看状态", Command: "git status"},
+		{Label: "拉取更新", Command: "git pull"},
+		{Label: "运行测试", Command: "go test ./..."},
+		{Label: "查看日志", Command: "tail -f app.log"},
+		{Label: "重启服务", Command: "make restart"},
+		{Label: "构建发布", Command: "make release"},
+	}
+	content, err := larkNotificationCardContent(WaitingNotification{
+		SessionID: "sess-1",
+		Name:      "A",
+		Content:   RunningNotificationPlaceholder,
+		Running:   true,
+	}, "ou_1", false, shortcuts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type behavior struct {
+		Value struct {
+			Action string `json:"easy_terminal_action"`
+		} `json:"value"`
+	}
+	type button struct {
+		Text struct {
+			Content string `json:"content"`
+		} `json:"text"`
+		Behaviors []behavior `json:"behaviors"`
+	}
+	type column struct {
+		Elements []button `json:"elements"`
+	}
+	type element struct {
+		Tag     string   `json:"tag"`
+		Columns []column `json:"columns"`
+	}
+	var card struct {
+		Body struct {
+			Elements []element `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(content), &card); err != nil {
+		t.Fatal(err)
+	}
+
+	customRows := []element{}
+	for _, elem := range card.Body.Elements {
+		if elem.Tag != "column_set" {
+			continue
+		}
+		if len(elem.Columns) == 0 || len(elem.Columns[0].Elements) == 0 || len(elem.Columns[0].Elements[0].Behaviors) == 0 {
+			continue
+		}
+		if elem.Columns[0].Elements[0].Behaviors[0].Value.Action == "custom_shortcut" {
+			customRows = append(customRows, elem)
+		}
+	}
+	if len(customRows) != 3 {
+		t.Fatalf("custom shortcut buttons should wrap into 3 rows, got %#v", customRows)
+	}
+	var labels []string
+	for _, row := range customRows {
+		if len(row.Columns) > larkCustomShortcutButtonsPerRow {
+			t.Fatalf("custom shortcut row should contain at most %d buttons, got %#v", larkCustomShortcutButtonsPerRow, row)
+		}
+		for _, col := range row.Columns {
+			if len(col.Elements) == 0 {
+				t.Fatalf("custom shortcut column should contain a button, got %#v", row)
+			}
+			labels = append(labels, col.Elements[0].Text.Content)
+		}
+	}
+	if strings.Join(labels, ",") != "cdx启动,查看状态,拉取更新,运行测试,查看日志,重启服务,构建发布" {
+		t.Fatalf("custom shortcut labels should keep order, got %#v", labels)
+	}
+}
+
 func TestRefreshNotificationMessageRetriesNotifierFailures(t *testing.T) {
 	notifier := &flakyNotifier{
 		recordingNotifier: recordingNotifier{messageID: "bot-card"},
