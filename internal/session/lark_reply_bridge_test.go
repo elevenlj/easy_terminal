@@ -1300,8 +1300,8 @@ func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 		"mkdir -p '测试'\r",
 		"cd '测试'\r",
 		"codex\r",
@@ -1330,8 +1330,8 @@ func TestLarkReplyBridgeStartWithoutCodesUsesDefaultAgentPreset(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 		"codex --dangerously-bypass-approvals-and-sandbox\r",
 	}
 	if len(parts) != len(want) {
@@ -1358,8 +1358,8 @@ func TestLarkReplyBridgeSlashStartWithoutCodesUsesDefaultAgentPreset(t *testing.
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 		"codex --dangerously-bypass-approvals-and-sandbox\r",
 	}
 	if len(parts) != len(want) {
@@ -1386,8 +1386,8 @@ func TestLarkReplyBridgeStartCodeZeroOnlyEntersWorkspace(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 	}
 	if len(parts) != len(want) {
 		t.Fatalf("code zero writes = %#v, want %#v", parts, want)
@@ -1413,8 +1413,8 @@ func TestLarkReplyBridgeStartDefaultAgentPresetUsesReservedCode(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 		"codex --dangerously-bypass-approvals-and-sandbox\r",
 	}
 	if len(parts) != len(want) {
@@ -1506,8 +1506,8 @@ func TestLarkReplyBridgeStartNamePresetRequiresExactMatch(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/会话 A 草稿'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/会话 A 草稿'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/会话 A 草稿'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/会话 A 草稿'\r",
 	}
 	if len(parts) != len(want) {
 		t.Fatalf("non-exact name preset should only run default workspace commands, got %#v want %#v", parts, want)
@@ -1576,8 +1576,8 @@ func TestLarkReplyBridgeStartRunsHyphenSeparatedPresetCodes(t *testing.T) {
 	}
 	parts := launcher.terminals[0].writeParts()
 	want := []string{
-		"mkdir -p ${HOME}/'Easy Terminal Workspace/测试'\r",
-		"cd ${HOME}/'Easy Terminal Workspace/测试'\r",
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
 		"one\r",
 		"twenty-three\r",
 		"two-two-three\r",
@@ -1608,10 +1608,10 @@ func TestLarkReplyBridgeStartPresetQuotesVariables(t *testing.T) {
 	if len(parts) != 4 {
 		t.Fatalf("preset writes = %#v", parts)
 	}
-	if parts[0] != "mkdir -p ${HOME}/'Easy Terminal Workspace/项目 O'\\''Brien'\r" {
+	if parts[0] != "mkdir -p ${HOME}/'Easy_Terminal_Workspace/项目 O'\\''Brien'\r" {
 		t.Fatalf("workspace mkdir write = %q", parts[0])
 	}
-	if parts[1] != "cd ${HOME}/'Easy Terminal Workspace/项目 O'\\''Brien'\r" {
+	if parts[1] != "cd ${HOME}/'Easy_Terminal_Workspace/项目 O'\\''Brien'\r" {
 		t.Fatalf("workspace cd write = %q", parts[1])
 	}
 	if parts[2] != "mkdir -p '项目 O'\\''Brien'\r" {

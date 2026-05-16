@@ -53,6 +53,7 @@ var structuredInputNumericOnlyRE = regexp.MustCompile(`^\d+$`)
 const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
 const larkDisabledCardToastContent = "已失效，请点击最新卡片的按钮"
+const defaultWorkspaceRootDir = "Easy_Terminal_Workspace"
 
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
@@ -1039,7 +1040,7 @@ func safeWorkspaceSessionDir(value string) string {
 }
 
 func defaultWorkspaceShellPath(sessionName string) string {
-	return "${HOME}/" + shellQuote("Easy Terminal Workspace/"+safeWorkspaceSessionDir(sessionName))
+	return "${HOME}/" + shellQuote(defaultWorkspaceRootDir+"/"+safeWorkspaceSessionDir(sessionName))
 }
 
 func slugForShellPath(value string) string {

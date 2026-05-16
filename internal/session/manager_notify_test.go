@@ -524,7 +524,7 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 		lastNotifiedVisibleSnapshot: "stale previous round\nold footer",
 		snapshotAtRoundStart: strings.Join([]string{
 			"old output",
-			"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+			"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 		}, "\n"),
 		snapshotAtRoundStartSet: true,
 		visibleSnapshot: strings.Join([]string{
@@ -532,7 +532,7 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 			"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
 			"  (no output)",
 			"已关闭 8083 接口。",
-			"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+			"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 		}, "\n"),
 		visibleSnapshotVersion: 2,
 		snapshotAtRoundVersion: 1,

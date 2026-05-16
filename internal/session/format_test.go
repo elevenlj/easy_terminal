@@ -143,14 +143,14 @@ func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
 func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
 	previous := strings.Join([]string{
 		"old output",
-		"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+		"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 	}, "\n")
 	visible := strings.Join([]string{
 		"old output",
 		"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
 		"  (no output)",
 		"已关闭 8083 接口。",
-		"gpt-5.4 low fast · ~/Easy Terminal Workspace/测试",
+		"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 	}, "\n")
 	got := PickNotifyContent(visible, previous, nil, "关闭 8083")
 	want := strings.Join([]string{
