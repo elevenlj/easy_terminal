@@ -41,6 +41,7 @@ type LarkReplyBridge struct {
 	addReaction             func(context.Context, string, string) error
 	createChat              func(context.Context, string, string, string) (string, error)
 	sendChatText            func(context.Context, string, string) error
+	removeBotFromChat       func(context.Context, string) error
 	startMu                 sync.Mutex
 	cancelStart             context.CancelFunc
 	startID                 int64
@@ -90,6 +91,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 	b.addReaction = b.addLarkMessageReaction
 	b.createChat = b.createLarkChat
 	b.sendChatText = b.sendTextToChat
+	b.removeBotFromChat = b.removeLarkBotFromChat
 	return b
 }
 
@@ -230,6 +232,7 @@ func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload [
 	}
 	var action struct {
 		OpenMessageID string `json:"open_message_id"`
+		OpenChatID    string `json:"open_chat_id"`
 		Action        *struct {
 			Value map[string]interface{} `json:"value"`
 		} `json:"action"`
@@ -241,7 +244,7 @@ func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload [
 	if action.Action != nil {
 		value = action.Action.Value
 	}
-	return b.handleCardAction(ctx, value, action.OpenMessageID)
+	return b.handleCardAction(ctx, value, action.OpenMessageID, action.OpenChatID)
 }
 
 func (b *LarkReplyBridge) HandleCardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
@@ -250,13 +253,15 @@ func (b *LarkReplyBridge) HandleCardActionTrigger(ctx context.Context, event *ca
 	}
 	value := event.Event.Action.Value
 	openMessageID := ""
+	openChatID := ""
 	if event.Event.Context != nil {
 		openMessageID = event.Event.Context.OpenMessageID
+		openChatID = event.Event.Context.OpenChatID
 	}
-	return b.handleCardAction(ctx, value, openMessageID)
+	return b.handleCardAction(ctx, value, openMessageID, openChatID)
 }
 
-func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string]interface{}, openMessageID string, openChatID string) (*callback.CardActionTriggerResponse, error) {
 	switch fmt.Sprint(value["easy_terminal_action"]) {
 	case "shortcut":
 		return b.handleCardShortcut(ctx, value, openMessageID)
@@ -266,9 +271,41 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string
 		return b.handleCardRefresh(ctx, value, openMessageID)
 	case "toggle_auto_refresh":
 		return b.handleCardToggleAutoRefresh(ctx, value, openMessageID)
+	case "delete_session":
+		return b.handleCardDeleteSession(ctx, value, openMessageID, openChatID)
 	default:
 		return larkCardToast("warning", "未知操作"), nil
 	}
+}
+
+func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map[string]interface{}, openMessageID string, openChatID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
+	}
+	sess := rt.Snapshot()
+	chatID := strings.TrimSpace(sess.LarkChatID)
+	if chatID == "" {
+		chatID = strings.TrimSpace(openChatID)
+	}
+	if chatID != "" {
+		defaultLarkMessageRegistry.forgetChat(chatID, sessionID)
+	}
+	if b.uploadsDir != "" {
+		_ = os.RemoveAll(filepath.Join(b.uploadsDir, sessionID))
+	}
+	if err := b.manager.DeleteSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	log.Printf("lark card deleted session=%s message=%s chat=%s", sessionID, openMessageID, chatID)
+	if chatID != "" && b.removeBotFromChat != nil {
+		if err := b.removeBotFromChat(ctx, chatID); err != nil {
+			log.Printf("lark card deleted session but failed to remove bot from chat session=%s chat=%s: %v", sessionID, chatID, err)
+			return larkCardToast("warning", "会话已删除，但机器人移出群聊失败，请手动移除机器人"), nil
+		}
+		return larkCardToast("info", "会话已删除，机器人已退出群聊"), nil
+	}
+	return larkCardToast("info", "会话已删除"), nil
 }
 
 func (b *LarkReplyBridge) handleCardCustomShortcut(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
@@ -1265,6 +1302,29 @@ func (b *LarkReplyBridge) sendTextToChat(ctx context.Context, chatID string, tex
 	}
 	if !resp.Success() {
 		return fmt.Errorf("lark chat text API returned code %d: %s", resp.Code, resp.Msg)
+	}
+	return nil
+}
+
+func (b *LarkReplyBridge) removeLarkBotFromChat(ctx context.Context, chatID string) error {
+	appID := strings.TrimSpace(b.appID)
+	chatID = strings.TrimSpace(chatID)
+	if b.apiClient == nil || chatID == "" || appID == "" {
+		return nil
+	}
+	req := larkim.NewDeleteChatMembersReqBuilder().
+		ChatId(chatID).
+		MemberIdType(larkim.MemberIdTypeDeleteChatMembersAppId).
+		Body(larkim.NewDeleteChatMembersReqBodyBuilder().
+			IdList([]string{appID}).
+			Build()).
+		Build()
+	resp, err := b.apiClient.Im.V1.ChatMembers.Delete(ctx, req)
+	if err != nil {
+		return err
+	}
+	if !resp.Success() {
+		return fmt.Errorf("lark remove bot from chat API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
 }

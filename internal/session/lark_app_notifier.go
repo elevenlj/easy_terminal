@@ -152,6 +152,7 @@ func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabl
 		larkShortcutActionElement(
 			larkRefreshButtonColumn(sessionID, updateNo),
 			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
+			larkDeleteSessionButtonColumn(sessionID),
 		),
 		larkShortcutActionElement(
 			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
@@ -231,6 +232,40 @@ func larkShortcutButton(label, buttonType, sessionID, key string) map[string]any
 				},
 			},
 		},
+	}
+}
+
+func larkDeleteSessionButtonColumn(sessionID string) map[string]any {
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":     "button",
+				"type":    "danger",
+				"size":    "small",
+				"width":   "default",
+				"text":    map[string]any{"tag": "plain_text", "content": "删除会话"},
+				"confirm": larkDeleteSessionConfirm(),
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "delete_session",
+							"session_id":           sessionID,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func larkDeleteSessionConfirm() map[string]any {
+	return map[string]any{
+		"title": map[string]any{"tag": "plain_text", "content": "确认删除会话？"},
+		"text":  map[string]any{"tag": "plain_text", "content": "删除后会关闭终端会话，并把机器人从当前群聊移除。"},
 	}
 }
 

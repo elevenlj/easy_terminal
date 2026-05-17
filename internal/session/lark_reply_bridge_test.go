@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1010,6 +1012,96 @@ func TestLarkReplyBridgeLegacyCardPayloadSendsCtrlC(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeCardDeleteSessionRemovesBotFromChat(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	uploadsDir := t.TempDir()
+	bridge := NewLarkReplyBridge("cli_a", "secret", manager, uploadsDir)
+	var removedChats []string
+	bridge.removeBotFromChat = func(_ context.Context, chatID string) error {
+		removedChats = append(removedChats, chatID)
+		return nil
+	}
+	sess, err := manager.CreateSession(context.Background(), "Delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-chat-delete"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	uploadPath := filepath.Join(uploadsDir, sess.ID)
+	if err := os.MkdirAll(uploadPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defaultLarkMessageRegistry.remember(sess.ID, "bot-card")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "delete_session",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card", OpenChatID: "oc-chat-delete"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "会话已删除，机器人已退出群聊" {
+		t.Fatalf("unexpected delete response: %#v", resp)
+	}
+	if _, ok := manager.GetRuntime(sess.ID); ok {
+		t.Fatal("deleted session runtime should be removed")
+	}
+	if _, ok, err := manager.GetSession(context.Background(), sess.ID); err != nil || ok {
+		t.Fatalf("deleted session should not be listed, ok=%v err=%v", ok, err)
+	}
+	if len(removedChats) != 1 || removedChats[0] != "oc-chat-delete" {
+		t.Fatalf("delete should remove bot from bound chat, got %#v", removedChats)
+	}
+	if got, ok := defaultLarkMessageRegistry.lookupChat("oc-chat-delete"); ok || got != "" {
+		t.Fatalf("deleted chat route should be forgotten, got %q,%v", got, ok)
+	}
+	if _, err := os.Stat(uploadPath); !os.IsNotExist(err) {
+		t.Fatalf("delete should remove session upload dir, err=%v", err)
+	}
+}
+
+func TestLarkReplyBridgeCardDeleteSessionReportsBotRemovalFailure(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("cli_a", "secret", manager, t.TempDir())
+	bridge.removeBotFromChat = func(context.Context, string) error {
+		return errors.New("missing permission")
+	}
+	sess, err := manager.CreateSession(context.Background(), "Delete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-chat-delete"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "delete_session",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card", OpenChatID: "oc-chat-delete"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Type != "warning" || !strings.Contains(resp.Toast.Content, "机器人移出群聊失败") {
+		t.Fatalf("unexpected delete failure response: %#v", resp)
+	}
+	if _, ok := manager.GetRuntime(sess.ID); ok {
+		t.Fatal("session should still be deleted when bot removal fails")
+	}
+}
+
 func TestLarkReplyBridgeCardShortcutExitsAgentWithDoubleCtrlC(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -1160,6 +1252,12 @@ func TestLarkReplyBridgeDisabledCardActionsAreBlockedEndToEnd(t *testing.T) {
 			name: "toggle auto refresh",
 			value: map[string]interface{}{
 				"easy_terminal_action": "toggle_auto_refresh",
+			},
+		},
+		{
+			name: "delete session",
+			value: map[string]interface{}{
+				"easy_terminal_action": "delete_session",
 			},
 		},
 	}

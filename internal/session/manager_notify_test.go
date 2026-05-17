@@ -1441,8 +1441,15 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "自动刷新") || !strings.Contains(content, `"easy_terminal_action":"toggle_auto_refresh"`) {
 		t.Fatalf("card content should include auto refresh button, got %s", content)
 	}
+	if !strings.Contains(content, "删除会话") || !strings.Contains(content, `"easy_terminal_action":"delete_session"`) || !strings.Contains(content, `"type":"danger"`) {
+		t.Fatalf("card content should include prominent delete button, got %s", content)
+	}
+	if !strings.Contains(content, `"confirm"`) || !strings.Contains(content, "确认删除会话？") || !strings.Contains(content, "机器人从当前群聊移除") {
+		t.Fatalf("delete button should include confirmation dialog, got %s", content)
+	}
 	if !(strings.Index(content, `"content":"刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
+		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出agent"`) &&
 		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
@@ -1452,7 +1459,7 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
 		t.Fatalf("card content should include custom shortcut row, got %s", content)
 	}
-	for _, label := range []string{"刷新", "自动刷新", "Ctrl-C", "退出agent", "Esc", "Enter"} {
+	for _, label := range []string{"刷新", "自动刷新", "删除会话", "Ctrl-C", "退出agent", "Esc", "Enter"} {
 		if !strings.Contains(content, `"content":"`+label+`"`) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
