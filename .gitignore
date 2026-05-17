@@ -10,3 +10,4 @@ promo/*.mp4
 promo/*.wav
 promo/*.png
 promo/slides/
+/conf_team/config.local.json

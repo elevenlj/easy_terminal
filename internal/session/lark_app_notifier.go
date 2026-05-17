@@ -244,7 +244,7 @@ func larkDeleteSessionButtonColumn(sessionID string) map[string]any {
 			{
 				"tag":     "button",
 				"type":    "danger",
-				"size":    "small",
+				"size":    "tiny",
 				"width":   "default",
 				"text":    map[string]any{"tag": "plain_text", "content": "删除会话"},
 				"confirm": larkDeleteSessionConfirm(),

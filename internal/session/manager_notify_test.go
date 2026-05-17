@@ -1521,6 +1521,9 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, `"size":"tiny"`) {
 		t.Fatalf("card shortcut buttons should be small, got %s", content)
 	}
+	if strings.Contains(content, `"size":"small"`) {
+		t.Fatalf("card shortcut buttons should all use tiny size, got %s", content)
+	}
 	if !strings.Contains(content, `"schema":"2.0"`) || !strings.Contains(content, `"behaviors"`) || !strings.Contains(content, `"callback"`) {
 		t.Fatalf("card shortcut buttons should use card 2.0 callback behavior, got %s", content)
 	}
