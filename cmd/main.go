@@ -122,7 +122,7 @@ func run() error {
 		),
 		session.WithAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs)*time.Millisecond),
 		session.WithBrowserNeeded(headless.Ensure),
-		session.WithBrowserActive(headless.Stop),
+		session.WithBrowserStopped(headless.Stop),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 		session.WithSessionEnded(func(sessionID string) {
 			headless.Stop(sessionID)
@@ -486,7 +486,7 @@ func (m *headlessBrowserManager) Stop(sessionID string) {
 	if sess == nil || sess.cmd == nil || sess.cmd.Process == nil || sess.cmd.ProcessState != nil {
 		return
 	}
-	log.Printf("headless browser stopped because real browser is active (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
+	log.Printf("headless browser stopped (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
 	_ = sess.cmd.Process.Kill()
 }
 

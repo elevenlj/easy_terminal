@@ -71,6 +71,7 @@ type Manager struct {
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
 	onBrowserActive     func(string)
+	onBrowserStopped    func(string)
 	onNotificationSent  func(string)
 	onSessionEnded      func(string)
 }
@@ -141,6 +142,10 @@ func WithBrowserActive(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onBrowserActive = fn }
 }
 
+func WithBrowserStopped(fn func(string)) ManagerOption {
+	return func(m *Manager) { m.onBrowserStopped = fn }
+}
+
 func WithSessionEnded(fn func(string)) ManagerOption {
 	return func(m *Manager) { m.onSessionEnded = fn }
 }
@@ -195,6 +200,13 @@ func (m *Manager) BrowserActive(sessionID string) {
 		return
 	}
 	go m.onBrowserActive(sessionID)
+}
+
+func (m *Manager) StopBrowser(sessionID string) {
+	if m.onBrowserStopped == nil || sessionID == "" {
+		return
+	}
+	go m.onBrowserStopped(sessionID)
 }
 
 func (m *Manager) SetNotificationSentHook(fn func(string)) {
@@ -352,6 +364,11 @@ func (m *Manager) UpdateNotifyOnWaiting(ctx context.Context, id string, enabled 
 	s := rt.session
 	rt.mu.Unlock()
 	err := m.persist(ctx, s)
+	if enabled {
+		m.EnsureBrowser(id)
+	} else {
+		m.StopBrowser(id)
+	}
 	s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
 	return s, true, err
 }
@@ -531,6 +548,7 @@ type RuntimeSession struct {
 	startupNotifyMode           startupNotifyMode
 	subscribers                 map[chan RuntimeEvent]runtimeSubscriber
 	snapshotWaiters             []chan struct{}
+	pendingHeadlessSnapshots    int
 	nextSeq                     int64
 	stateVersion                int64
 	notifyVersion               int64
@@ -579,12 +597,13 @@ func (rt *RuntimeSession) SubscribeWithMode(headless bool) (chan RuntimeEvent, f
 	}
 	rt.subscribers[ch] = runtimeSubscriber{Headless: headless}
 	needsSnapshot := len(rt.snapshotWaiters) > 0
+	headlessOnly := rt.pendingHeadlessSnapshots > 0
 	sessionID := rt.session.ID
 	rt.mu.Unlock()
 	if !headless && rt.manager != nil {
 		rt.manager.BrowserActive(sessionID)
 	}
-	if needsSnapshot {
+	if needsSnapshot && (headless || !headlessOnly) {
 		select {
 		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
 		default:
@@ -661,10 +680,10 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 		source = "unknown"
 	}
 	rt.mu.Lock()
-	if isHeadlessSnapshotSource(source) && rt.hasRealSubscriberLocked() {
+	if isBrowserSnapshotSource(source) && (rt.pendingHeadlessSnapshots > 0 || rt.hasHeadlessSubscriberLocked()) {
 		sessionID := rt.session.ID
 		rt.mu.Unlock()
-		log.Printf("visible snapshot ignored session=%s source=%s reason=real_browser_active len=%d", sessionID, source, len(data))
+		log.Printf("visible snapshot ignored session=%s source=%s reason=headless_snapshot_active len=%d", sessionID, source, len(data))
 		return
 	}
 	rt.visibleSnapshot = data
@@ -683,6 +702,10 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 
 func isHeadlessSnapshotSource(source string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "headless:")
+}
+
+func isBrowserSnapshotSource(source string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "browser:")
 }
 
 func (rt *RuntimeSession) RequireLarkChatForNotifications() {
@@ -818,6 +841,7 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	if timeout <= 0 {
 		return false
 	}
+	headlessRequest := false
 	rt.mu.Lock()
 	if !rt.session.Live {
 		rt.mu.Unlock()
@@ -826,16 +850,22 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	before := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
 	hasSubscribers := len(rt.subscribers) > 0
-	hasRealSubscribers := rt.hasRealSubscriberLocked()
-	needsBrowser := !hasSubscribers && rt.manager != nil && rt.manager.onBrowserNeeded != nil
+	headlessSubscribers := rt.headlessSubscriberCountLocked()
+	canStartHeadless := rt.manager != nil && rt.manager.onBrowserNeeded != nil
+	useHeadless := headlessSubscribers > 0 || canStartHeadless
+	needsBrowser := useHeadless && headlessSubscribers == 0 && canStartHeadless
 	if !hasSubscribers && !needsBrowser {
 		rt.mu.Unlock()
 		return false
 	}
 	waiter := make(chan struct{})
 	rt.snapshotWaiters = append(rt.snapshotWaiters, waiter)
+	if useHeadless {
+		rt.pendingHeadlessSnapshots++
+		headlessRequest = true
+	}
 	for ch, sub := range rt.subscribers {
-		if hasRealSubscribers && sub.Headless {
+		if useHeadless && !sub.Headless {
 			continue
 		}
 		select {
@@ -854,11 +884,15 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	case <-timer.C:
 	}
 	rt.mu.Lock()
+	if headlessRequest && rt.pendingHeadlessSnapshots > 0 {
+		rt.pendingHeadlessSnapshots--
+	}
 	fresh := rt.visibleSnapshotVersion > before
 	subscriberCount := len(rt.subscribers)
 	realSubscriberCount := rt.realSubscriberCountLocked()
+	headlessSubscriberCount := rt.headlessSubscriberCountLocked()
 	rt.mu.Unlock()
-	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d real_subscribers=%d needed_browser=%v timeout=%s", sessionID, fresh, subscriberCount, realSubscriberCount, needsBrowser, timeout)
+	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d real_subscribers=%d headless_subscribers=%d needed_browser=%v headless_request=%v timeout=%s", sessionID, fresh, subscriberCount, realSubscriberCount, headlessSubscriberCount, needsBrowser, useHeadless, timeout)
 	return fresh
 }
 
@@ -870,6 +904,20 @@ func (rt *RuntimeSession) realSubscriberCountLocked() int {
 	count := 0
 	for _, sub := range rt.subscribers {
 		if !sub.Headless {
+			count++
+		}
+	}
+	return count
+}
+
+func (rt *RuntimeSession) hasHeadlessSubscriberLocked() bool {
+	return rt.headlessSubscriberCountLocked() > 0
+}
+
+func (rt *RuntimeSession) headlessSubscriberCountLocked() int {
+	count := 0
+	for _, sub := range rt.subscribers {
+		if sub.Headless {
 			count++
 		}
 	}

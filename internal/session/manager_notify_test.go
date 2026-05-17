@@ -318,8 +318,6 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 	notifier := &recordingNotifier{}
 	launcher := &recordingLauncher{}
 	browserRequested := make(chan struct{})
-	var snapshotRequests int
-	var snapshotMu sync.Mutex
 	var m *Manager
 	m = NewManager(
 		nil,
@@ -333,12 +331,11 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 			default:
 				close(browserRequested)
 			}
-			snapshotMu.Lock()
-			snapshotRequests++
-			requestNo := snapshotRequests
-			snapshotMu.Unlock()
 			if rt, ok := m.GetRuntime(sessionID); ok {
-				if requestNo <= 2 {
+				rt.mu.Lock()
+				currentInput := rt.lastInputText
+				rt.mu.Unlock()
+				if currentInput != "echo frontend-snapshot" {
 					rt.SetVisibleSnapshot("eleven ~ >")
 					return
 				}
@@ -1969,7 +1966,7 @@ func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
 	}
 }
 
-func TestRequestFreshSnapshotPrefersRealBrowserOverHeadless(t *testing.T) {
+func TestRequestFreshSnapshotPrefersHeadlessOverRealBrowser(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:     NewManager(nil, nil),
 		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
@@ -1986,42 +1983,130 @@ func TestRequestFreshSnapshotPrefersRealBrowserOverHeadless(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-realCh:
+	case ev := <-headlessCh:
 		if ev.Type != RuntimeEventSnapshotRequest {
 			t.Fatalf("event type = %q, want snapshot request", ev.Type)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected real browser snapshot request")
+		t.Fatal("expected headless snapshot request")
 	}
 	select {
-	case ev := <-headlessCh:
-		t.Fatalf("headless should not receive snapshot request while real browser is active: %#v", ev)
+	case ev := <-realCh:
+		t.Fatalf("real browser should not receive notification snapshot request while headless is active: %#v", ev)
 	default:
 	}
-	rt.SetVisibleSnapshotWithSource("fresh from browser", "browser:buffer")
+	rt.SetVisibleSnapshotWithSource("fresh from headless", "headless:buffer")
 	select {
 	case fresh := <-done:
 		if !fresh {
-			t.Fatal("request should report a fresh browser snapshot")
+			t.Fatal("request should report a fresh headless snapshot")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("snapshot request did not finish")
 	}
 }
 
-func TestHeadlessSnapshotIgnoredWhenRealBrowserActive(t *testing.T) {
+func TestBrowserSnapshotIgnoredWhenHeadlessActive(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:         NewManager(nil, nil),
 		session:         Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
-		visibleSnapshot: "browser baseline",
+		visibleSnapshot: "headless baseline",
 		subscribers:     make(map[chan RuntimeEvent]runtimeSubscriber),
 	}
 	_, cancel := rt.SubscribeWithMode(false)
 	defer cancel()
+	_, headlessCancel := rt.SubscribeWithMode(true)
+	defer headlessCancel()
 
-	rt.SetVisibleSnapshotWithSource("stale headless", "headless:buffer")
-	if rt.visibleSnapshot != "browser baseline" {
-		t.Fatalf("headless snapshot should be ignored while real browser is active, got %q", rt.visibleSnapshot)
+	rt.SetVisibleSnapshotWithSource("stale browser", "browser:buffer")
+	if rt.visibleSnapshot != "headless baseline" {
+		t.Fatalf("browser snapshot should be ignored while headless is active, got %q", rt.visibleSnapshot)
+	}
+	rt.SetVisibleSnapshotWithSource("fresh headless", "headless:buffer")
+	if rt.visibleSnapshot != "fresh headless" {
+		t.Fatalf("headless snapshot should be accepted, got %q", rt.visibleSnapshot)
+	}
+}
+
+func TestRequestFreshSnapshotStartsHeadlessInsteadOfUsingRealBrowser(t *testing.T) {
+	needed := make(chan string, 1)
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil, WithBrowserNeeded(func(sessionID string) {
+			needed <- sessionID
+		})),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	realCh, realCancel := rt.SubscribeWithMode(false)
+	defer realCancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(80 * time.Millisecond)
+	}()
+
+	select {
+	case got := <-needed:
+		if got != "sess-1" {
+			t.Fatalf("headless session = %q, want sess-1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected headless startup request")
+	}
+	select {
+	case ev := <-realCh:
+		t.Fatalf("real browser should not receive snapshot request while headless is required: %#v", ev)
+	default:
+	}
+	select {
+	case fresh := <-done:
+		if fresh {
+			t.Fatal("request should not become fresh without a headless snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestUpdateNotifyOnWaitingControlsHeadlessLifecycle(t *testing.T) {
+	started := make(chan string, 1)
+	stopped := make(chan string, 1)
+	m := NewManager(nil, &recordingLauncher{},
+		WithBrowserNeeded(func(sessionID string) {
+			started <- sessionID
+		}),
+		WithBrowserStopped(func(sessionID string) {
+			stopped <- sessionID
+		}),
+	)
+	sess, err := m.CreateSession(context.Background(), "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.DeleteSession(context.Background(), sess.ID) }()
+
+	if _, ok, err := m.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil || !ok {
+		t.Fatalf("enable notify ok=%v err=%v", ok, err)
+	}
+	select {
+	case got := <-started:
+		if got != sess.ID {
+			t.Fatalf("started session = %q, want %q", got, sess.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected headless start when notifications are enabled")
+	}
+
+	if _, ok, err := m.UpdateNotifyOnWaiting(context.Background(), sess.ID, false); err != nil || !ok {
+		t.Fatalf("disable notify ok=%v err=%v", ok, err)
+	}
+	select {
+	case got := <-stopped:
+		if got != sess.ID {
+			t.Fatalf("stopped session = %q, want %q", got, sess.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected headless stop when notifications are disabled")
 	}
 }
 
