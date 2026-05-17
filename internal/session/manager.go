@@ -1561,8 +1561,10 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	}
 	rt.mu.Unlock()
 	rt.RequestFreshSnapshot(defaultNotifySnapshotTimeout)
-	deadline := time.Now().Add(defaultNotifySnapshotDeadline)
-	for time.Now().Before(deadline) {
+	rt.mu.Lock()
+	idealContentDeadline := time.Now().Add(rt.notifyStableDelayLocked())
+	rt.mu.Unlock()
+	for time.Now().Before(idealContentDeadline) {
 		rt.mu.Lock()
 		needsMoreSnapshot := rt.notifyContentNeedsMoreSnapshotLocked()
 		done := rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version
@@ -1573,7 +1575,13 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		if !needsMoreSnapshot {
 			break
 		}
-		time.Sleep(250 * time.Millisecond)
+		sleep := time.Until(idealContentDeadline)
+		if sleep > 250*time.Millisecond {
+			sleep = 250 * time.Millisecond
+		}
+		if sleep > 0 {
+			time.Sleep(sleep)
+		}
 	}
 	rt.mu.Lock()
 	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version {
@@ -1583,21 +1591,30 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	n, contentHash, ok := rt.waitingNotificationLocked()
 	if !ok {
 		_, _, _, reason := rt.waitingNotificationCandidateLocked()
-		log.Printf("waiting notification not ready session=%s version=%d reason=%s status=%s live=%v notify_version=%d last_input=%q visible_len=%d round_len=%d",
-			rt.session.ID, version, reason, rt.session.Status, rt.session.Live, rt.notifyVersion, rt.lastInputText, len(rt.visibleSnapshot), len(rt.roundReply))
-		var waitingNote WaitingNotification
-		clearRunning := false
-		if reason == "duplicate_hash" && rt.notificationRunning {
-			waitingNote, clearRunning = rt.markNotificationWaitingLocked()
+		if reason == "needs_more_snapshot" {
+			n, contentHash, ok, reason = rt.fallbackWaitingNotificationCandidateLocked()
+			if ok {
+				log.Printf("waiting notification fallback ready session=%s version=%d hash=%s snapshot_source=%s content_len=%d content_lines=%d preview=%q",
+					n.SessionID, version, shortNotifyHash(contentHash), n.SnapshotSource, len(n.Content), countLogLines(n.Content), previewLogText(n.Content, 160))
+			}
 		}
-		if reason != "duplicate_hash" {
-			rt.rescheduleNotifyRetryLocked(version)
+		if !ok {
+			log.Printf("waiting notification not ready session=%s version=%d reason=%s status=%s live=%v notify_version=%d last_input=%q visible_len=%d round_len=%d",
+				rt.session.ID, version, reason, rt.session.Status, rt.session.Live, rt.notifyVersion, rt.lastInputText, len(rt.visibleSnapshot), len(rt.roundReply))
+			var waitingNote WaitingNotification
+			clearRunning := false
+			if reason == "duplicate_hash" && rt.notificationRunning {
+				waitingNote, clearRunning = rt.markNotificationWaitingLocked()
+			}
+			if reason != "duplicate_hash" {
+				rt.rescheduleNotifyRetryLocked(version)
+			}
+			rt.mu.Unlock()
+			if clearRunning {
+				rt.updateNotificationRunning(waitingNote, false)
+			}
+			return
 		}
-		rt.mu.Unlock()
-		if clearRunning {
-			rt.updateNotificationRunning(waitingNote, false)
-		}
-		return
 	}
 	if rt.startupNotifyMode == startupNotifySuppress || rt.startupNotifyMode == startupNotifySettling {
 		mode := rt.startupNotifyMode
@@ -1899,6 +1916,31 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
 	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
+}
+
+func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
+	if rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "" {
+		return WaitingNotification{}, "", false, "waiting_for_lark_chat"
+	}
+	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
+		return WaitingNotification{}, "", false, "stale_visible_snapshot"
+	}
+	content := pickNotifyContentWithWindow(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return WaitingNotification{}, "", false, "empty_content"
+	}
+	contentHash := notifyContentHash(content)
+	if contentHash == rt.lastNotifiedRoundHash {
+		return WaitingNotification{}, "", false, "duplicate_hash"
+	}
+	source := strings.TrimSpace(rt.visibleSnapshotSource)
+	if source == "" {
+		source = "fallback"
+	} else {
+		source += ":fallback"
+	}
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, SnapshotSource: source}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

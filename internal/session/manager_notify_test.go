@@ -157,6 +157,51 @@ func TestNotifyAfterStableDoesNotSendRoundReplyWhenSnapshotDoesNotShowInput(t *t
 	}
 }
 
+func TestNotifyIfStillWaitingFallsBackToVisibleSnapshotWhenIdealContentNeverReady(t *testing.T) {
+	notifier := &recordingNotifier{}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: m,
+		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.SetVisibleSnapshot("eleven ~/project >")
+	rt.MarkInputActivity("cdx_d\r")
+	rt.SetVisibleSnapshot("eleven ~/project > cdx_d")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.lastNotifiedMessageID = "running-card"
+	rt.lastNotifiedContent = RunningNotificationPlaceholder
+	rt.notificationRunning = true
+	version := rt.notifyVersion
+	_, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("input-only snapshot should not be treated as ideal notification content")
+	}
+	if reason != "needs_more_snapshot" {
+		t.Fatalf("reason = %q, want needs_more_snapshot", reason)
+	}
+
+	rt.notifyIfStillWaiting(version)
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected fallback notification update, got %#v", notes)
+	}
+	if notes[0].MessageID != "running-card" || notes[0].Running {
+		t.Fatalf("fallback should patch the running card as waiting, got %#v", notes[0])
+	}
+	if notes[0].Content != "eleven ~/project > cdx_d" {
+		t.Fatalf("fallback should use the visible snapshot, got %q", notes[0].Content)
+	}
+	if !strings.HasSuffix(notes[0].SnapshotSource, ":fallback") {
+		t.Fatalf("fallback snapshot source should be marked, got %q", notes[0].SnapshotSource)
+	}
+	if rt.notificationRunning {
+		t.Fatal("fallback notification should clear runtime running state")
+	}
+}
+
 func TestWaitingNotificationUsesFreshVisibleListInsteadOfRawRoundReply(t *testing.T) {
 	SetLarkNotifyMaxLines(4)
 	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
