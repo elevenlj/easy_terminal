@@ -337,6 +337,136 @@ func TestLarkReplyBridgeGroupInputMentionsSender(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeMentionModeRequiresBotMentionInGroup(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.fetchBotIdentity = func(context.Context) (larkBotIdentity, error) {
+		return larkBotIdentity{OpenID: "ou-bot"}, nil
+	}
+	var reactions []string
+	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
+		reactions = append(reactions, messageID+":"+emoji)
+		return nil
+	}
+	sess, err := manager.CreateSession(context.Background(), "Group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-group"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := manager.ToggleLarkMentionMode(context.Background(), sess.ID); err != nil || !ok {
+		t.Fatalf("ToggleLarkMentionMode ok=%v err=%v", ok, err)
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-no-mention", "", "", "text", `{"text":"pwd"}`, "group", "oc-group", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); got != "" {
+		t.Fatalf("unmentioned group message should be ignored in mention mode, got %q", got)
+	}
+	if len(reactions) != 0 {
+		t.Fatalf("ignored unmentioned message should not add reaction, got %#v", reactions)
+	}
+
+	other := p2MessageWithChat("m-other-mention", "", "", "text", `{"text":"<at user_id=\"ou-other\">Other</at> whoami"}`, "group", "oc-group", "ou-user")
+	other.Event.Message.Mentions = []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou-other")}}}
+	if err := bridge.HandleP2MessageReceive(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); got != "" {
+		t.Fatalf("message mentioning another user should be ignored in mention mode, got %q", got)
+	}
+
+	bot := p2MessageWithChat("m-bot-mention", "", "", "text", `{"text":"<at user_id=\"ou-bot\">Bot</at> date"}`, "group", "oc-group", "ou-user")
+	bot.Event.Message.Mentions = []*larkim.MentionEvent{{Id: &larkim.UserId{OpenId: strPtr("ou-bot")}}}
+	if err := bridge.HandleP2MessageReceive(context.Background(), bot); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("date")) {
+		t.Fatalf("message mentioning current bot should route, got %q", got)
+	}
+	if len(reactions) != 1 || reactions[0] != "m-bot-mention:"+larkProcessingReactionEmoji {
+		t.Fatalf("only routed bot mention should add reaction, got %#v", reactions)
+	}
+}
+
+func TestLarkReplyBridgeMentionModeDoesNotFilterDirectChat(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-direct"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := manager.ToggleLarkMentionMode(context.Background(), sess.ID); err != nil || !ok {
+		t.Fatalf("ToggleLarkMentionMode ok=%v err=%v", ok, err)
+	}
+
+	err = bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-direct", "", "", "text", `{"text":"pwd"}`, "p2p", "oc-direct", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("pwd")) {
+		t.Fatalf("direct chat should not be filtered by mention mode, got %q", got)
+	}
+}
+
+func TestLarkReplyBridgeP1MentionModeUsesBotMentionFlag(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.BindLarkChat(context.Background(), sess.ID, "oc-p1-group"); err != nil || !ok {
+		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := manager.ToggleLarkMentionMode(context.Background(), sess.ID); err != nil || !ok {
+		t.Fatalf("ToggleLarkMentionMode ok=%v err=%v", ok, err)
+	}
+
+	if err := bridge.HandleP1MessageReceive(context.Background(), &larkim.P1MessageReceiveV1{
+		Event: &larkim.P1MessageReceiveV1Data{
+			OpenMessageID:    "p1-unmentioned",
+			OpenChatID:       "oc-p1-group",
+			ChatType:         "group",
+			OpenID:           "ou-user",
+			TextWithoutAtBot: "pwd",
+			IsMention:        false,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); got != "" {
+		t.Fatalf("unmentioned P1 group message should be ignored in mention mode, got %q", got)
+	}
+
+	if err := bridge.HandleP1MessageReceive(context.Background(), &larkim.P1MessageReceiveV1{
+		Event: &larkim.P1MessageReceiveV1Data{
+			OpenMessageID:    "p1-mentioned",
+			OpenChatID:       "oc-p1-group",
+			ChatType:         "group",
+			OpenID:           "ou-user",
+			TextWithoutAtBot: "whoami",
+			IsMention:        true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := launcher.terminals[0].writes(); !strings.Contains(got, PrepareStructuredInput("whoami")) {
+		t.Fatalf("P1 bot mention should route in mention mode, got %q", got)
+	}
+}
+
 func TestLarkReplyBridgeIgnoresStaleDedicatedChatRegistry(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

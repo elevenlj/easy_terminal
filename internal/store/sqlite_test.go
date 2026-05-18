@@ -37,4 +37,18 @@ func TestSQLiteSessionLifecycle(t *testing.T) {
 	if len(list) != 1 || list[0].ID != sess.ID {
 		t.Fatalf("unexpected sessions: %#v", list)
 	}
+	if list[0].LarkMentionModeEnabled {
+		t.Fatalf("mention mode should default to disabled: %#v", list[0])
+	}
+	list[0].LarkMentionModeEnabled = true
+	if err := st.UpdateSession(context.Background(), list[0]); err != nil {
+		t.Fatal(err)
+	}
+	updated, ok, err := st.GetSession(context.Background(), sess.ID)
+	if err != nil || !ok {
+		t.Fatalf("GetSession ok=%v err=%v", ok, err)
+	}
+	if !updated.LarkMentionModeEnabled {
+		t.Fatalf("mention mode should persist: %#v", updated)
+	}
 }

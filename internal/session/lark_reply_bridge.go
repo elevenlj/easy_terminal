@@ -1705,93 +1705,6 @@ func (b *LarkReplyBridge) currentBotIdentity(ctx context.Context) (larkBotIdenti
 	return fetched, true
 }
 
-func (b *LarkReplyBridge) fetchLarkBotIdentity(ctx context.Context) (larkBotIdentity, error) {
-	b.mu.Lock()
-	appID := strings.TrimSpace(b.appID)
-	appSecret := b.appSecret
-	b.mu.Unlock()
-	if appID == "" || appSecret == "" {
-		return larkBotIdentity{}, errors.New("lark app credentials are not configured")
-	}
-	token, err := larkTenantAccessToken(ctx, appID, appSecret)
-	if err != nil {
-		return larkBotIdentity{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lark.FeishuBaseUrl+"/open-apis/bot/v3/info", nil)
-	if err != nil {
-		return larkBotIdentity{}, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return larkBotIdentity{}, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if err != nil {
-		return larkBotIdentity{}, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return larkBotIdentity{}, fmt.Errorf("lark bot info API returned %s: %s", resp.Status, string(body))
-	}
-	var parsed struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		Bot  struct {
-			OpenID  string `json:"open_id"`
-			UserID  string `json:"user_id"`
-			UnionID string `json:"union_id"`
-		} `json:"bot"`
-		Data struct {
-			OpenID  string `json:"open_id"`
-			UserID  string `json:"user_id"`
-			UnionID string `json:"union_id"`
-			Bot     struct {
-				OpenID  string `json:"open_id"`
-				UserID  string `json:"user_id"`
-				UnionID string `json:"union_id"`
-			} `json:"bot"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return larkBotIdentity{}, err
-	}
-	if parsed.Code != 0 {
-		return larkBotIdentity{}, fmt.Errorf("lark bot info API returned code %d: %s", parsed.Code, parsed.Msg)
-	}
-	return normalizeLarkBotIdentity(larkBotIdentity{
-		OpenID:  firstNonEmpty(parsed.Bot.OpenID, parsed.Data.OpenID, parsed.Data.Bot.OpenID),
-		UserID:  firstNonEmpty(parsed.Bot.UserID, parsed.Data.UserID, parsed.Data.Bot.UserID),
-		UnionID: firstNonEmpty(parsed.Bot.UnionID, parsed.Data.UnionID, parsed.Data.Bot.UnionID),
-	}), nil
-}
-
-func larkTenantAccessToken(ctx context.Context, appID, appSecret string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, lark.FeishuBaseUrl+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	var tokenResp struct {
-		Code              int    `json:"code"`
-		Msg               string `json:"msg"`
-		TenantAccessToken string `json:"tenant_access_token"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&tokenResp); err != nil {
-		return "", err
-	}
-	if tokenResp.Code != 0 || strings.TrimSpace(tokenResp.TenantAccessToken) == "" {
-		return "", fmt.Errorf("lark token API returned code %d: %s", tokenResp.Code, tokenResp.Msg)
-	}
-	return tokenResp.TenantAccessToken, nil
-}
-
 func normalizeLarkBotIdentity(identity larkBotIdentity) larkBotIdentity {
 	return larkBotIdentity{
 		OpenID:  strings.TrimSpace(identity.OpenID),
@@ -1802,15 +1715,6 @@ func normalizeLarkBotIdentity(identity larkBotIdentity) larkBotIdentity {
 
 func (i larkBotIdentity) hasAny() bool {
 	return strings.TrimSpace(i.OpenID) != "" || strings.TrimSpace(i.UserID) != "" || strings.TrimSpace(i.UnionID) != ""
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func (b *LarkReplyBridge) addLarkMessageReaction(ctx context.Context, messageID string, emoji string) error {
