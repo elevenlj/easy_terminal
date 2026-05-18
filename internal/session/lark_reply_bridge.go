@@ -1,11 +1,14 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,9 +34,11 @@ type LarkReplyBridge struct {
 	defaultStartSessionName string
 	sessionChatPrefix       string
 	ignoreMessagePrefix     string
+	autoSummaryPrompt       string
 	startPresets            map[string]SessionStartPreset
 	namePresets             map[string]SessionStartPreset
 	customShortcuts         []LarkCustomShortcut
+	botIdentity             larkBotIdentity
 	mu                      sync.Mutex
 	seenMessages            map[string]time.Time
 	pendingFiles            map[string][]pendingLarkAttachment
@@ -44,6 +49,7 @@ type LarkReplyBridge struct {
 	createChat              func(context.Context, string, string, string) (string, error)
 	sendChatText            func(context.Context, string, string) error
 	removeBotFromChat       func(context.Context, string) error
+	fetchBotIdentity        func(context.Context) (larkBotIdentity, error)
 	startMu                 sync.Mutex
 	cancelStart             context.CancelFunc
 	startID                 int64
@@ -74,6 +80,14 @@ type larkRouteContext struct {
 	ChatID       string
 	ChatType     string
 	SenderOpenID string
+	MentionedBot bool
+	Mentions     []*larkim.MentionEvent
+}
+
+type larkBotIdentity struct {
+	OpenID  string
+	UserID  string
+	UnionID string
 }
 
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir string) *LarkReplyBridge {
@@ -81,6 +95,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 		appID: appID, appSecret: appSecret, manager: manager, uploadsDir: uploadsDir,
 		sessionChatPrefix:   defaultLarkSessionChatPrefix,
 		ignoreMessagePrefix: "/i",
+		autoSummaryPrompt:   DefaultLarkAutoSummaryPrompt,
 		seenMessages:        make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]larkPipelineInput),
 	}
 	if manager != nil {
@@ -95,6 +110,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 	b.createChat = b.createLarkChat
 	b.sendChatText = b.sendTextToChat
 	b.removeBotFromChat = b.removeLarkBotFromChat
+	b.fetchBotIdentity = b.fetchLarkBotIdentity
 	return b
 }
 
@@ -135,6 +151,16 @@ func (b *LarkReplyBridge) SetIgnoreMessagePrefix(prefix string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ignoreMessagePrefix = strings.TrimSpace(prefix)
+}
+
+func (b *LarkReplyBridge) SetAutoSummaryPrompt(prompt string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		prompt = DefaultLarkAutoSummaryPrompt
+	}
+	b.autoSummaryPrompt = prompt
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -232,6 +258,7 @@ func (b *LarkReplyBridge) SetAppCredentials(appID, appSecret string) {
 	} else {
 		b.apiClient = nil
 	}
+	b.botIdentity = larkBotIdentity{}
 }
 
 func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload []byte) (*callback.CardActionTriggerResponse, error) {
@@ -280,6 +307,10 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string
 		return b.handleCardRefresh(ctx, value, openMessageID)
 	case "toggle_auto_refresh":
 		return b.handleCardToggleAutoRefresh(ctx, value, openMessageID)
+	case "toggle_auto_summary":
+		return b.handleCardToggleAutoSummary(ctx, value, openMessageID)
+	case "toggle_mention_mode":
+		return b.handleCardToggleMentionMode(ctx, value, openMessageID)
 	case "delete_session":
 		return b.handleCardDeleteSession(ctx, value, openMessageID, openChatID)
 	default:
@@ -405,6 +436,61 @@ func (b *LarkReplyBridge) handleCardToggleAutoRefresh(ctx context.Context, value
 	return larkCardToast("info", "已关闭自动刷新"), nil
 }
 
+func (b *LarkReplyBridge) handleCardToggleAutoSummary(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
+	}
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	updateNo, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value["update_no"])))
+	enabled, err := rt.ToggleAutoSummary()
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
+			log.Printf("lark card auto summary toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, enabled, err)
+			return
+		}
+		log.Printf("lark card auto summary toggled session=%s message=%s enabled=%v", sessionID, openMessageID, enabled)
+	}()
+	if enabled {
+		return larkCardToast("info", "已开启自动总结"), nil
+	}
+	return larkCardToast("info", "已关闭自动总结"), nil
+}
+
+func (b *LarkReplyBridge) handleCardToggleMentionMode(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
+	}
+	updated, ok, err := b.manager.ToggleLarkMentionMode(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return larkCardToast("warning", "会话不在线"), nil
+	}
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	updateNo, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value["update_no"])))
+	go func() {
+		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
+			log.Printf("lark card mention mode toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, updated.LarkMentionModeEnabled, err)
+			return
+		}
+		log.Printf("lark card mention mode toggled session=%s message=%s enabled=%v", sessionID, openMessageID, updated.LarkMentionModeEnabled)
+	}()
+	if updated.LarkMentionModeEnabled {
+		return larkCardToast("info", "已开启艾特模式"), nil
+	}
+	return larkCardToast("info", "已关闭艾特模式"), nil
+}
+
 func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {
 	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: kind, Content: content}}
 }
@@ -463,6 +549,18 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 	if b.shouldIgnoreIncomingText(incoming.Text) {
 		return nil
 	}
+	routeCtx := larkRouteContext{
+		MessageID:    valueOf(msg.MessageId),
+		ParentID:     valueOf(msg.ParentId),
+		RootID:       valueOf(msg.RootId),
+		ChatID:       valueOf(msg.ChatId),
+		ChatType:     valueOf(msg.ChatType),
+		SenderOpenID: larkSenderOpenID(event.Event.Sender),
+		Mentions:     msg.Mentions,
+	}
+	if _, ignored := b.shouldIgnoreForMentionMode(ctx, routeCtx, incoming); ignored {
+		return nil
+	}
 	log.Printf("lark reply bridge received P2 message=%s chat=%s chat_type=%s msg_type=%s text_len=%d attachments=%d",
 		valueOf(msg.MessageId), valueOf(msg.ChatId), valueOf(msg.ChatType), messageType, len(incoming.Text), len(incoming.Attachments))
 	if isUnsupportedLarkForwardedCard(messageType) {
@@ -480,14 +578,6 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return nil
 	}
 	b.markLarkMessageProcessing(ctx, valueOf(msg.MessageId))
-	routeCtx := larkRouteContext{
-		MessageID:    valueOf(msg.MessageId),
-		ParentID:     valueOf(msg.ParentId),
-		RootID:       valueOf(msg.RootId),
-		ChatID:       valueOf(msg.ChatId),
-		ChatType:     valueOf(msg.ChatType),
-		SenderOpenID: larkSenderOpenID(event.Event.Sender),
-	}
 	sessionID, err := b.RouteIncomingWithContext(ctx, routeCtx, incoming)
 	if err != nil {
 		log.Printf("lark reply bridge failed to route message %s: %v", valueOf(msg.MessageId), err)
@@ -532,6 +622,75 @@ func (b *LarkReplyBridge) shouldIgnoreIncomingText(text string) bool {
 	return false
 }
 
+func (b *LarkReplyBridge) shouldIgnoreForMentionMode(ctx context.Context, routeCtx larkRouteContext, incoming larkIncomingMessage) (string, bool) {
+	if b == nil || b.manager == nil || !isLarkGroupChatType(routeCtx.ChatType) {
+		return "", false
+	}
+	sessionID := b.mentionModeSessionID(ctx, routeCtx, incoming)
+	if sessionID == "" {
+		return "", false
+	}
+	sess, ok, err := b.manager.GetSession(ctx, sessionID)
+	if err != nil || !ok || !sess.LarkMentionModeEnabled {
+		return sessionID, false
+	}
+	if b.routeContextMentionsBot(ctx, routeCtx) {
+		return sessionID, false
+	}
+	log.Printf("lark reply bridge ignored message=%s session=%s reason=mention_mode_requires_bot_mention", routeCtx.MessageID, sessionID)
+	return sessionID, true
+}
+
+func (b *LarkReplyBridge) mentionModeSessionID(ctx context.Context, routeCtx larkRouteContext, incoming larkIncomingMessage) string {
+	text := cleanLarkText(incoming.Text)
+	parts := splitLarkPipeline(text)
+	if len(parts) > 0 {
+		text = parts[0]
+	}
+	return b.resolveSessionID(ctx, text, routeCtx.ParentID, routeCtx.RootID, routeCtx.ChatID, routeCtx.ChatType)
+}
+
+func (b *LarkReplyBridge) routeContextMentionsBot(ctx context.Context, routeCtx larkRouteContext) bool {
+	if routeCtx.MentionedBot {
+		return true
+	}
+	if len(routeCtx.Mentions) == 0 {
+		return false
+	}
+	identity, ok := b.currentBotIdentity(ctx)
+	if !ok {
+		return false
+	}
+	for _, mention := range routeCtx.Mentions {
+		if larkMentionMatchesBot(mention, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+func larkMentionMatchesBot(mention *larkim.MentionEvent, identity larkBotIdentity) bool {
+	if mention == nil || mention.Id == nil {
+		return false
+	}
+	if identity.OpenID != "" && strings.TrimSpace(valueOf(mention.Id.OpenId)) == identity.OpenID {
+		return true
+	}
+	if identity.UserID != "" && strings.TrimSpace(valueOf(mention.Id.UserId)) == identity.UserID {
+		return true
+	}
+	return identity.UnionID != "" && strings.TrimSpace(valueOf(mention.Id.UnionId)) == identity.UnionID
+}
+
+func isLarkGroupChatType(chatType string) bool {
+	switch strings.ToLower(strings.TrimSpace(chatType)) {
+	case "group", "topic_group":
+		return true
+	default:
+		return false
+	}
+}
+
 func isUnsupportedLarkForwardedCard(messageType string) bool {
 	return messageType == "interactive"
 }
@@ -560,9 +719,6 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 	if b.shouldIgnoreIncomingText(text) {
 		return nil
 	}
-	log.Printf("lark reply bridge received P1 message=%s chat=%s chat_type=%s msg_type=%s mention=%v text_len=%d",
-		e.OpenMessageID, e.OpenChatID, e.ChatType, e.MsgType, e.IsMention, len(text))
-	b.markLarkMessageProcessing(ctx, e.OpenMessageID)
 	routeCtx := larkRouteContext{
 		MessageID:    e.OpenMessageID,
 		ParentID:     e.ParentID,
@@ -570,7 +726,14 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 		ChatID:       e.OpenChatID,
 		ChatType:     e.ChatType,
 		SenderOpenID: e.OpenID,
+		MentionedBot: e.IsMention,
 	}
+	if _, ignored := b.shouldIgnoreForMentionMode(ctx, routeCtx, larkIncomingMessage{Text: text}); ignored {
+		return nil
+	}
+	log.Printf("lark reply bridge received P1 message=%s chat=%s chat_type=%s msg_type=%s mention=%v text_len=%d",
+		e.OpenMessageID, e.OpenChatID, e.ChatType, e.MsgType, e.IsMention, len(text))
+	b.markLarkMessageProcessing(ctx, e.OpenMessageID)
 	sessionID, err := b.RouteIncomingWithContext(ctx, routeCtx, larkIncomingMessage{Text: text})
 	if err != nil {
 		log.Printf("lark reply bridge failed to route P1 message %s: %v", e.OpenMessageID, err)
@@ -590,6 +753,9 @@ func (b *LarkReplyBridge) RouteIncoming(ctx context.Context, messageID, parentID
 
 func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx larkRouteContext, incoming larkIncomingMessage) (string, error) {
 	messageID, parentID, rootID := routeCtx.MessageID, routeCtx.ParentID, routeCtx.RootID
+	if sessionID, ignored := b.shouldIgnoreForMentionMode(ctx, routeCtx, incoming); ignored {
+		return sessionID, nil
+	}
 	if b.duplicate(messageID) {
 		return "", nil
 	}
@@ -615,6 +781,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		if err := SubmitStructuredInputWithMention(rt, text, routeCtx.SenderOpenID); err != nil {
 			return sessionID, err
 		}
+		b.scheduleAutoSummary(rt, text)
 		b.clearPendingFiles(sessionID)
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 		b.notifyInputRunning(sessionID)
@@ -712,6 +879,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 	if err := SubmitStructuredInputWithMention(rt, text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
 	}
+	b.scheduleAutoSummary(rt, text)
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 	b.notifyInputRunning(sessionID)
 	return sessionID, nil
@@ -782,6 +950,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	if err := SubmitStructuredInputWithMention(rt, input+" "+text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
 	}
+	b.scheduleAutoSummary(rt, input+" "+text)
 	b.clearPendingFiles(sessionID)
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 	b.notifyInputRunning(sessionID)
@@ -1147,7 +1316,9 @@ func (b *LarkReplyBridge) OnNotificationSent(sessionID string) {
 	b.manager.EnsureBrowser(sessionID)
 	if err := SubmitStructuredInputWithMention(rt, next.Text, next.MentionOpenID); err != nil {
 		log.Printf("lark reply bridge failed to continue pipeline for %s: %v", sessionID, err)
+		return
 	}
+	b.scheduleAutoSummary(rt, next.Text)
 	rt.NotifyInputRunning()
 }
 
@@ -1160,6 +1331,31 @@ func (b *LarkReplyBridge) notifyInputRunning(sessionID string) {
 		return
 	}
 	rt.NotifyInputRunning()
+}
+
+func (b *LarkReplyBridge) scheduleAutoSummary(rt *RuntimeSession, originalInput string) {
+	if b == nil || rt == nil || !rt.AutoSummaryEnabled() || strings.TrimSpace(originalInput) == "" {
+		return
+	}
+	b.mu.Lock()
+	prompt := b.autoSummaryPrompt
+	b.mu.Unlock()
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		prompt = DefaultLarkAutoSummaryPrompt
+	}
+	sessionID := rt.Snapshot().ID
+	time.AfterFunc(time.Second, func() {
+		if !rt.AutoSummaryEnabled() {
+			return
+		}
+		if err := SubmitStructuredInputWithMention(rt, prompt, rt.NotificationMentionOpenID()); err != nil {
+			log.Printf("lark auto summary prompt failed session=%s: %v", sessionID, err)
+			return
+		}
+		log.Printf("lark auto summary prompt submitted session=%s prompt_len=%d", sessionID, len(prompt))
+		rt.NotifyInputRunning()
+	})
 }
 
 func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string, mentionOpenID string) {
@@ -1340,6 +1536,122 @@ func (b *LarkReplyBridge) sendTextToChat(ctx context.Context, chatID string, tex
 	return nil
 }
 
+func (b *LarkReplyBridge) fetchLarkBotIdentity(ctx context.Context) (larkBotIdentity, error) {
+	if b == nil {
+		return larkBotIdentity{}, nil
+	}
+	b.mu.Lock()
+	cached := b.botIdentity
+	appID := strings.TrimSpace(b.appID)
+	appSecret := strings.TrimSpace(b.appSecret)
+	b.mu.Unlock()
+	if cached.OpenID != "" || cached.UserID != "" || cached.UnionID != "" {
+		return cached, nil
+	}
+	if appID == "" || appSecret == "" {
+		return larkBotIdentity{}, nil
+	}
+	token, err := fetchLarkTenantAccessToken(ctx, appID, appSecret)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://open.feishu.cn/open-apis/bot/v3/info", nil)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := doHTTPRequestWithRetry(req)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	var data struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID  string `json:"open_id"`
+			UserID  string `json:"user_id"`
+			UnionID string `json:"union_id"`
+		} `json:"bot"`
+		Data struct {
+			OpenID  string `json:"open_id"`
+			UserID  string `json:"user_id"`
+			UnionID string `json:"union_id"`
+			Bot     struct {
+				OpenID  string `json:"open_id"`
+				UserID  string `json:"user_id"`
+				UnionID string `json:"union_id"`
+			} `json:"bot"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return larkBotIdentity{}, err
+	}
+	if resp.StatusCode >= 300 || data.Code != 0 {
+		msg := strings.TrimSpace(data.Msg)
+		if msg == "" {
+			msg = strings.TrimSpace(string(body))
+		}
+		return larkBotIdentity{}, fmt.Errorf("lark bot info API returned %s: %s", resp.Status, msg)
+	}
+	identity := larkBotIdentity{
+		OpenID:  strings.TrimSpace(data.Bot.OpenID),
+		UserID:  strings.TrimSpace(data.Bot.UserID),
+		UnionID: strings.TrimSpace(data.Bot.UnionID),
+	}
+	if identity.OpenID == "" && identity.UserID == "" && identity.UnionID == "" {
+		identity = larkBotIdentity{
+			OpenID:  strings.TrimSpace(data.Data.OpenID),
+			UserID:  strings.TrimSpace(data.Data.UserID),
+			UnionID: strings.TrimSpace(data.Data.UnionID),
+		}
+	}
+	if identity.OpenID == "" && identity.UserID == "" && identity.UnionID == "" {
+		identity = larkBotIdentity{
+			OpenID:  strings.TrimSpace(data.Data.Bot.OpenID),
+			UserID:  strings.TrimSpace(data.Data.Bot.UserID),
+			UnionID: strings.TrimSpace(data.Data.Bot.UnionID),
+		}
+	}
+	b.mu.Lock()
+	b.botIdentity = identity
+	b.mu.Unlock()
+	return identity, nil
+}
+
+func fetchLarkTenantAccessToken(ctx context.Context, appID, appSecret string) (string, error) {
+	payload, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	resp, err := doHTTPRequestWithRetry(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 300 || data.Code != 0 || data.TenantAccessToken == "" {
+		if data.Msg == "" {
+			data.Msg = resp.Status
+		}
+		return "", errors.New(data.Msg)
+	}
+	return data.TenantAccessToken, nil
+}
+
 func (b *LarkReplyBridge) removeLarkBotFromChat(ctx context.Context, chatID string) error {
 	appID := strings.TrimSpace(b.appID)
 	chatID = strings.TrimSpace(chatID)
@@ -1361,6 +1673,144 @@ func (b *LarkReplyBridge) removeLarkBotFromChat(ctx context.Context, chatID stri
 		return fmt.Errorf("lark remove bot from chat API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func (b *LarkReplyBridge) currentBotIdentity(ctx context.Context) (larkBotIdentity, bool) {
+	if b == nil {
+		return larkBotIdentity{}, false
+	}
+	b.mu.Lock()
+	identity := normalizeLarkBotIdentity(b.botIdentity)
+	fetch := b.fetchBotIdentity
+	b.mu.Unlock()
+	if identity.hasAny() {
+		return identity, true
+	}
+	if fetch == nil {
+		return larkBotIdentity{}, false
+	}
+	fetched, err := fetch(ctx)
+	if err != nil {
+		log.Printf("lark reply bridge failed to fetch bot identity: %v", err)
+		return larkBotIdentity{}, false
+	}
+	fetched = normalizeLarkBotIdentity(fetched)
+	if !fetched.hasAny() {
+		log.Printf("lark reply bridge fetched empty bot identity")
+		return larkBotIdentity{}, false
+	}
+	b.mu.Lock()
+	b.botIdentity = fetched
+	b.mu.Unlock()
+	return fetched, true
+}
+
+func (b *LarkReplyBridge) fetchLarkBotIdentity(ctx context.Context) (larkBotIdentity, error) {
+	b.mu.Lock()
+	appID := strings.TrimSpace(b.appID)
+	appSecret := b.appSecret
+	b.mu.Unlock()
+	if appID == "" || appSecret == "" {
+		return larkBotIdentity{}, errors.New("lark app credentials are not configured")
+	}
+	token, err := larkTenantAccessToken(ctx, appID, appSecret)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lark.FeishuBaseUrl+"/open-apis/bot/v3/info", nil)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return larkBotIdentity{}, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return larkBotIdentity{}, fmt.Errorf("lark bot info API returned %s: %s", resp.Status, string(body))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID  string `json:"open_id"`
+			UserID  string `json:"user_id"`
+			UnionID string `json:"union_id"`
+		} `json:"bot"`
+		Data struct {
+			OpenID  string `json:"open_id"`
+			UserID  string `json:"user_id"`
+			UnionID string `json:"union_id"`
+			Bot     struct {
+				OpenID  string `json:"open_id"`
+				UserID  string `json:"user_id"`
+				UnionID string `json:"union_id"`
+			} `json:"bot"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return larkBotIdentity{}, err
+	}
+	if parsed.Code != 0 {
+		return larkBotIdentity{}, fmt.Errorf("lark bot info API returned code %d: %s", parsed.Code, parsed.Msg)
+	}
+	return normalizeLarkBotIdentity(larkBotIdentity{
+		OpenID:  firstNonEmpty(parsed.Bot.OpenID, parsed.Data.OpenID, parsed.Data.Bot.OpenID),
+		UserID:  firstNonEmpty(parsed.Bot.UserID, parsed.Data.UserID, parsed.Data.Bot.UserID),
+		UnionID: firstNonEmpty(parsed.Bot.UnionID, parsed.Data.UnionID, parsed.Data.Bot.UnionID),
+	}), nil
+}
+
+func larkTenantAccessToken(ctx context.Context, appID, appSecret string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"app_id": appID, "app_secret": appSecret})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, lark.FeishuBaseUrl+"/open-apis/auth/v3/tenant_access_token/internal", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var tokenResp struct {
+		Code              int    `json:"code"`
+		Msg               string `json:"msg"`
+		TenantAccessToken string `json:"tenant_access_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&tokenResp); err != nil {
+		return "", err
+	}
+	if tokenResp.Code != 0 || strings.TrimSpace(tokenResp.TenantAccessToken) == "" {
+		return "", fmt.Errorf("lark token API returned code %d: %s", tokenResp.Code, tokenResp.Msg)
+	}
+	return tokenResp.TenantAccessToken, nil
+}
+
+func normalizeLarkBotIdentity(identity larkBotIdentity) larkBotIdentity {
+	return larkBotIdentity{
+		OpenID:  strings.TrimSpace(identity.OpenID),
+		UserID:  strings.TrimSpace(identity.UserID),
+		UnionID: strings.TrimSpace(identity.UnionID),
+	}
+}
+
+func (i larkBotIdentity) hasAny() bool {
+	return strings.TrimSpace(i.OpenID) != "" || strings.TrimSpace(i.UserID) != "" || strings.TrimSpace(i.UnionID) != ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (b *LarkReplyBridge) addLarkMessageReaction(ctx context.Context, messageID string, emoji string) error {
@@ -1422,7 +1872,7 @@ func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, 
 	if m := regexp.MustCompile(`sess-\d+`).FindString(text); m != "" {
 		return m
 	}
-	if chatID != "" && chatType == "group" {
+	if chatID != "" && isLarkGroupChatType(chatType) {
 		return ""
 	}
 	return defaultLarkMessageRegistry.latestNotifiedSessionID()

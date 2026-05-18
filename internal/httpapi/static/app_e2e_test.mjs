@@ -224,12 +224,14 @@ const ids = [
   "cfg-conservative-waiting",
   "cfg-auto-refresh-interval",
   "cfg-lark-max-lines",
+  "cfg-lark-merge-wrapped-lines",
   "cfg-lark-app-id",
   "cfg-lark-app-secret",
   "cfg-lark-receive-id",
   "cfg-lark-default-session-name",
   "cfg-lark-session-chat-prefix",
   "cfg-lark-ignore-prefix",
+  "cfg-lark-auto-summary-prompt",
   "cfg-lark-mention-enabled",
   "cfg-prestart-command",
   "cfg-drop-patterns",
@@ -387,6 +389,7 @@ const context = {
         conservative_waiting_transition_ms: 700,
         lark_auto_refresh_interval_ms: 5000,
         lark_notify_max_lines: 300,
+        lark_notify_merge_wrapped_lines: false,
         lark_app_id: "app-id",
         lark_app_secret: "secret",
         lark_notify_receive_id: "ou_1",
@@ -394,6 +397,7 @@ const context = {
         lark_default_session_name: "默认会话",
         lark_session_chat_prefix: "ET · ",
         lark_ignore_message_prefix: "/i",
+        lark_auto_summary_prompt: "总结上一轮输出",
         onboarding_completed: false,
         session_pre_start_command: "",
         lark_notify_drop_line_patterns: [],
@@ -683,6 +687,7 @@ elements["cfg-lark-receive-id"].value = "ou_new";
 elements["cfg-lark-default-session-name"].value = "默认会话";
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
 elements["cfg-lark-ignore-prefix"].value = "/silent";
+elements["cfg-lark-auto-summary-prompt"].value = "总结上一轮输出";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-prestart-command"].value = "source ~/.zshrc";
 elements["drop-rule-add"].onclick();
@@ -772,10 +777,12 @@ elements["cfg-fast-waiting"].value = "450";
 elements["cfg-conservative-waiting"].value = "";
 elements["cfg-auto-refresh-interval"].value = "6000";
 elements["cfg-lark-max-lines"].value = "";
+elements["cfg-lark-merge-wrapped-lines"].checked = true;
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
 elements["cfg-lark-ignore-prefix"].value = "/ignore";
+elements["cfg-lark-auto-summary-prompt"].value = "请总结上一轮输出";
 elements["cfg-drop-patterns"].value = JSON.stringify([
   { title: "噪声", pattern: "noise" },
   { title: "调试", pattern: "debug" },
@@ -797,10 +804,12 @@ assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
 assert.equal(patchedConfig.conservative_waiting_transition_ms, 700);
 assert.equal(patchedConfig.lark_auto_refresh_interval_ms, 6000);
 assert.equal(patchedConfig.lark_notify_max_lines, 300);
+assert.equal(patchedConfig.lark_notify_merge_wrapped_lines, true);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);
 assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");
 assert.equal(patchedConfig.lark_ignore_message_prefix, "/ignore");
+assert.equal(patchedConfig.lark_auto_summary_prompt, "请总结上一轮输出");
 assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
   { title: "噪声", pattern: "noise" },
   { title: "调试", pattern: "debug" },

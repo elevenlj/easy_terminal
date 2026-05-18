@@ -1281,6 +1281,104 @@ func TestLarkReplyBridgeCardToggleAutoRefreshWaitsForInterval(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeCardToggleAutoSummaryPatchesCard(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := manager.GetRuntime(sess.ID)
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "toggle_auto_summary",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已开启自动总结" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].AutoSummaryEnabled {
+		t.Fatalf("auto summary should patch clicked card as enabled, got %#v", notes)
+	}
+
+	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已关闭自动总结" {
+		t.Fatalf("unexpected close response: %#v", resp)
+	}
+	notes = waitForNotifierNotes(t, notifier, 2)
+	if len(notes) < 2 || notes[1].AutoSummaryEnabled {
+		t.Fatalf("toggle close should patch clicked card as auto summary disabled, got %#v", notes)
+	}
+}
+
+func TestLarkReplyBridgeCardToggleMentionModePatchesCard(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Shortcut")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := manager.GetRuntime(sess.ID)
+	rt.MarkInputActivity("echo hello\r")
+	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "toggle_mention_mode",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已开启艾特模式" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || notes[0].MessageID != "bot-card" || !notes[0].MentionModeEnabled {
+		t.Fatalf("mention mode should patch clicked card as enabled, got %#v", notes)
+	}
+
+	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "已关闭艾特模式" {
+		t.Fatalf("unexpected close response: %#v", resp)
+	}
+	notes = waitForNotifierNotes(t, notifier, 2)
+	if len(notes) < 2 || notes[1].MentionModeEnabled {
+		t.Fatalf("toggle close should patch clicked card as mention mode disabled, got %#v", notes)
+	}
+}
+
 func TestLarkReplyBridgeDisabledCardActionsAreBlockedEndToEnd(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1310,6 +1408,18 @@ func TestLarkReplyBridgeDisabledCardActionsAreBlockedEndToEnd(t *testing.T) {
 			name: "toggle auto refresh",
 			value: map[string]interface{}{
 				"easy_terminal_action": "toggle_auto_refresh",
+			},
+		},
+		{
+			name: "toggle auto summary",
+			value: map[string]interface{}{
+				"easy_terminal_action": "toggle_auto_summary",
+			},
+		},
+		{
+			name: "toggle mention mode",
+			value: map[string]interface{}{
+				"easy_terminal_action": "toggle_mention_mode",
 			},
 		},
 		{
@@ -1432,6 +1542,92 @@ func TestLarkReplyBridgeCardCustomShortcutSubmitsCommand(t *testing.T) {
 	}
 	if rt, ok := manager.GetRuntime(sess.ID); !ok || rt.lastInputText != "git status" {
 		t.Fatalf("custom shortcut should be recorded as user input, runtime=%v input=%q", ok, rt.lastInputText)
+	}
+}
+
+func TestLarkReplyBridgeAutoSummaryRunsAfterUserMessageOnly(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetAutoSummaryPrompt("请总结上一轮输出")
+	sess, err := manager.CreateSession(context.Background(), "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("expected runtime")
+	}
+	if enabled, err := rt.ToggleAutoSummary(); err != nil || !enabled {
+		t.Fatalf("ToggleAutoSummary enabled=%v err=%v", enabled, err)
+	}
+	defaultLarkMessageRegistry.rememberChat("oc-summary", sess.ID)
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-summary", "", "", "text", `{"text":"echo hello"}`, "group", "oc-summary", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	waitForTerminalText(t, launcher.terminals[0], "请总结上一轮输出", 1500*time.Millisecond)
+	writes := launcher.terminals[0].writes()
+	if !strings.Contains(writes, "echo hello") || !strings.Contains(writes, "请总结上一轮输出") {
+		t.Fatalf("auto summary should write original input then prompt, got %q", writes)
+	}
+}
+
+func TestLarkReplyBridgeCardShortcutsDoNotTriggerAutoSummary(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "new-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetAutoSummaryPrompt("请总结上一轮输出")
+	sess, err := manager.CreateSession(context.Background(), "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("expected runtime")
+	}
+	if enabled, err := rt.ToggleAutoSummary(); err != nil || !enabled {
+		t.Fatalf("ToggleAutoSummary enabled=%v err=%v", enabled, err)
+	}
+
+	customEvent := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "custom_shortcut",
+			"session_id":           sess.ID,
+			"command":              "git status",
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+	if resp, err := bridge.HandleCardActionTrigger(context.Background(), customEvent); err != nil || resp != nil {
+		t.Fatalf("custom shortcut resp=%#v err=%v", resp, err)
+	}
+
+	shortcutEvent := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "shortcut",
+			"session_id":           sess.ID,
+			"key":                  "enter",
+		}},
+		Context: &callback.Context{OpenMessageID: "bot-card"},
+	}}
+	if resp, err := bridge.HandleCardActionTrigger(context.Background(), shortcutEvent); err != nil || resp != nil {
+		t.Fatalf("shortcut resp=%#v err=%v", resp, err)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	if writes := launcher.terminals[0].writes(); strings.Contains(writes, "请总结上一轮输出") {
+		t.Fatalf("card shortcuts should not trigger auto summary, got %q", writes)
 	}
 }
 
@@ -2212,6 +2408,18 @@ func (t *recordingTerminal) writeTimes() []time.Time {
 	cp := make([]time.Time, len(t.writeTime))
 	copy(cp, t.writeTime)
 	return cp
+}
+
+func waitForTerminalText(t *testing.T, term *recordingTerminal, text string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(term.writes(), text) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("terminal did not contain %q before timeout, got %q", text, term.writes())
 }
 
 func lastSubmittedWrite(parts []string, text string) bool {

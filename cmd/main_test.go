@@ -105,6 +105,7 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("LARK_SESSION_CHAT_PREFIX", "")
 	t.Setenv("SESSION_PRE_START_COMMAND", "")
 	t.Setenv("LARK_MENTION_ENABLED", "")
+	t.Setenv("LARK_NOTIFY_MERGE_WRAPPED_LINES", "")
 
 	cfg := loadConfig(filepath.Join(t.TempDir(), "config.local.json"))
 	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 100 {
@@ -115,6 +116,9 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	}
 	if len(cfg.LarkNotifyDropLineRules) != 2 || cfg.LarkNotifyDropLineRules[0].Title != "空行" || cfg.LarkNotifyDropLineRules[1].Title != "横线" {
 		t.Fatalf("default drop line rules = %#v", cfg.LarkNotifyDropLineRules)
+	}
+	if cfg.LarkNotifyMergeWrappedLines {
+		t.Fatalf("merge wrapped lines should default to false")
 	}
 }
 
@@ -227,12 +231,14 @@ func TestConfigDirMissingFileDoesNotFallBackToDefaultConfig(t *testing.T) {
 }
 
 func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
+	t.Cleanup(func() { session.SetLarkNotifyMergeWrappedLines(false) })
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	cfg := Config{
 		Port:                            "8080",
 		LarkMentionEnabled:              true,
 		LarkDefaultSessionName:          "默认会话",
 		LarkIgnoreMessagePrefix:         "/i",
+		LarkAutoSummaryPrompt:           "总结上一轮输出",
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
 		LarkAutoRefreshIntervalMs:       5000,
@@ -248,10 +254,12 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkMentionEnabled:              false,
 		LarkDefaultSessionName:          "默认",
 		LarkIgnoreMessagePrefix:         "/silent",
+		LarkAutoSummaryPrompt:           "总结上一轮输出",
 		FastWaitingTransitionMs:         450,
 		ConservativeWaitingTransitionMs: 900,
 		LarkAutoRefreshIntervalMs:       6000,
 		LarkNotifyMaxLines:              120,
+		LarkNotifyMergeWrappedLines:     true,
 		LarkNotifyDropLineRules: session.LarkNotifyDropLineRules{
 			{Title: "noise", Pattern: "noise"},
 			{Title: "debug", Pattern: "debug"},
@@ -265,7 +273,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" {
+	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" || got.LarkAutoSummaryPrompt != "总结上一轮输出" || !got.LarkNotifyMergeWrappedLines {
 		t.Fatalf("unexpected runtime config: %#v", got)
 	}
 	b, err := os.ReadFile(path)
@@ -281,6 +289,12 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	}
 	if saved.LarkIgnoreMessagePrefix != "/silent" {
 		t.Fatalf("ignore prefix was not persisted: %#v", saved)
+	}
+	if saved.LarkAutoSummaryPrompt != "总结上一轮输出" {
+		t.Fatalf("auto summary prompt was not persisted: %#v", saved)
+	}
+	if !saved.LarkNotifyMergeWrappedLines {
+		t.Fatalf("merge wrapped lines was not persisted: %#v", saved)
 	}
 	if len(saved.LarkNotifyDropLineRules) != 2 || saved.LarkNotifyDropLineRules[0].Pattern != "noise" {
 		t.Fatalf("drop patterns were not persisted: %#v", saved.LarkNotifyDropLineRules)

@@ -21,10 +21,12 @@ type RuntimeConfig struct {
 	LarkDefaultSessionName          string                                `json:"lark_default_session_name"`
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
+	LarkAutoSummaryPrompt           string                                `json:"lark_auto_summary_prompt"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
+	LarkNotifyMergeWrappedLines     bool                                  `json:"lark_notify_merge_wrapped_lines"`
 	LarkNotifyDropLineRules         session.LarkNotifyDropLineRules       `json:"lark_notify_drop_line_patterns"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`

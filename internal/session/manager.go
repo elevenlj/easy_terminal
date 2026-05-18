@@ -373,6 +373,31 @@ func (m *Manager) UpdateNotifyOnWaiting(ctx context.Context, id string, enabled 
 	return s, true, err
 }
 
+func (m *Manager) ToggleLarkMentionMode(ctx context.Context, id string) (Session, bool, error) {
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return Session{}, exists, err
+		}
+		s.LarkMentionModeEnabled = !s.LarkMentionModeEnabled
+		s.UpdatedAt = time.Now().UTC()
+		if m.store != nil {
+			err = m.store.UpdateSession(ctx, s)
+		}
+		s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+		return s, true, err
+	}
+	rt.mu.Lock()
+	rt.session.LarkMentionModeEnabled = !rt.session.LarkMentionModeEnabled
+	rt.session.UpdatedAt = time.Now().UTC()
+	s := rt.session
+	rt.mu.Unlock()
+	err := m.persist(ctx, s)
+	s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+	return s, true, err
+}
+
 func (m *Manager) BindLarkChat(ctx context.Context, id string, chatID string) (Session, bool, error) {
 	chatID = strings.TrimSpace(chatID)
 	rt, ok := m.GetRuntime(id)
@@ -545,6 +570,7 @@ type RuntimeSession struct {
 	autoRefreshEnabled          bool
 	autoRefreshMessageID        string
 	autoRefreshStop             chan struct{}
+	autoSummaryEnabled          bool
 	startupNotifyMode           startupNotifyMode
 	subscribers                 map[chan RuntimeEvent]runtimeSubscriber
 	snapshotWaiters             []chan struct{}
@@ -833,6 +859,8 @@ func (rt *RuntimeSession) disabledNotificationLocked(messageID string) (WaitingN
 		Running:            false,
 		Disabled:           true,
 		AutoRefreshEnabled: false,
+		AutoSummaryEnabled: false,
+		MentionModeEnabled: rt.session.LarkMentionModeEnabled,
 		SuppressUpdateTip:  true,
 	}, true
 }
@@ -1076,6 +1104,8 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
+		AutoSummaryEnabled:  rt.autoSummaryEnabled,
+		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: patchVersion,
 	}
 	rt.notificationRunning = true
@@ -1185,6 +1215,8 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		UpdateNo:            updateNo,
 		Running:             running,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
+		AutoSummaryEnabled:  rt.autoSummaryEnabled,
+		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		SuppressUpdateTip:   suppressUpdateTip,
 		NotificationVersion: patchVersion,
 	}
@@ -1270,6 +1302,28 @@ func (rt *RuntimeSession) ToggleAutoRefresh(messageID string) (bool, error) {
 	rt.autoRefreshStop = stop
 	go rt.autoRefreshLoop(stop)
 	return true, nil
+}
+
+func (rt *RuntimeSession) ToggleAutoSummary() (bool, error) {
+	if rt == nil {
+		return false, errors.New("session is not available")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if !rt.session.Live || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
+		return false, errors.New("session is not active")
+	}
+	rt.autoSummaryEnabled = !rt.autoSummaryEnabled
+	return rt.autoSummaryEnabled, nil
+}
+
+func (rt *RuntimeSession) AutoSummaryEnabled() bool {
+	if rt == nil {
+		return false
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.autoSummaryEnabled
 }
 
 func (rt *RuntimeSession) stopAutoRefreshLocked() {
@@ -1679,6 +1733,7 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 		n.Running = false
 	}
 	n.AutoRefreshEnabled = rt.autoRefreshEnabled
+	n.AutoSummaryEnabled = rt.autoSummaryEnabled
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion
 	notifiedVisibleSnapshot := rt.visibleSnapshot
@@ -1809,6 +1864,8 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             true,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
+		AutoSummaryEnabled:  rt.autoSummaryEnabled,
+		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
 	}, true
 }
@@ -1837,6 +1894,8 @@ func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, 
 		UpdateNo:            rt.notificationUpdateNo,
 		Running:             false,
 		AutoRefreshEnabled:  rt.autoRefreshEnabled,
+		AutoSummaryEnabled:  rt.autoSummaryEnabled,
+		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
 	}, true
 }
@@ -1895,6 +1954,7 @@ func (rt *RuntimeSession) updateDisabledNotification(note WaitingNotification) {
 	note.Running = false
 	note.Disabled = true
 	note.AutoRefreshEnabled = false
+	note.AutoSummaryEnabled = false
 	note.SuppressUpdateTip = true
 	rt.notificationPatchMu.Lock()
 	defer rt.notificationPatchMu.Unlock()
@@ -1963,7 +2023,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
@@ -1988,7 +2048,7 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 	} else {
 		source += ":fallback"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, SnapshotSource: source}, contentHash, true, "ready"
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: source}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

@@ -29,6 +29,7 @@ const (
 	defaultLarkDefaultSessionName          = "默认会话"
 	defaultLarkSessionChatPrefix           = "ET · "
 	defaultLarkIgnoreMessagePrefix         = "/i"
+	defaultLarkAutoSummaryPrompt           = session.DefaultLarkAutoSummaryPrompt
 	defaultFastWaitingTransitionMs         = 1000
 	defaultConservativeWaitingTransitionMs = 3000
 	defaultLarkAutoRefreshIntervalMs       = 5000
@@ -50,10 +51,12 @@ type Config struct {
 	LarkDefaultSessionName          string                                `json:"lark_default_session_name"`
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
+	LarkAutoSummaryPrompt           string                                `json:"lark_auto_summary_prompt"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
+	LarkNotifyMergeWrappedLines     bool                                  `json:"lark_notify_merge_wrapped_lines"`
 	LarkNotifyDropLineRules         session.LarkNotifyDropLineRules       `json:"lark_notify_drop_line_patterns"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
 	SessionStartPresets             map[string]session.SessionStartPreset `json:"session_start_presets"`
@@ -137,6 +140,7 @@ func run() error {
 	bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 	bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
 	bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
+	bridge.SetAutoSummaryPrompt(cfg.LarkAutoSummaryPrompt)
 	bridge.SetStartPresets(cfg.SessionStartPresets)
 	bridge.SetNamePresets(cfg.SessionNamePresets)
 	bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -192,10 +196,16 @@ func loadConfig(path string) Config {
 	cfg.LarkDefaultSessionName = env("LARK_DEFAULT_SESSION_NAME", cfg.LarkDefaultSessionName)
 	cfg.LarkSessionChatPrefix = env("LARK_SESSION_CHAT_PREFIX", cfg.LarkSessionChatPrefix)
 	cfg.LarkIgnoreMessagePrefix = env("LARK_IGNORE_MESSAGE_PREFIX", cfg.LarkIgnoreMessagePrefix)
+	cfg.LarkAutoSummaryPrompt = env("LARK_AUTO_SUMMARY_PROMPT", cfg.LarkAutoSummaryPrompt)
 	cfg.SessionPreStartCommand = env("SESSION_PRE_START_COMMAND", cfg.SessionPreStartCommand)
 	if v := os.Getenv("LARK_MENTION_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
 			cfg.LarkMentionEnabled = parsed
+		}
+	}
+	if v := os.Getenv("LARK_NOTIFY_MERGE_WRAPPED_LINES"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			cfg.LarkNotifyMergeWrappedLines = parsed
 		}
 	}
 	if cfg.FastWaitingTransitionMs <= 0 {
@@ -210,8 +220,12 @@ func loadConfig(path string) Config {
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = defaultLarkNotifyMaxLines
 	}
+	if strings.TrimSpace(cfg.LarkAutoSummaryPrompt) == "" {
+		cfg.LarkAutoSummaryPrompt = defaultLarkAutoSummaryPrompt
+	}
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(cfg.LarkSessionChatPrefix)
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	session.SetLarkNotifyMergeWrappedLines(cfg.LarkNotifyMergeWrappedLines)
 	if err := session.SetLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules.Rules()); err != nil {
 		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
 	}
@@ -225,6 +239,7 @@ func defaultConfig() Config {
 		LarkDefaultSessionName:          defaultLarkDefaultSessionName,
 		LarkSessionChatPrefix:           defaultLarkSessionChatPrefix,
 		LarkIgnoreMessagePrefix:         defaultLarkIgnoreMessagePrefix,
+		LarkAutoSummaryPrompt:           defaultLarkAutoSummaryPrompt,
 		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
@@ -340,10 +355,12 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.LarkDefaultSessionName = req.LarkDefaultSessionName
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(req.LarkSessionChatPrefix)
 	cfg.LarkIgnoreMessagePrefix = strings.TrimSpace(req.LarkIgnoreMessagePrefix)
+	cfg.LarkAutoSummaryPrompt = normalizeLarkAutoSummaryPrompt(req.LarkAutoSummaryPrompt)
 	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
 	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
 	cfg.LarkNotifyMaxLines = req.LarkNotifyMaxLines
+	cfg.LarkNotifyMergeWrappedLines = req.LarkNotifyMergeWrappedLines
 	cfg.LarkNotifyDropLineRules = req.LarkNotifyDropLineRules
 	cfg.SessionPreStartCommand = req.SessionPreStartCommand
 	cfg.SessionStartPresets = req.SessionStartPresets
@@ -369,6 +386,7 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
 	manager.SetNotifier(notifier)
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	session.SetLarkNotifyMergeWrappedLines(cfg.LarkNotifyMergeWrappedLines)
 	if err := session.SetLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules.Rules()); err != nil {
 		return err
 	}
@@ -380,6 +398,7 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 		bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 		bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
 		bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
+		bridge.SetAutoSummaryPrompt(cfg.LarkAutoSummaryPrompt)
 		bridge.SetStartPresets(cfg.SessionStartPresets)
 		bridge.SetNamePresets(cfg.SessionNamePresets)
 		bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -400,6 +419,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		ConservativeWaitingTransitionMs: cfg.ConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       cfg.LarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              cfg.LarkNotifyMaxLines,
+		LarkNotifyMergeWrappedLines:     cfg.LarkNotifyMergeWrappedLines,
 		LarkNotifyDropLineRules:         cfg.LarkNotifyDropLineRules.Rules(),
 		SessionPreStartCommand:          cfg.SessionPreStartCommand,
 		LarkAppID:                       cfg.LarkAppID,
@@ -409,6 +429,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		LarkDefaultSessionName:          cfg.LarkDefaultSessionName,
 		LarkSessionChatPrefix:           cfg.LarkSessionChatPrefix,
 		LarkIgnoreMessagePrefix:         cfg.LarkIgnoreMessagePrefix,
+		LarkAutoSummaryPrompt:           cfg.LarkAutoSummaryPrompt,
 		SessionStartPresets:             cfg.SessionStartPresets,
 		SessionNamePresets:              cfg.SessionNamePresets,
 		LarkCustomShortcuts:             cfg.LarkCustomShortcuts,
@@ -422,6 +443,14 @@ func normalizeLarkSessionChatPrefix(prefix string) string {
 		return defaultLarkSessionChatPrefix
 	}
 	return prefix
+}
+
+func normalizeLarkAutoSummaryPrompt(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return defaultLarkAutoSummaryPrompt
+	}
+	return prompt
 }
 
 func writeConfigFile(path string, cfg Config) error {

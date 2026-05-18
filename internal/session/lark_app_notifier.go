@@ -93,7 +93,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
 	if !note.Disabled {
-		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
+		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.AutoSummaryEnabled, note.MentionModeEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
 		}
@@ -144,14 +144,19 @@ func larkTerminalTextElement(content string) map[string]any {
 func larkTerminalPlainText(content string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
+	if larkNotifyMergeWrappedLines.Load() {
+		content = mergeTerminalWrappedLinesForLark(content)
+	}
 	return content
 }
 
-func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool) []map[string]any {
+func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, autoSummaryEnabled bool, mentionModeEnabled bool) []map[string]any {
 	return []map[string]any{
 		larkShortcutActionElement(
 			larkRefreshButtonColumn(sessionID, updateNo),
 			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
+			larkAutoSummaryButtonColumn(sessionID, updateNo, autoSummaryEnabled),
+			larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
 			larkDeleteSessionButtonColumn(sessionID),
 		),
 		larkShortcutActionElement(
@@ -170,6 +175,37 @@ func larkShortcutActionElement(columns ...map[string]any) map[string]any {
 		"horizontal_align":   "left",
 		"horizontal_spacing": "4px",
 		"columns":            columns,
+	}
+}
+
+func larkMentionModeButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
+	label := "艾特模式"
+	if enabled {
+		label = "停艾特"
+	}
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":   "button",
+				"type":  "primary",
+				"size":  "tiny",
+				"width": "default",
+				"text":  map[string]any{"tag": "plain_text", "content": label},
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "toggle_mention_mode",
+							"session_id":           sessionID,
+							"update_no":            updateNo,
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -194,6 +230,37 @@ func larkAutoRefreshButtonColumn(sessionID string, updateNo int, enabled bool) m
 						"type": "callback",
 						"value": map[string]any{
 							"easy_terminal_action": "toggle_auto_refresh",
+							"session_id":           sessionID,
+							"update_no":            updateNo,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func larkAutoSummaryButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
+	label := "自动总结"
+	if enabled {
+		label = "停总结"
+	}
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{
+			{
+				"tag":   "button",
+				"type":  "primary",
+				"size":  "tiny",
+				"width": "default",
+				"text":  map[string]any{"tag": "plain_text", "content": label},
+				"behaviors": []map[string]any{
+					{
+						"type": "callback",
+						"value": map[string]any{
+							"easy_terminal_action": "toggle_auto_summary",
 							"session_id":           sessionID,
 							"update_no":            updateNo,
 						},
@@ -365,9 +432,16 @@ func larkNotificationStatusLine(note WaitingNotification) string {
 		return prefix + "状态：disabled"
 	}
 	if note.Running {
-		return prefix + `状态：<font color="green">Running</font>`
+		return prefix + `状态：<font color="green">Running</font>` + larkMentionModeStatusSuffix(note.MentionModeEnabled)
 	}
-	return prefix + "状态：Not Running"
+	return prefix + "状态：Not Running" + larkMentionModeStatusSuffix(note.MentionModeEnabled)
+}
+
+func larkMentionModeStatusSuffix(enabled bool) string {
+	if enabled {
+		return " · 艾特模式：开"
+	}
+	return " · 艾特模式：关"
 }
 
 func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {

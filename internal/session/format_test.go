@@ -329,6 +329,36 @@ func TestPickNotifyContentAppliesDropLinePatterns(t *testing.T) {
 	}
 }
 
+func TestLarkTerminalPlainTextMergesWrappedLinesWhenEnabled(t *testing.T) {
+	SetLarkNotifyMergeWrappedLines(true)
+	t.Cleanup(func() { SetLarkNotifyMergeWrappedLines(false) })
+
+	got := larkTerminalPlainText(strings.Join([]string{
+		"这是一个因为终端宽度被折断的长句",
+		"下一段仍然属于同一句话。",
+		"新的一句保留换行",
+		"",
+		"1. 列表保留换行",
+	}, "\n"))
+	want := strings.Join([]string{
+		"这是一个因为终端宽度被折断的长句下一段仍然属于同一句话。",
+		"新的一句保留换行",
+		"",
+		"1. 列表保留换行",
+	}, "\n")
+	if got != want {
+		t.Fatalf("wrapped lines were not merged as expected:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestLarkTerminalPlainTextKeepsWrappedLinesByDefault(t *testing.T) {
+	SetLarkNotifyMergeWrappedLines(false)
+	got := larkTerminalPlainText("第一行\n第二行")
+	if got != "第一行\n第二行" {
+		t.Fatalf("wrapped line merge should be disabled by default: %q", got)
+	}
+}
+
 func TestTruncateForLarkKeepsTailLinesWithoutPrefix(t *testing.T) {
 	SetLarkNotifyMaxLines(3)
 	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })

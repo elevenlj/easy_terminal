@@ -31,7 +31,7 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=all></at>"})
 	}
 	elements = append(elements, map[string]any{"tag": "div", "text": map[string]any{"tag": "plain_text", "content": content}})
-	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled)...)
+	elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.AutoSummaryEnabled, false)...)
 	payload := map[string]any{
 		"msg_type": "interactive",
 		"card": map[string]any{

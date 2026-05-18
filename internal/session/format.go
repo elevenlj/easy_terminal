@@ -19,6 +19,7 @@ const (
 
 var larkNotifyMaxLines atomic.Int64
 var larkNotifyDropLinePatterns atomic.Value
+var larkNotifyMergeWrappedLines atomic.Bool
 
 type larkNotifyDropLinePattern struct {
 	re *regexp.Regexp
@@ -34,6 +35,10 @@ func SetLarkNotifyMaxLines(lines int) {
 		lines = defaultMaxLarkTextLines
 	}
 	larkNotifyMaxLines.Store(int64(lines))
+}
+
+func SetLarkNotifyMergeWrappedLines(enabled bool) {
+	larkNotifyMergeWrappedLines.Store(enabled)
 }
 
 func SetLarkNotifyDropLinePatterns(patterns []string) error {
@@ -96,6 +101,94 @@ func dropConfiguredLarkNotifyLines(text string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+func mergeTerminalWrappedLinesForLark(text string) string {
+	if text == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) <= 1 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(lines[0])
+	for i := 1; i < len(lines); i++ {
+		if shouldMergeTerminalWrappedLineBreak(lines[i-1], lines[i]) {
+			b.WriteString(lines[i])
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString(lines[i])
+	}
+	return b.String()
+}
+
+func shouldMergeTerminalWrappedLineBreak(left, right string) bool {
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
+		return false
+	}
+	leftEdge, ok := lastBoundaryRune(left)
+	if !ok || isLarkLineBreakSeparator(leftEdge) {
+		return false
+	}
+	rightEdge, ok := firstBoundaryRune(right)
+	if !ok || isLarkLineBreakSeparator(rightEdge) {
+		return false
+	}
+	if startsWithOrderedListMarker(strings.TrimSpace(right)) {
+		return false
+	}
+	return true
+}
+
+func lastBoundaryRune(text string) (rune, bool) {
+	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	if text == "" {
+		return 0, false
+	}
+	var last rune
+	for _, r := range text {
+		last = r
+	}
+	return last, true
+}
+
+func firstBoundaryRune(text string) (rune, bool) {
+	text = strings.TrimLeftFunc(text, unicode.IsSpace)
+	for _, r := range text {
+		return r, true
+	}
+	return 0, false
+}
+
+func isLarkLineBreakSeparator(r rune) bool {
+	return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+func startsWithOrderedListMarker(text string) bool {
+	runes := []rune(text)
+	if len(runes) >= 2 && isCJKListNumber(runes[0]) {
+		switch runes[1] {
+		case '、', '.', '．', ')', '）':
+			return true
+		}
+	}
+	digits := 0
+	for _, r := range text {
+		if !unicode.IsDigit(r) {
+			return digits > 0 && (r == '.' || r == ')' || r == '、' || r == '．')
+		}
+		digits++
+		if digits > 4 {
+			return false
+		}
+	}
+	return false
+}
+
+func isCJKListNumber(r rune) bool {
+	return strings.ContainsRune("一二三四五六七八九十", r)
 }
 
 func truncateLinesFromTail(text string, maxLines int, prefix string) string {

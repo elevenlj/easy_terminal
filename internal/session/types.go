@@ -25,6 +25,7 @@ type Session struct {
 	PeerSessionID          string    `json:"peer_session_id,omitempty"`
 	BridgeEnabled          bool      `json:"bridge_enabled,omitempty"`
 	LarkChatID             string    `json:"lark_chat_id,omitempty"`
+	LarkMentionModeEnabled bool      `json:"lark_mention_mode_enabled,omitempty"`
 	HistorySize            int64     `json:"history_size,omitempty"`
 	NotificationsAvailable bool      `json:"notifications_available"`
 }
@@ -47,10 +48,14 @@ type WaitingNotification struct {
 	Running             bool
 	Disabled            bool
 	AutoRefreshEnabled  bool
+	AutoSummaryEnabled  bool
+	MentionModeEnabled  bool
 	SuppressUpdateTip   bool
 	NotificationVersion int64
 	SnapshotSource      string
 }
+
+const DefaultLarkAutoSummaryPrompt = "请用对用户阅读友好的方式，总结上一轮输出内容。要求精简但不要遗漏主要结论、已完成事项、关键文件或下一步动作。不要复述无关日志。"
 
 type LarkCustomShortcut struct {
 	Label   string `json:"label"`
