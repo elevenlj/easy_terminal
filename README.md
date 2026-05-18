@@ -64,12 +64,14 @@ go run ./cmd --port 9090
 go run ./cmd -p 9090
 ```
 
-启动时会自动生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。需要固定配置文件目录时：
+启动时会自动生成本机配置文件 `~/.easy_terminal/conf/config.local.json`。需要固定配置和运行数据目录时：
 
 ```sh
-easy_terminal --config-dir /data/easy_terminal/conf
-EASY_TERMINAL_CONFIG_DIR=/data/easy_terminal/conf easy_terminal
+easy_terminal --config-dir /data/easy_terminal
+EASY_TERMINAL_CONFIG_DIR=/data/easy_terminal easy_terminal
 ```
+
+指定后，配置文件、会话数据库、上传文件和日志都会写入该目录。
 
 构建二进制：
 
@@ -78,7 +80,7 @@ make build
 ./easy_terminal
 ./easy_terminal --port 9090
 ./easy_terminal -p 9090
-./easy_terminal --config-dir /data/easy_terminal/conf
+./easy_terminal --config-dir /data/easy_terminal
 ```
 
 端口配置优先级为：启动参数 `--port` / `-p` > 环境变量 `PORT` > 配置文件 > 默认端口 `8080`。
@@ -140,5 +142,7 @@ make tidy         # go mod tidy
 - `~/.easy_terminal/data/uploads/`
 - `~/.easy_terminal/log/easy_terminal.log`
 - `~/.easy_terminal/conf/config.local.json`
+
+使用 `--config-dir` 或 `EASY_TERMINAL_CONFIG_DIR` 时，运行数据会写在指定目录下。
 
 这些文件已在 `.gitignore` 中忽略。

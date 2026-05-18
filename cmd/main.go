@@ -85,9 +85,10 @@ func run() error {
 	if opts.Port != "" {
 		cfg.Port = opts.Port
 	}
-	dbPath := env("AGENT_MONITOR_DB", defaultDBPath())
-	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", defaultUploadsDir())
-	logDir := env("AGENT_MONITOR_LOG_DIR", defaultLogDir())
+	dataDir := dataDirFromConfigDir(opts.ConfigDir)
+	dbPath := env("AGENT_MONITOR_DB", dbPathInDataDir(dataDir))
+	uploadsDir := env("AGENT_MONITOR_UPLOADS_DIR", uploadsDirInDataDir(dataDir))
+	logDir := env("AGENT_MONITOR_LOG_DIR", logDirInDataDir(dataDir))
 	_ = os.MkdirAll(filepath.Dir(dbPath), 0o755)
 	_ = os.MkdirAll(uploadsDir, 0o755)
 	_ = os.MkdirAll(logDir, 0o755)
@@ -261,19 +262,41 @@ func defaultConfigDir() string {
 }
 
 func defaultDBPath() string {
-	return filepath.Join(defaultDataDir(), "easy_terminal.db")
+	return dbPathInDataDir(defaultDataDir())
 }
 
 func defaultUploadsDir() string {
-	return filepath.Join(defaultDataDir(), "data", "uploads")
+	return uploadsDirInDataDir(defaultDataDir())
 }
 
 func defaultLogDir() string {
-	return filepath.Join(defaultDataDir(), "log")
+	return logDirInDataDir(defaultDataDir())
+}
+
+func dbPathInDataDir(dir string) string {
+	return filepath.Join(dir, "easy_terminal.db")
+}
+
+func uploadsDirInDataDir(dir string) string {
+	return filepath.Join(dir, "data", "uploads")
+}
+
+func logDirInDataDir(dir string) string {
+	return filepath.Join(dir, "log")
+}
+
+func dataDirFromConfigDir(dir string) string {
+	if dir := strings.TrimSpace(dir); dir != "" {
+		return dir
+	}
+	return defaultDataDir()
 }
 
 func defaultDataDir() string {
 	if dir := strings.TrimSpace(os.Getenv("EASY_TERMINAL_HOME")); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(os.Getenv("EASY_TERMINAL_CONFIG_DIR")); dir != "" {
 		return dir
 	}
 	if dir, err := os.UserHomeDir(); err == nil && dir != "" {

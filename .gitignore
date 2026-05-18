@@ -11,3 +11,4 @@ promo/*.wav
 promo/*.png
 promo/slides/
 /conf_team/config.local.json
+/conf_8081/config.local.json

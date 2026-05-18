@@ -149,12 +149,40 @@ func TestDefaultPathsAllowHomeOverride(t *testing.T) {
 
 func TestDefaultConfigPathAllowsConfigDirOverride(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("EASY_TERMINAL_HOME", "")
 	t.Setenv("EASY_TERMINAL_CONFIG_DIR", dir)
 	if got := defaultConfigPath(); got != filepath.Join(dir, "config.local.json") {
 		t.Fatalf("default config path with config dir override = %q", got)
 	}
+	if got := defaultDBPath(); got != filepath.Join(dir, "easy_terminal.db") {
+		t.Fatalf("default db path with config dir override = %q", got)
+	}
+	if got := defaultUploadsDir(); got != filepath.Join(dir, "data", "uploads") {
+		t.Fatalf("default uploads dir with config dir override = %q", got)
+	}
+	if got := defaultLogDir(); got != filepath.Join(dir, "log") {
+		t.Fatalf("default log dir with config dir override = %q", got)
+	}
 	if got := configPathFromDir(filepath.Join(dir, "custom")); got != filepath.Join(dir, "custom", "config.local.json") {
 		t.Fatalf("config path from cli dir = %q", got)
+	}
+}
+
+func TestCLIConfigDirScopesRuntimeData(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "instance")
+	t.Setenv("EASY_TERMINAL_HOME", "")
+	t.Setenv("EASY_TERMINAL_CONFIG_DIR", "")
+	if got := dataDirFromConfigDir(dir); got != dir {
+		t.Fatalf("data dir from cli config dir = %q", got)
+	}
+	if got := dbPathInDataDir(dataDirFromConfigDir(dir)); got != filepath.Join(dir, "easy_terminal.db") {
+		t.Fatalf("db path from cli config dir = %q", got)
+	}
+	if got := uploadsDirInDataDir(dataDirFromConfigDir(dir)); got != filepath.Join(dir, "data", "uploads") {
+		t.Fatalf("uploads dir from cli config dir = %q", got)
+	}
+	if got := logDirInDataDir(dataDirFromConfigDir(dir)); got != filepath.Join(dir, "log") {
+		t.Fatalf("log dir from cli config dir = %q", got)
 	}
 }
 

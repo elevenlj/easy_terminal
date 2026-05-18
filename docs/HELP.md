@@ -23,7 +23,7 @@
 2. easy-terminal  -p 8888
    指定端口号
 3. easy-terminal  -p 8888 --config-dir xxxx
-   指定配置文件目录，默认～/.easy-terminal/conf
+   指定配置和运行数据目录，默认 ~/.easy_terminal
    必要配置：
 1. 选择本地agent，可以不选，自己单独添加agent启动快捷键或者会话预设agent启动命令，建议选上
 2. 飞书配置：飞书扫码一键配置
