@@ -20,7 +20,6 @@ const (
 	larkAPIRetryAttempts            = 3
 	larkAPIRetryDelay               = 120 * time.Millisecond
 	larkCustomShortcutButtonsPerRow = 3
-	larkSystemShortcutButtonsPerRow = 3
 )
 
 type LarkAppNotifier struct {
@@ -152,32 +151,33 @@ func larkTerminalPlainText(content string) string {
 }
 
 func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, autoSummaryEnabled bool, mentionModeEnabled bool) []map[string]any {
-	columns := []map[string]any{
-		larkRefreshButtonColumn(sessionID, updateNo),
-		larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
-		larkAutoSummaryButtonColumn(sessionID, updateNo, autoSummaryEnabled),
-		larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
-		larkDeleteSessionButtonColumn(sessionID),
-		larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
-		larkShortcutButtonColumn("退出agent", "primary", sessionID, "exit_agent"),
-		larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
-		larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
+	return []map[string]any{
+		larkFlowShortcutActionElement(
+			larkRefreshButtonColumn(sessionID, updateNo),
+			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
+			larkAutoSummaryButtonColumn(sessionID, updateNo, autoSummaryEnabled),
+			larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
+			larkDeleteSessionButtonColumn(sessionID),
+			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
+			larkShortcutButtonColumn("退出agent", "primary", sessionID, "exit_agent"),
+			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
+			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
+		),
 	}
-	rows := make([]map[string]any, 0, (len(columns)+larkSystemShortcutButtonsPerRow-1)/larkSystemShortcutButtonsPerRow)
-	for start := 0; start < len(columns); start += larkSystemShortcutButtonsPerRow {
-		end := start + larkSystemShortcutButtonsPerRow
-		if end > len(columns) {
-			end = len(columns)
-		}
-		rows = append(rows, larkShortcutActionElement(columns[start:end]...))
-	}
-	return rows
 }
 
 func larkShortcutActionElement(columns ...map[string]any) map[string]any {
+	return larkShortcutActionElementWithFlexMode("none", columns...)
+}
+
+func larkFlowShortcutActionElement(columns ...map[string]any) map[string]any {
+	return larkShortcutActionElementWithFlexMode("flow", columns...)
+}
+
+func larkShortcutActionElementWithFlexMode(flexMode string, columns ...map[string]any) map[string]any {
 	return map[string]any{
 		"tag":                "column_set",
-		"flex_mode":          "none",
+		"flex_mode":          flexMode,
 		"horizontal_align":   "left",
 		"horizontal_spacing": "4px",
 		"columns":            columns,
