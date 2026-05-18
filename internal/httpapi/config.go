@@ -20,6 +20,7 @@ type RuntimeConfig struct {
 	LarkMentionEnabled              bool                                  `json:"lark_mention_enabled"`
 	LarkDefaultSessionName          string                                `json:"lark_default_session_name"`
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
+	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`

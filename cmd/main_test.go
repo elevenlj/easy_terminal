@@ -204,6 +204,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		Port:                            "8080",
 		LarkMentionEnabled:              true,
 		LarkDefaultSessionName:          "默认会话",
+		LarkIgnoreMessagePrefix:         "/i",
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
 		LarkAutoRefreshIntervalMs:       5000,
@@ -218,6 +219,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkNotifyReceiveID:             "ou_1",
 		LarkMentionEnabled:              false,
 		LarkDefaultSessionName:          "默认",
+		LarkIgnoreMessagePrefix:         "/silent",
 		FastWaitingTransitionMs:         450,
 		ConservativeWaitingTransitionMs: 900,
 		LarkAutoRefreshIntervalMs:       6000,
@@ -235,7 +237,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" {
+	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" {
 		t.Fatalf("unexpected runtime config: %#v", got)
 	}
 	b, err := os.ReadFile(path)
@@ -248,6 +250,9 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	}
 	if saved.FastWaitingTransitionMs != 450 || saved.LarkAutoRefreshIntervalMs != 6000 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
 		t.Fatalf("config file was not updated: %#v", saved)
+	}
+	if saved.LarkIgnoreMessagePrefix != "/silent" {
+		t.Fatalf("ignore prefix was not persisted: %#v", saved)
 	}
 	if len(saved.LarkNotifyDropLineRules) != 2 || saved.LarkNotifyDropLineRules[0].Pattern != "noise" {
 		t.Fatalf("drop patterns were not persisted: %#v", saved.LarkNotifyDropLineRules)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -29,6 +30,7 @@ type LarkReplyBridge struct {
 	uploadsDir              string
 	defaultStartSessionName string
 	sessionChatPrefix       string
+	ignoreMessagePrefix     string
 	startPresets            map[string]SessionStartPreset
 	namePresets             map[string]SessionStartPreset
 	customShortcuts         []LarkCustomShortcut
@@ -77,8 +79,9 @@ type larkRouteContext struct {
 func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir string) *LarkReplyBridge {
 	b := &LarkReplyBridge{
 		appID: appID, appSecret: appSecret, manager: manager, uploadsDir: uploadsDir,
-		sessionChatPrefix: defaultLarkSessionChatPrefix,
-		seenMessages:      make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]larkPipelineInput),
+		sessionChatPrefix:   defaultLarkSessionChatPrefix,
+		ignoreMessagePrefix: "/i",
+		seenMessages:        make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]larkPipelineInput),
 	}
 	if manager != nil {
 		manager.SetNotificationSentHook(b.OnNotificationSent)
@@ -126,6 +129,12 @@ func (b *LarkReplyBridge) SetSessionChatPrefix(prefix string) {
 	if b.sessionChatPrefix == "" {
 		b.sessionChatPrefix = defaultLarkSessionChatPrefix
 	}
+}
+
+func (b *LarkReplyBridge) SetIgnoreMessagePrefix(prefix string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ignoreMessagePrefix = strings.TrimSpace(prefix)
 }
 
 func (b *LarkReplyBridge) Available() bool {
@@ -451,6 +460,9 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 	}
 	messageType := valueOf(msg.MessageType)
 	incoming := extractLarkIncomingMessage(valueOf(msg.Content), messageType)
+	if b.shouldIgnoreIncomingText(incoming.Text) {
+		return nil
+	}
 	log.Printf("lark reply bridge received P2 message=%s chat=%s chat_type=%s msg_type=%s text_len=%d attachments=%d",
 		valueOf(msg.MessageId), valueOf(msg.ChatId), valueOf(msg.ChatType), messageType, len(incoming.Text), len(incoming.Attachments))
 	if isUnsupportedLarkForwardedCard(messageType) {
@@ -501,6 +513,25 @@ func shouldIgnoreLarkP2Message(sender *larkim.EventSender) bool {
 	return *sender.SenderType != "" && *sender.SenderType != "user"
 }
 
+func (b *LarkReplyBridge) shouldIgnoreIncomingText(text string) bool {
+	text = cleanLarkText(text)
+	if text == "" {
+		return false
+	}
+	b.mu.Lock()
+	prefix := b.ignoreMessagePrefix
+	b.mu.Unlock()
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || !strings.HasPrefix(text, prefix) {
+		return false
+	}
+	rest := strings.TrimPrefix(text, prefix)
+	for _, r := range rest {
+		return unicode.IsSpace(r)
+	}
+	return false
+}
+
 func isUnsupportedLarkForwardedCard(messageType string) bool {
 	return messageType == "interactive"
 }
@@ -524,6 +555,9 @@ func (b *LarkReplyBridge) HandleP1MessageReceive(ctx context.Context, event *lar
 		text = strings.TrimSpace(e.Text)
 	}
 	if text == "" {
+		return nil
+	}
+	if b.shouldIgnoreIncomingText(text) {
 		return nil
 	}
 	log.Printf("lark reply bridge received P1 message=%s chat=%s chat_type=%s msg_type=%s mention=%v text_len=%d",

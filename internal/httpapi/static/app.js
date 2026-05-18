@@ -467,6 +467,7 @@ function renderConfig() {
   $("cfg-lark-receive-id").value = cfg.lark_notify_receive_id || "";
   $("cfg-lark-default-session-name").value = cfg.lark_default_session_name || "";
   $("cfg-lark-session-chat-prefix").value = cfg.lark_session_chat_prefix || "ET · ";
+  $("cfg-lark-ignore-prefix").value = cfg.lark_ignore_message_prefix || "/i";
   $("cfg-lark-mention-enabled").checked = Boolean(cfg.lark_mention_enabled);
   $("cfg-prestart-command").value = cfg.session_pre_start_command || "";
   $("cfg-drop-patterns").value = JSON.stringify(normalizeDropRules(cfg.lark_notify_drop_line_patterns || []), null, 2);
@@ -575,6 +576,7 @@ function readConfigForm() {
     lark_mention_enabled: $("cfg-lark-mention-enabled").checked,
     lark_default_session_name: $("cfg-lark-default-session-name").value.trim(),
     lark_session_chat_prefix: $("cfg-lark-session-chat-prefix").value.trim(),
+    lark_ignore_message_prefix: $("cfg-lark-ignore-prefix").value.trim(),
     fast_waiting_transition_ms: readNumber("cfg-fast-waiting", state.config?.fast_waiting_transition_ms || 1000),
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting", state.config?.conservative_waiting_transition_ms || 3000),
     lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval", state.config?.lark_auto_refresh_interval_ms || 5000),

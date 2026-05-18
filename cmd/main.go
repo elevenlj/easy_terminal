@@ -28,6 +28,7 @@ var version = "dev"
 const (
 	defaultLarkDefaultSessionName          = "默认会话"
 	defaultLarkSessionChatPrefix           = "ET · "
+	defaultLarkIgnoreMessagePrefix         = "/i"
 	defaultFastWaitingTransitionMs         = 1000
 	defaultConservativeWaitingTransitionMs = 3000
 	defaultLarkAutoRefreshIntervalMs       = 5000
@@ -48,6 +49,7 @@ type Config struct {
 	LarkMentionEnabled              bool                                  `json:"lark_mention_enabled"`
 	LarkDefaultSessionName          string                                `json:"lark_default_session_name"`
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
+	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
@@ -133,6 +135,7 @@ func run() error {
 	bridge := session.NewLarkReplyBridge(cfg.LarkAppID, cfg.LarkAppSecret, mgr, uploadsDir)
 	bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 	bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
+	bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
 	bridge.SetStartPresets(cfg.SessionStartPresets)
 	bridge.SetNamePresets(cfg.SessionNamePresets)
 	bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -187,6 +190,7 @@ func loadConfig(path string) Config {
 	cfg.LarkNotifyReceiveID = env("LARK_NOTIFY_RECEIVE_ID", cfg.LarkNotifyReceiveID)
 	cfg.LarkDefaultSessionName = env("LARK_DEFAULT_SESSION_NAME", cfg.LarkDefaultSessionName)
 	cfg.LarkSessionChatPrefix = env("LARK_SESSION_CHAT_PREFIX", cfg.LarkSessionChatPrefix)
+	cfg.LarkIgnoreMessagePrefix = env("LARK_IGNORE_MESSAGE_PREFIX", cfg.LarkIgnoreMessagePrefix)
 	cfg.SessionPreStartCommand = env("SESSION_PRE_START_COMMAND", cfg.SessionPreStartCommand)
 	if v := os.Getenv("LARK_MENTION_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
@@ -219,6 +223,7 @@ func defaultConfig() Config {
 		LarkMentionEnabled:              true,
 		LarkDefaultSessionName:          defaultLarkDefaultSessionName,
 		LarkSessionChatPrefix:           defaultLarkSessionChatPrefix,
+		LarkIgnoreMessagePrefix:         defaultLarkIgnoreMessagePrefix,
 		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
@@ -311,6 +316,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.LarkMentionEnabled = req.LarkMentionEnabled
 	cfg.LarkDefaultSessionName = req.LarkDefaultSessionName
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(req.LarkSessionChatPrefix)
+	cfg.LarkIgnoreMessagePrefix = strings.TrimSpace(req.LarkIgnoreMessagePrefix)
 	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
 	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
@@ -350,6 +356,7 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 		}
 		bridge.SetDefaultStartSessionName(cfg.LarkDefaultSessionName)
 		bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
+		bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
 		bridge.SetStartPresets(cfg.SessionStartPresets)
 		bridge.SetNamePresets(cfg.SessionNamePresets)
 		bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -378,6 +385,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		LarkMentionEnabled:              cfg.LarkMentionEnabled,
 		LarkDefaultSessionName:          cfg.LarkDefaultSessionName,
 		LarkSessionChatPrefix:           cfg.LarkSessionChatPrefix,
+		LarkIgnoreMessagePrefix:         cfg.LarkIgnoreMessagePrefix,
 		SessionStartPresets:             cfg.SessionStartPresets,
 		SessionNamePresets:              cfg.SessionNamePresets,
 		LarkCustomShortcuts:             cfg.LarkCustomShortcuts,

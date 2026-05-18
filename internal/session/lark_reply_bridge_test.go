@@ -76,6 +76,64 @@ func TestLarkReplyBridgeAddsProcessingReactionForP2Message(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeIgnoresConfiguredP2PrefixWithFollowingSpace(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	var reactions []string
+	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
+		reactions = append(reactions, messageID+":"+emoji)
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-ignore", "", "", "text", `{"text":"/i 这条不要响应"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 0 {
+		t.Fatalf("ignored message should not add reactions, got %#v", reactions)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("ignored message should not create terminals, got %d", len(launcher.terminals))
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-not-ignore", "", "", "text", `{"text":"/itest should route"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("message without prefix-space should route, got %d terminals", len(launcher.terminals))
+	}
+}
+
+func TestLarkReplyBridgeIgnoresCustomP1PrefixWithFollowingSpace(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetIgnoreMessagePrefix("/silent")
+	var reactions []string
+	bridge.addReaction = func(_ context.Context, messageID string, emoji string) error {
+		reactions = append(reactions, messageID+":"+emoji)
+		return nil
+	}
+
+	err := bridge.HandleP1MessageReceive(context.Background(), &larkim.P1MessageReceiveV1{
+		Event: &larkim.P1MessageReceiveV1Data{
+			OpenMessageID:    "p1-ignore",
+			TextWithoutAtBot: "/silent 这条不要响应",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reactions) != 0 {
+		t.Fatalf("ignored P1 message should not add reactions, got %#v", reactions)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("ignored P1 message should not create terminals, got %d", len(launcher.terminals))
+	}
+}
+
 func TestLarkReplyBridgeContinuesWhenProcessingReactionFails(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

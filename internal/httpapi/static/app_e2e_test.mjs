@@ -229,6 +229,7 @@ const ids = [
   "cfg-lark-receive-id",
   "cfg-lark-default-session-name",
   "cfg-lark-session-chat-prefix",
+  "cfg-lark-ignore-prefix",
   "cfg-lark-mention-enabled",
   "cfg-prestart-command",
   "cfg-drop-patterns",
@@ -392,6 +393,7 @@ const context = {
         lark_mention_enabled: true,
         lark_default_session_name: "默认会话",
         lark_session_chat_prefix: "ET · ",
+        lark_ignore_message_prefix: "/i",
         onboarding_completed: false,
         session_pre_start_command: "",
         lark_notify_drop_line_patterns: [],
@@ -680,6 +682,7 @@ elements["cfg-lark-app-secret"].value = "new-secret";
 elements["cfg-lark-receive-id"].value = "ou_new";
 elements["cfg-lark-default-session-name"].value = "默认会话";
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
+elements["cfg-lark-ignore-prefix"].value = "/silent";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-prestart-command"].value = "source ~/.zshrc";
 elements["drop-rule-add"].onclick();
@@ -772,6 +775,7 @@ elements["cfg-lark-max-lines"].value = "";
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
+elements["cfg-lark-ignore-prefix"].value = "/ignore";
 elements["cfg-drop-patterns"].value = JSON.stringify([
   { title: "噪声", pattern: "noise" },
   { title: "调试", pattern: "debug" },
@@ -796,6 +800,7 @@ assert.equal(patchedConfig.lark_notify_max_lines, 300);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);
 assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");
+assert.equal(patchedConfig.lark_ignore_message_prefix, "/ignore");
 assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
   { title: "噪声", pattern: "noise" },
   { title: "调试", pattern: "debug" },
