@@ -950,7 +950,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	if err := SubmitStructuredInputWithMention(rt, input+" "+text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
 	}
-	b.scheduleAutoSummary(rt, input+" "+text)
+	b.scheduleAutoSummary(rt, text)
 	b.clearPendingFiles(sessionID)
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 	b.notifyInputRunning(sessionID)
@@ -1334,7 +1334,7 @@ func (b *LarkReplyBridge) notifyInputRunning(sessionID string) {
 }
 
 func (b *LarkReplyBridge) scheduleAutoSummary(rt *RuntimeSession, originalInput string) {
-	if b == nil || rt == nil || !rt.AutoSummaryEnabled() || strings.TrimSpace(originalInput) == "" {
+	if b == nil || rt == nil || !rt.AutoSummaryEnabled() || !shouldScheduleAutoSummary(originalInput) {
 		return
 	}
 	b.mu.Lock()
@@ -1355,6 +1355,17 @@ func (b *LarkReplyBridge) scheduleAutoSummary(rt *RuntimeSession, originalInput 
 		}
 		log.Printf("lark auto summary prompt submitted session=%s prompt_len=%d", sessionID, len(prompt))
 	})
+}
+
+func shouldScheduleAutoSummary(input string) bool {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return false
+	}
+	if structuredInputNumericOnlyRE.MatchString(input) {
+		return false
+	}
+	return !strings.HasPrefix(input, "/") && !strings.HasPrefix(input, "／")
 }
 
 func (b *LarkReplyBridge) enqueuePipeline(sessionID string, parts []string, mentionOpenID string) {

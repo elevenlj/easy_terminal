@@ -1708,6 +1708,62 @@ func TestLarkReplyBridgeAutoSummaryRunsAfterUserMessageOnly(t *testing.T) {
 	}
 }
 
+func TestShouldScheduleAutoSummarySkipsNumericAndSlashCommands(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{input: "", want: false},
+		{input: "123", want: false},
+		{input: "  456  ", want: false},
+		{input: "/c", want: false},
+		{input: " /stop", want: false},
+		{input: "／c", want: false},
+		{input: "echo hello", want: true},
+		{input: "123 abc", want: true},
+	}
+	for _, tt := range tests {
+		if got := shouldScheduleAutoSummary(tt.input); got != tt.want {
+			t.Fatalf("shouldScheduleAutoSummary(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestLarkReplyBridgeAutoSummarySkipsNumericAndSlashCommands(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetAutoSummaryPrompt("请总结上一轮输出")
+	sess, err := manager.CreateSession(context.Background(), "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("expected runtime")
+	}
+	if enabled, err := rt.ToggleAutoSummary(); err != nil || !enabled {
+		t.Fatalf("ToggleAutoSummary enabled=%v err=%v", enabled, err)
+	}
+	defaultLarkMessageRegistry.rememberChat("oc-summary-skip", sess.ID)
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-summary-number", "", "", "text", `{"text":"123"}`, "group", "oc-summary-skip", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-summary-command", "", "", "text", `{"text":"/noop"}`, "group", "oc-summary-skip", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	if writes := launcher.terminals[0].writes(); strings.Contains(writes, "请总结上一轮输出") {
+		t.Fatalf("numeric and slash commands should not trigger auto summary, got %q", writes)
+	}
+}
+
 func TestLarkReplyBridgeAutoSummaryDoesNotCreateOrDisableCards(t *testing.T) {
 	resetLarkRegistryForTest()
 	previousDelay := structuredInputEnterDelay
