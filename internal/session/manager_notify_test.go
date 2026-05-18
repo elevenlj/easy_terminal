@@ -1499,11 +1499,11 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"自动总结"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"艾特模式"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出agent"`) &&
 		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
-		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
+		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"content":"删除会话"`) &&
+		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
 	}
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
@@ -1548,11 +1548,14 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 		}
 		systemRows = append(systemRows, elem)
 	}
-	if len(systemRows) != 1 {
-		t.Fatalf("system shortcut buttons should use one flow row, got %#v", systemRows)
+	if len(systemRows) != 3 {
+		t.Fatalf("system shortcut buttons should use fixed rows, got %#v", systemRows)
 	}
-	if systemRows[0].FlexMode != "flow" || len(systemRows[0].Columns) != 9 {
-		t.Fatalf("system shortcut row should use flow mode with all buttons, got %#v", systemRows[0])
+	wantSystemColumns := []int{4, 4, 1}
+	for i, row := range systemRows {
+		if row.FlexMode != "none" || len(row.Columns) != wantSystemColumns[i] {
+			t.Fatalf("system shortcut row %d should use fixed columns, got %#v", i, row)
+		}
 	}
 	if strings.Count(content, `"type":"primary"`) < 7 {
 		t.Fatalf("system and custom shortcut buttons should use blue primary color, got %s", content)
