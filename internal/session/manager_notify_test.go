@@ -1514,6 +1514,45 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
 	}
+	type shortcutBehavior struct {
+		Value struct {
+			Action string `json:"easy_terminal_action"`
+		} `json:"value"`
+	}
+	type shortcutButton struct {
+		Behaviors []shortcutBehavior `json:"behaviors"`
+	}
+	type shortcutColumn struct {
+		Elements []shortcutButton `json:"elements"`
+	}
+	type shortcutElement struct {
+		Tag     string           `json:"tag"`
+		Columns []shortcutColumn `json:"columns"`
+	}
+	var card struct {
+		Body struct {
+			Elements []shortcutElement `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(content), &card); err != nil {
+		t.Fatal(err)
+	}
+	systemRows := 0
+	for _, elem := range card.Body.Elements {
+		if elem.Tag != "column_set" || len(elem.Columns) == 0 || len(elem.Columns[0].Elements) == 0 || len(elem.Columns[0].Elements[0].Behaviors) == 0 {
+			continue
+		}
+		if elem.Columns[0].Elements[0].Behaviors[0].Value.Action == "custom_shortcut" {
+			continue
+		}
+		systemRows++
+		if len(elem.Columns) > larkSystemShortcutButtonsPerRow {
+			t.Fatalf("system shortcut row should contain at most %d buttons, got %#v", larkSystemShortcutButtonsPerRow, elem)
+		}
+	}
+	if systemRows != 3 {
+		t.Fatalf("system shortcut buttons should wrap into 3 rows, got %d rows in %#v", systemRows, card.Body.Elements)
+	}
 	if strings.Count(content, `"type":"primary"`) < 7 {
 		t.Fatalf("system and custom shortcut buttons should use blue primary color, got %s", content)
 	}
