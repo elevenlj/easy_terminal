@@ -1349,12 +1349,11 @@ func (b *LarkReplyBridge) scheduleAutoSummary(rt *RuntimeSession, originalInput 
 		if !rt.AutoSummaryEnabled() {
 			return
 		}
-		if err := SubmitStructuredInputWithMention(rt, prompt, rt.NotificationMentionOpenID()); err != nil {
+		if err := SubmitSilentStructuredInput(rt, prompt); err != nil {
 			log.Printf("lark auto summary prompt failed session=%s: %v", sessionID, err)
 			return
 		}
 		log.Printf("lark auto summary prompt submitted session=%s prompt_len=%d", sessionID, len(prompt))
-		rt.NotifyInputRunning()
 	})
 }
 
@@ -1854,6 +1853,14 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 }
 
 func SubmitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string) error {
+	return submitStructuredInputWithMention(rt, text, mentionOpenID, true)
+}
+
+func SubmitSilentStructuredInput(rt *RuntimeSession, text string) error {
+	return submitStructuredInputWithMention(rt, text, "", false)
+}
+
+func submitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool) error {
 	if rt == nil {
 		return fmt.Errorf("runtime not found")
 	}
@@ -1864,10 +1871,12 @@ func SubmitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOp
 	if pressEnter {
 		enterLen = len(structuredInputEnterSequence)
 	}
-	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d", sessionID, len(text), pressEnter, enterLen)
-	rt.PrepareInputSnapshotBaseline()
-	rt.SetNotificationMentionOpenID(mentionOpenID)
-	rt.MarkStructuredInputActivity(text)
+	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d track_activity=%v", sessionID, len(text), pressEnter, enterLen, trackActivity)
+	if trackActivity {
+		rt.PrepareInputSnapshotBaseline()
+		rt.SetNotificationMentionOpenID(mentionOpenID)
+		rt.MarkStructuredInputActivity(text)
+	}
 	if _, err := rt.terminal.Write([]byte(text)); err != nil {
 		return err
 	}

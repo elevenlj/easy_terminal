@@ -1708,6 +1708,57 @@ func TestLarkReplyBridgeAutoSummaryRunsAfterUserMessageOnly(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeAutoSummaryDoesNotCreateOrDisableCards(t *testing.T) {
+	resetLarkRegistryForTest()
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{messageID: "running-card"}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetAutoSummaryPrompt("请总结上一轮输出")
+	sess, err := manager.CreateSession(context.Background(), "Summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("expected runtime")
+	}
+	if enabled, err := rt.ToggleAutoSummary(); err != nil || !enabled {
+		t.Fatalf("ToggleAutoSummary enabled=%v err=%v", enabled, err)
+	}
+	defaultLarkMessageRegistry.rememberChat("oc-summary-card", sess.ID)
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-summary-card", "", "", "text", `{"text":"echo hello"}`, "group", "oc-summary-card", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || !notes[0].Running || notes[0].Disabled {
+		t.Fatalf("user input should create one running card, got %#v", notes)
+	}
+
+	waitForTerminalText(t, launcher.terminals[0], "请总结上一轮输出", 1500*time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
+	notes = notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("auto summary should not create or disable notification cards, got %#v", notes)
+	}
+	rt.mu.Lock()
+	messageID := rt.lastNotifiedMessageID
+	running := rt.notificationRunning
+	lastInput := rt.lastInputText
+	rt.mu.Unlock()
+	if messageID != "running-card" || !running || lastInput != "echo hello" {
+		t.Fatalf("auto summary should keep original notification state, message=%q running=%v input=%q", messageID, running, lastInput)
+	}
+}
+
 func TestLarkReplyBridgeCardShortcutsDoNotTriggerAutoSummary(t *testing.T) {
 	resetLarkRegistryForTest()
 	previousDelay := structuredInputEnterDelay
