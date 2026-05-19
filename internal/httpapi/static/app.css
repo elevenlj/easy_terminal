@@ -756,7 +756,13 @@ dialog::backdrop {
   gap: 8px;
 }
 
-.drop-rule-row,
+.drop-rule-row {
+  display: grid;
+  grid-template-columns: minmax(112px, 0.22fr) minmax(112px, 0.24fr) minmax(180px, 1fr) minmax(128px, 0.28fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .custom-shortcut-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr) auto;
@@ -765,8 +771,28 @@ dialog::backdrop {
 }
 
 .drop-rule-row input,
+.drop-rule-row select,
 .custom-shortcut-row input {
   border-radius: 12px;
+}
+
+.drop-rule-extra {
+  min-width: 0;
+}
+
+.drop-rule-extra input,
+.drop-rule-extra select {
+  width: 100%;
+}
+
+.drop-rule-extra-hint {
+  display: block;
+  padding: 9px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.45);
 }
 
 .drop-rule-remove,
@@ -1241,6 +1267,7 @@ dialog::backdrop {
   .lark-register,
   .lark-register-panel,
   .agent-preset-controls,
+  .drop-rule-row,
   .name-preset-form,
   .preset-command-row,
   .preset-command-display-row,

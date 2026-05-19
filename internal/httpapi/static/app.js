@@ -27,6 +27,15 @@ const STANDARD_TERMINAL_LINE_HEIGHT = 1.2;
 const DEFAULT_SESSION_NAME = "默认会话";
 const DEFAULT_AGENT_PRESET_CODE = "999999";
 const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
+const DROP_RULE_KINDS = [
+  ["line", "行过滤"],
+  ["block_head", "块首行过滤"],
+  ["line_group", "行内分组过滤"],
+];
+const DROP_RULE_BLOCK_ACTIONS = [
+  ["drop_block", "隐藏整个块"],
+  ["keep_head", "只保留首行"],
+];
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -559,12 +568,13 @@ function readConfigForm() {
   if (state.startupJSONDirty) syncStartupJSONPreview({ throwOnError: true });
   const namePresets = parseJSONObject($("cfg-session-name-presets").value || "{}", "会话名预设 JSON");
   const startPresets = parseJSONObject($("cfg-session-start-presets").value || "{}", "开始命令后缀预设 JSON");
-  const dropRules = parseJSONArray($("cfg-drop-patterns").value || "[]", "通知过滤正则 JSON")
-    .map((item) => ({
-      title: String(item?.title || "").trim(),
-      pattern: String(item?.pattern || "").trim(),
-    }))
+  const dropRules = parseJSONArray($("cfg-drop-patterns").value || "[]", "通知过滤规则 JSON")
+    .map(normalizeDropRule)
     .filter((item) => item.title || item.pattern);
+  const invalidGroupRule = dropRules.find((item) => item.kind === "line_group" && item.pattern && item.groups.length === 0);
+  if (invalidGroupRule) {
+    throw new Error("行内分组过滤需要填写分组编号");
+  }
   const customShortcuts = parseJSONArray($("cfg-lark-custom-shortcuts").value || "[]", "飞书自定义快捷键 JSON")
     .map((item) => ({
       label: String(item?.label || "").trim(),
@@ -609,14 +619,41 @@ function parseJSONArray(text, label) {
 
 function normalizeDropRules(value) {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (typeof item === "string") return { title: "", pattern: item.trim() };
-      return {
-        title: String(item?.title || "").trim(),
-        pattern: String(item?.pattern || "").trim(),
-      };
-    });
+  return value.map(normalizeDropRule);
+}
+
+function normalizeDropRule(item) {
+  if (typeof item === "string") {
+    return { title: "", kind: "line", pattern: item.trim(), action: "", groups: [] };
+  }
+  const kind = normalizeDropRuleKind(item?.kind);
+  return {
+    title: String(item?.title || "").trim(),
+    kind,
+    pattern: String(item?.pattern || "").trim(),
+    action: kind === "block_head" ? normalizeDropRuleBlockAction(item?.action) : "",
+    groups: kind === "line_group" ? normalizeDropRuleGroups(item?.groups) : [],
+  };
+}
+
+function normalizeDropRuleKind(kind) {
+  const value = String(kind || "").trim();
+  return DROP_RULE_KINDS.some(([key]) => key === value) ? value : "line";
+}
+
+function normalizeDropRuleBlockAction(action) {
+  const value = String(action || "").trim();
+  return DROP_RULE_BLOCK_ACTIONS.some(([key]) => key === value) ? value : "drop_block";
+}
+
+function normalizeDropRuleGroups(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[,\s，、]+/);
+  const groups = [];
+  raw.forEach((item) => {
+    const n = Number(item);
+    if (Number.isInteger(n) && n > 0 && !groups.includes(n)) groups.push(n);
+  });
+  return groups;
 }
 
 function readDropRulesForUI() {
@@ -640,7 +677,7 @@ function renderDropRules() {
   if (!rules) {
     const err = document.createElement("div");
     err.className = "preset-empty";
-    err.textContent = "通知过滤正则 JSON 格式不正确。";
+    err.textContent = "通知过滤规则 JSON 格式不正确。";
     list.appendChild(err);
     return;
   }
@@ -654,23 +691,67 @@ function renderDropRules() {
   rules.forEach((rule, index) => {
     const row = document.createElement("div");
     row.className = "drop-rule-row";
+    const kind = document.createElement("select");
+    kind.className = "drop-rule-kind";
+    kind.title = "过滤类型";
+    DROP_RULE_KINDS.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      kind.appendChild(option);
+    });
+    kind.value = rule.kind || "line";
     const title = document.createElement("input");
     title.className = "drop-rule-title";
     title.placeholder = "标题";
+    title.title = "规则标题";
     title.value = rule.title || "";
     const pattern = document.createElement("input");
     pattern.className = "drop-rule-pattern";
     pattern.placeholder = "正则表达式";
+    pattern.title = "正则表达式";
     pattern.value = rule.pattern || "";
+    const extra = document.createElement("div");
+    extra.className = "drop-rule-extra";
+    if (rule.kind === "block_head") {
+      const action = document.createElement("select");
+      action.className = "drop-rule-action";
+      action.title = "块匹配后的展示方式";
+      DROP_RULE_BLOCK_ACTIONS.forEach(([value, label]) => {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        action.appendChild(option);
+      });
+      action.value = rule.action || "drop_block";
+      action.onchange = () => updateDropRule(index, { action: action.value }, false);
+      extra.appendChild(action);
+    } else if (rule.kind === "line_group") {
+      const groups = document.createElement("input");
+      groups.className = "drop-rule-groups";
+      groups.placeholder = "分组 1,2";
+      groups.title = "要隐藏的捕获分组编号";
+      groups.value = (rule.groups || []).join(",");
+      groups.oninput = () => updateDropRule(index, { groups: normalizeDropRuleGroups(groups.value) }, false);
+      extra.appendChild(groups);
+    } else {
+      const hint = document.createElement("span");
+      hint.className = "drop-rule-extra-hint";
+      hint.textContent = "整行隐藏";
+      extra.appendChild(hint);
+    }
     const remove = document.createElement("button");
     remove.className = "drop-rule-remove";
     remove.type = "button";
     remove.textContent = "删除";
-    title.oninput = () => updateDropRule(index, title.value, pattern.value);
-    pattern.oninput = () => updateDropRule(index, title.value, pattern.value);
+    kind.onchange = () => updateDropRule(index, { kind: kind.value }, true);
+    title.oninput = () => updateDropRule(index, { title: title.value }, false);
+    pattern.oninput = () => updateDropRule(index, { pattern: pattern.value }, false);
     remove.onclick = () => deleteDropRule(index);
+    row.appendChild(kind);
     row.appendChild(title);
     row.appendChild(pattern);
+    row.appendChild(extra);
     row.appendChild(remove);
     list.appendChild(row);
   });
@@ -679,15 +760,16 @@ function renderDropRules() {
 function addDropRule() {
   const rules = readDropRulesForUI();
   if (!rules) return;
-  rules.push({ title: "", pattern: "" });
+  rules.push({ title: "", kind: "line", pattern: "", action: "", groups: [] });
   writeDropRulesFromUI(rules);
 }
 
-function updateDropRule(index, title, pattern) {
+function updateDropRule(index, patch, rerender) {
   const rules = readDropRulesForUI();
   if (!rules || !rules[index]) return;
-  rules[index] = { title, pattern };
+  rules[index] = normalizeDropRule({ ...rules[index], ...patch });
   $("cfg-drop-patterns").value = JSON.stringify(rules, null, 2);
+  if (rerender) renderDropRules();
 }
 
 function deleteDropRule(index) {

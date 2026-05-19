@@ -329,6 +329,81 @@ func TestPickNotifyContentAppliesDropLinePatterns(t *testing.T) {
 	}
 }
 
+func TestPickNotifyContentAppliesBlockHeadDropRule(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{Kind: "block_head", Pattern: `^• 已完成发布`, Action: "drop_block"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent(strings.Join([]string{
+		"• 已完成发布。",
+		"  发布结果：",
+		"  - GitHub Release 已生成",
+		"下一段保留",
+	}, "\n"), "", nil, "")
+	if got != "下一段保留" {
+		t.Fatalf("block should be dropped:\n%q", got)
+	}
+}
+
+func TestPickNotifyContentAppliesBlockHeadKeepRule(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{Kind: "block_head", Pattern: `^• 已完成发布`, Action: "keep_head"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent(strings.Join([]string{
+		"• 已完成发布。",
+		"  发布结果：",
+		"  - GitHub Release 已生成",
+		"下一段保留",
+	}, "\n"), "", nil, "")
+	want := "• 已完成发布。\n下一段保留"
+	if got != want {
+		t.Fatalf("block body should be dropped:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentAppliesLineGroupRule(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{Kind: "line_group", Pattern: `(token=)([^ ]+)`, Groups: []int{2}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent("deploy token=abc123 done", "", nil, "")
+	want := "deploy token= done"
+	if got != want {
+		t.Fatalf("capture group should be removed:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestSetLarkNotifyDropLineRulesRejectsMissingGroup(t *testing.T) {
+	err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{Kind: "line_group", Pattern: `(token=)([^ ]+)`, Groups: []int{3}},
+	})
+	if err == nil {
+		t.Fatal("expected missing capture group to be rejected")
+	}
+}
+
 func TestLarkTerminalPlainTextMergesWrappedLinesWhenEnabled(t *testing.T) {
 	SetLarkNotifyMergeWrappedLines(true)
 	t.Cleanup(func() { SetLarkNotifyMergeWrappedLines(false) })

@@ -261,8 +261,8 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkNotifyMaxLines:              120,
 		LarkNotifyMergeWrappedLines:     true,
 		LarkNotifyDropLineRules: session.LarkNotifyDropLineRules{
-			{Title: "noise", Pattern: "noise"},
-			{Title: "debug", Pattern: "debug"},
+			{Title: "noise", Kind: "block_head", Pattern: "noise", Action: "keep_head"},
+			{Title: "debug", Kind: "line_group", Pattern: `(debug=)([^ ]+)`, Groups: []int{2}},
 		},
 		LarkCustomShortcuts:    []session.LarkCustomShortcut{{Label: "状态", Command: "git status"}},
 		OnboardingCompleted:    true,
@@ -296,7 +296,11 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if !saved.LarkNotifyMergeWrappedLines {
 		t.Fatalf("merge wrapped lines was not persisted: %#v", saved)
 	}
-	if len(saved.LarkNotifyDropLineRules) != 2 || saved.LarkNotifyDropLineRules[0].Pattern != "noise" {
+	if len(saved.LarkNotifyDropLineRules) != 2 ||
+		saved.LarkNotifyDropLineRules[0].Pattern != "noise" ||
+		saved.LarkNotifyDropLineRules[0].Action != "keep_head" ||
+		len(saved.LarkNotifyDropLineRules[1].Groups) != 1 ||
+		saved.LarkNotifyDropLineRules[1].Groups[0] != 2 {
 		t.Fatalf("drop patterns were not persisted: %#v", saved.LarkNotifyDropLineRules)
 	}
 	if len(saved.LarkCustomShortcuts) != 1 || saved.LarkCustomShortcuts[0].Command != "git status" {

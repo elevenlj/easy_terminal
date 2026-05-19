@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"unicode"
@@ -22,7 +23,10 @@ var larkNotifyDropLinePatterns atomic.Value
 var larkNotifyMergeWrappedLines atomic.Bool
 
 type larkNotifyDropLinePattern struct {
-	re *regexp.Regexp
+	kind   string
+	action string
+	re     *regexp.Regexp
+	groups []int
 }
 
 func init() {
@@ -56,6 +60,18 @@ func SetLarkNotifyDropLineRules(rules []LarkNotifyDropLineRule) error {
 		if pattern == "" {
 			continue
 		}
+		kind := normalizeLarkNotifyRuleKind(rule.Kind)
+		if kind == "" {
+			kind = "line"
+		}
+		if kind != "line" && kind != "block_head" && kind != "line_group" {
+			return fmt.Errorf("invalid lark notify filter kind %q", rule.Kind)
+		}
+		action := normalizeLarkNotifyRuleAction(kind, rule.Action)
+		if kind == "block_head" && action != "drop_block" && action != "keep_head" {
+			return fmt.Errorf("invalid lark notify block filter action %q", rule.Action)
+		}
+		groups := normalizeLarkNotifyRuleGroups(rule.Groups)
 		re, err := regexp.Compile(pattern)
 		if err != nil {
 			title := strings.TrimSpace(rule.Title)
@@ -64,7 +80,17 @@ func SetLarkNotifyDropLineRules(rules []LarkNotifyDropLineRule) error {
 			}
 			return fmt.Errorf("invalid lark notify drop line pattern %q: %w", pattern, err)
 		}
-		compiled = append(compiled, larkNotifyDropLinePattern{re: re})
+		if kind == "line_group" {
+			if len(groups) == 0 {
+				return fmt.Errorf("lark notify line group filter %q requires at least one capture group", pattern)
+			}
+			for _, group := range groups {
+				if group > re.NumSubexp() {
+					return fmt.Errorf("lark notify line group filter %q references missing capture group %d", pattern, group)
+				}
+			}
+		}
+		compiled = append(compiled, larkNotifyDropLinePattern{kind: kind, action: action, re: re, groups: groups})
 	}
 	larkNotifyDropLinePatterns.Store(compiled)
 	return nil
@@ -79,20 +105,95 @@ func truncateForLark(text string) string {
 	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
 }
 
-func dropConfiguredLarkNotifyLines(text string) string {
+func applyConfiguredLarkNotifyFilters(text string) string {
 	patterns, _ := larkNotifyDropLinePatterns.Load().([]larkNotifyDropLinePattern)
 	if len(patterns) == 0 || text == "" {
 		return text
 	}
 	text = strings.ReplaceAll(text, "\r\n", "\n")
 	text = strings.ReplaceAll(text, "\r", "\n")
+	text = applyConfiguredLarkNotifyBlockFilters(text, patterns)
+	return applyConfiguredLarkNotifyLineFilters(text, patterns)
+}
+
+func applyConfiguredLarkNotifyBlockFilters(text string, patterns []larkNotifyDropLinePattern) string {
+	hasBlockFilter := false
+	for _, pattern := range patterns {
+		if pattern.kind == "block_head" {
+			hasBlockFilter = true
+			break
+		}
+	}
+	if !hasBlockFilter {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	blocks := splitLarkNotifyBlocks(lines)
+	kept := make([]string, 0, len(lines))
+	for _, block := range blocks {
+		if len(block) == 0 {
+			continue
+		}
+		action := ""
+		for _, pattern := range patterns {
+			if pattern.kind == "block_head" && pattern.re.MatchString(block[0]) {
+				action = pattern.action
+				break
+			}
+		}
+		switch action {
+		case "drop_block":
+			continue
+		case "keep_head":
+			kept = append(kept, block[0])
+		default:
+			kept = append(kept, block...)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+func splitLarkNotifyBlocks(lines []string) [][]string {
+	blocks := make([][]string, 0, len(lines))
+	var current []string
+	for _, line := range lines {
+		if startsLarkNotifyBlock(line) && len(current) > 0 {
+			blocks = append(blocks, current)
+			current = nil
+		}
+		current = append(current, line)
+	}
+	if len(current) > 0 {
+		blocks = append(blocks, current)
+	}
+	return blocks
+}
+
+func startsLarkNotifyBlock(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return false
+	}
+	for _, r := range line {
+		return !unicode.IsSpace(r)
+	}
+	return false
+}
+
+func applyConfiguredLarkNotifyLineFilters(text string, patterns []larkNotifyDropLinePattern) string {
 	lines := strings.Split(text, "\n")
 	kept := lines[:0]
 	for _, line := range lines {
 		drop := false
 		for _, pattern := range patterns {
-			if pattern.re.MatchString(line) {
-				drop = true
+			switch pattern.kind {
+			case "line":
+				if pattern.re.MatchString(line) {
+					drop = true
+				}
+			case "line_group":
+				line = applyLarkNotifyLineGroupFilter(line, pattern)
+			}
+			if drop {
 				break
 			}
 		}
@@ -101,6 +202,59 @@ func dropConfiguredLarkNotifyLines(text string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+type larkNotifyDropRange struct {
+	start int
+	end   int
+}
+
+func applyLarkNotifyLineGroupFilter(line string, pattern larkNotifyDropLinePattern) string {
+	matches := pattern.re.FindAllStringSubmatchIndex(line, -1)
+	if len(matches) == 0 {
+		return line
+	}
+	ranges := make([]larkNotifyDropRange, 0, len(matches)*len(pattern.groups))
+	for _, match := range matches {
+		for _, group := range pattern.groups {
+			index := group * 2
+			if index+1 >= len(match) || match[index] < 0 || match[index+1] <= match[index] {
+				continue
+			}
+			ranges = append(ranges, larkNotifyDropRange{start: match[index], end: match[index+1]})
+		}
+	}
+	if len(ranges) == 0 {
+		return line
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].start == ranges[j].start {
+			return ranges[i].end < ranges[j].end
+		}
+		return ranges[i].start < ranges[j].start
+	})
+	merged := ranges[:0]
+	for _, item := range ranges {
+		if len(merged) == 0 || item.start > merged[len(merged)-1].end {
+			merged = append(merged, item)
+			continue
+		}
+		if item.end > merged[len(merged)-1].end {
+			merged[len(merged)-1].end = item.end
+		}
+	}
+	var b strings.Builder
+	start := 0
+	for _, item := range merged {
+		if item.start > start {
+			b.WriteString(line[start:item.start])
+		}
+		start = item.end
+	}
+	if start < len(line) {
+		b.WriteString(line[start:])
+	}
+	return b.String()
 }
 
 func mergeTerminalWrappedLinesForLark(text string) string {
@@ -261,7 +415,7 @@ func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot
 		return ""
 	}
 	body = trimVisibleText(body)
-	body = dropConfiguredLarkNotifyLines(body)
+	body = applyConfiguredLarkNotifyFilters(body)
 	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
 }

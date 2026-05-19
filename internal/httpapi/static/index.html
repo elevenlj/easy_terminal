@@ -184,8 +184,8 @@
             <label class="config-check"><input id="cfg-lark-merge-wrapped-lines" type="checkbox"><span>飞书推送时合并终端折行</span></label>
             <div class="drop-rule-editor">
               <div>
-                <strong>通知过滤正则</strong>
-                <p>每条规则包含标题和正则表达式。匹配到的输出行不会出现在通知里。</p>
+                <strong>通知过滤规则</strong>
+                <p>支持行过滤、块首行过滤和行内分组过滤。</p>
               </div>
               <div id="drop-rule-list" class="drop-rule-list"></div>
               <button id="drop-rule-add" type="button">添加过滤规则</button>
@@ -308,7 +308,7 @@
               <article><h3>锚点规则</h3><p>每次提交输入时会记录“上次输入文本”和“输入前的屏幕快照”。推送时优先从屏幕快照里找到这次输入的回显，只截取它后面的回复；找不到输入回显时，会用本轮原始输出作为兜底，避免把上一轮内容推出来。</p></article>
               <article><h3>更新规则</h3><p>同一轮第一次 waiting 会新发主卡片；后续内容变化会 Patch 更新同一张卡片，并递增卡片里的“已更新-N”计数。手动点击“刷新消息”会继续锚定当前卡片，只保留卡片中已有的“已更新-N”提示，不递增次数。</p></article>
               <article><h3>快捷键</h3><p>系统快捷键固定显示在第一行。自定义快捷键显示在下一行，每个按钮对应一条配置的指令，点击后会提交到当前会话。</p></article>
-              <article><h3>内容清理</h3><p>推送前会清理终端控制字符、重复行、空白分隔、Codex/TUI 临时状态行，并按“通知过滤正则”删除匹配行。邮箱样式文本会被替换成 [email]。</p></article>
+              <article><h3>内容清理</h3><p>推送前会清理终端控制字符、重复行、空白分隔、Codex/TUI 临时状态行，并按“通知过滤规则”处理匹配内容。邮箱样式文本会被替换成 [email]。</p></article>
               <article><h3>长度限制</h3><p>正文最多保留“通知最大行数”里的尾部内容，同时还有总字符保护。超过限制时会带 [truncated] 前缀，表示前面的内容已被裁剪。</p></article>
             </div>
           </section>
@@ -326,7 +326,7 @@
               <div><strong>保守等待(ms)</strong><span>复杂交互场景进入 waiting 的时间，默认 3000。</span></div>
               <div><strong>自动刷新间隔(ms)</strong><span>飞书卡片开启自动刷新后，running 状态下自动 Patch 当前卡片的间隔，默认 5000。</span></div>
               <div><strong>通知最大行数</strong><span>飞书通知中最多保留多少行终端内容，默认 100。</span></div>
-              <div><strong>通知过滤正则</strong><span>每行一个正则，匹配到的输出行不会出现在通知里。</span></div>
+              <div><strong>通知过滤规则</strong><span>可按行、块首行或正则捕获分组过滤通知内容。</span></div>
               <div><strong>飞书自定义快捷键</strong><span>配置按钮名称和指令。按钮会显示在系统快捷键下一行，点击后提交该指令。</span></div>
               <div><strong>默认会话 Agent</strong><span>选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令后，会更新 999999 号启动预设；可通过会话预设命令覆盖。0 号保留为仅进入目录。</span></div>
               <div><strong>启动预设</strong><span>可以用可视化编辑器维护，也可以切到 JSON 查看和编辑。</span></div>
@@ -355,7 +355,7 @@
               </article>
               <article>
                 <h3>问题：飞书通知内容太长</h3>
-                <p><strong>解决：</strong>调小通知最大行数，或在“通知过滤正则”里加入噪声输出的匹配规则，每行一个正则。</p>
+                <p><strong>解决：</strong>调小通知最大行数，或在“通知过滤规则”里加入噪声输出的匹配规则。</p>
               </article>
               <article>
                 <h3>问题：终端尺寸或显示不正常</h3>

@@ -65,6 +65,9 @@ type LarkCustomShortcut struct {
 type LarkNotifyDropLineRule struct {
 	Title   string `json:"title"`
 	Pattern string `json:"pattern"`
+	Kind    string `json:"kind,omitempty"`
+	Action  string `json:"action,omitempty"`
+	Groups  []int  `json:"groups,omitempty"`
 }
 
 type LarkNotifyDropLineRules []LarkNotifyDropLineRule
@@ -100,10 +103,59 @@ func NormalizeLarkNotifyDropLineRules(rules []LarkNotifyDropLineRule) []LarkNoti
 	for _, rule := range rules {
 		title := strings.TrimSpace(rule.Title)
 		pattern := strings.TrimSpace(rule.Pattern)
+		kind := normalizeLarkNotifyRuleKind(rule.Kind)
+		action := normalizeLarkNotifyRuleAction(kind, rule.Action)
+		groups := normalizeLarkNotifyRuleGroups(rule.Groups)
 		if title == "" && pattern == "" {
 			continue
 		}
-		out = append(out, LarkNotifyDropLineRule{Title: title, Pattern: pattern})
+		out = append(out, LarkNotifyDropLineRule{Title: title, Pattern: pattern, Kind: kind, Action: action, Groups: groups})
+	}
+	return out
+}
+
+func normalizeLarkNotifyRuleKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "", "line":
+		return ""
+	case "block", "block_head", "block-head", "head":
+		return "block_head"
+	case "line_group", "line-group", "group":
+		return "line_group"
+	default:
+		return strings.ToLower(strings.TrimSpace(kind))
+	}
+}
+
+func normalizeLarkNotifyRuleAction(kind string, action string) string {
+	if kind != "block_head" {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "keep_head", "head_only", "show_head":
+		return "keep_head"
+	case "", "drop", "drop_block", "hide_block":
+		return "drop_block"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeLarkNotifyRuleGroups(groups []int) []int {
+	if len(groups) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(groups))
+	seen := map[int]bool{}
+	for _, group := range groups {
+		if group <= 0 || seen[group] {
+			continue
+		}
+		seen[group] = true
+		out = append(out, group)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
