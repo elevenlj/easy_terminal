@@ -13,6 +13,11 @@ const (
 	StatusFailed  = "failed"
 )
 
+const (
+	SessionModeShell = "shell"
+	SessionModeAgent = "agent"
+)
+
 type Session struct {
 	ID                     string    `json:"id"`
 	Name                   string    `json:"name"`
@@ -27,6 +32,14 @@ type Session struct {
 	LarkChatID             string    `json:"lark_chat_id,omitempty"`
 	LarkMentionModeEnabled bool      `json:"lark_mention_mode_enabled,omitempty"`
 	HistorySize            int64     `json:"history_size,omitempty"`
+	RecoveryKey            string    `json:"recovery_key,omitempty"`
+	LastMode               string    `json:"last_mode,omitempty"`
+	LastCWD                string    `json:"last_cwd,omitempty"`
+	LastPrevCWD            string    `json:"last_prev_cwd,omitempty"`
+	LastAgentKind          string    `json:"last_agent_kind,omitempty"`
+	LastAgentStartCommand  string    `json:"last_agent_start_command,omitempty"`
+	LastAgentResumeCommand string    `json:"last_agent_resume_command,omitempty"`
+	LastAgentHome          string    `json:"last_agent_home,omitempty"`
 	NotificationsAvailable bool      `json:"notifications_available"`
 }
 

@@ -783,7 +783,10 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 	}
 	text = parts[0]
 	if sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType); sessionID != "" && b.hasPendingFiles(sessionID) {
-		rt, ok := b.manager.GetRuntime(sessionID)
+		rt, _, ok, err := b.ensureRouteRuntime(ctx, sessionID, routeCtx)
+		if err != nil {
+			return sessionID, err
+		}
 		if !ok {
 			if err := b.replyLarkText(ctx, messageID, "会话不在线"); err != nil {
 				return sessionID, err
@@ -879,7 +882,10 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		}
 		sessionID = s.ID
 	}
-	rt, ok := b.manager.GetRuntime(sessionID)
+	rt, _, ok, err := b.ensureRouteRuntime(ctx, sessionID, routeCtx)
+	if err != nil {
+		return sessionID, err
+	}
 	if !ok {
 		s, err := b.createLarkSessionForMessage(ctx, sessionID, routeCtx)
 		if err != nil {
@@ -912,7 +918,10 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 		}
 		sessionID = s.ID
 	}
-	rt, ok := b.manager.GetRuntime(sessionID)
+	rt, _, ok, err := b.ensureRouteRuntime(ctx, sessionID, routeCtx)
+	if err != nil {
+		return sessionID, err
+	}
 	if !ok {
 		s, err := b.createLarkSessionForMessage(ctx, sessionID, routeCtx)
 		if err != nil {
@@ -1043,6 +1052,33 @@ func (b *LarkReplyBridge) bindSessionToLarkChat(ctx context.Context, sess Sessio
 	}
 	defaultLarkMessageRegistry.rememberChat(chatID, updated.ID)
 	return updated, nil
+}
+
+func (b *LarkReplyBridge) ensureRouteRuntime(ctx context.Context, sessionID string, routeCtx larkRouteContext) (*RuntimeSession, Session, bool, error) {
+	if b == nil || b.manager == nil || strings.TrimSpace(sessionID) == "" {
+		return nil, Session{}, false, nil
+	}
+	if rt, ok := b.manager.GetRuntime(sessionID); ok {
+		s := rt.Snapshot()
+		if routeCtx.SenderOpenID != "" {
+			rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
+		}
+		return rt, s, true, nil
+	}
+	rt, sess, ok, err := b.manager.RecoverRuntime(ctx, sessionID)
+	if err != nil || !ok || rt == nil {
+		return rt, sess, ok, err
+	}
+	if routeCtx.ChatID != "" {
+		defaultLarkMessageRegistry.rememberChat(routeCtx.ChatID, sess.ID)
+	}
+	if routeCtx.SenderOpenID != "" {
+		rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
+	}
+	if strings.TrimSpace(sess.LastMode) == SessionModeAgent && strings.TrimSpace(sess.LastAgentResumeCommand) != "" {
+		time.Sleep(1200 * time.Millisecond)
+	}
+	return rt, sess, true, nil
 }
 
 func (b *LarkReplyBridge) parseLarkStartCommand(text string) (string, string, bool) {
@@ -1207,6 +1243,7 @@ func runSessionPresetCommands(rt *RuntimeSession, preset SessionStartPreset, var
 		if strings.TrimSpace(command) == "" {
 			continue
 		}
+		rt.RecordShellCommandForRecovery(command)
 		if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
 			command += "\r"
 		}

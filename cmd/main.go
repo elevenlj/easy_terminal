@@ -111,9 +111,6 @@ func run() error {
 		return err
 	}
 	defer st.Close()
-	if err := st.DeleteAllSessions(context.Background()); err != nil {
-		return err
-	}
 
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -130,6 +127,7 @@ func run() error {
 		session.WithBrowserNeeded(headless.Ensure),
 		session.WithBrowserStopped(headless.Stop),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
+		session.WithRecoveryBaseDir(filepath.Join(dataDir, "data", "sessions")),
 		session.WithSessionEnded(func(sessionID string) {
 			headless.Stop(sessionID)
 			_ = os.RemoveAll(filepath.Join(uploadsDir, sessionID))

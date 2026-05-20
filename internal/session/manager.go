@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +70,7 @@ type Manager struct {
 	autoRefreshInterval time.Duration
 	updateCoalesce      time.Duration
 	preStartCommand     string
+	recoveryBaseDir     string
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
 	onBrowserActive     func(string)
@@ -152,6 +155,18 @@ func WithSessionEnded(fn func(string)) ManagerOption {
 
 func WithPreStartCommand(command string) ManagerOption {
 	return func(m *Manager) { m.preStartCommand = strings.TrimSpace(command) }
+}
+
+func WithRecoveryBaseDir(dir string) ManagerOption {
+	return func(m *Manager) {
+		dir = strings.TrimSpace(dir)
+		if dir != "" {
+			if abs, err := filepath.Abs(dir); err == nil {
+				dir = abs
+			}
+		}
+		m.recoveryBaseDir = dir
+	}
 }
 
 func (m *Manager) SetWaitingTransitionDelays(fast, conservative time.Duration) {
@@ -243,7 +258,17 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 	if err != nil {
 		return Session{}, err
 	}
-	sess := Session{ID: id, Name: name, Status: StatusRunning, CreatedAt: now, UpdatedAt: now, Live: true}
+	sess := Session{
+		ID:          id,
+		Name:        name,
+		Status:      StatusRunning,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Live:        true,
+		RecoveryKey: newRecoveryKey(),
+		LastMode:    SessionModeShell,
+		LastCWD:     m.defaultWorkingDir(),
+	}
 	handle, err := m.launcher.Launch(context.Background())
 	if err != nil {
 		code := 1
@@ -270,6 +295,7 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 	m.mu.Unlock()
 	go rt.streamOutput()
 	go rt.waitForExit()
+	rt.runRecoveryEnvironmentSetup()
 	rt.runPreStartCommand()
 	sess.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
 	return sess, nil
@@ -289,6 +315,37 @@ func (m *Manager) nextSessionID(ctx context.Context) (string, error) {
 			return id, nil
 		}
 	}
+}
+
+func (m *Manager) defaultWorkingDir() string {
+	if l, ok := m.launcher.(ShellLauncher); ok && strings.TrimSpace(l.Dir) != "" {
+		return strings.TrimSpace(l.Dir)
+	}
+	if l, ok := m.launcher.(*ShellLauncher); ok && l != nil && strings.TrimSpace(l.Dir) != "" {
+		return strings.TrimSpace(l.Dir)
+	}
+	if dir := strings.TrimSpace(os.Getenv("TERMINAL_WORKING_DIR")); dir != "" {
+		return dir
+	}
+	if dir, err := os.UserHomeDir(); err == nil && dir != "" {
+		return dir
+	}
+	return "."
+}
+
+func (m *Manager) sessionRecoveryDir(sess Session) string {
+	if strings.TrimSpace(m.recoveryBaseDir) == "" || strings.TrimSpace(sess.RecoveryKey) == "" {
+		return ""
+	}
+	return filepath.Join(m.recoveryBaseDir, sess.RecoveryKey)
+}
+
+func (m *Manager) sessionCodexHome(sess Session) string {
+	dir := m.sessionRecoveryDir(sess)
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "codex_home")
 }
 
 func (m *Manager) ListSessions(ctx context.Context) ([]Session, error) {
@@ -325,6 +382,74 @@ func (m *Manager) GetRuntime(id string) (*RuntimeSession, bool) {
 	defer m.mu.RUnlock()
 	rt, ok := m.sessions[id]
 	return rt, ok
+}
+
+func (m *Manager) RecoverRuntime(ctx context.Context, id string) (*RuntimeSession, Session, bool, error) {
+	if rt, ok := m.GetRuntime(id); ok {
+		s := rt.Snapshot()
+		s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+		return rt, s, true, nil
+	}
+	if m.store == nil {
+		return nil, Session{}, false, nil
+	}
+	sess, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return nil, sess, ok, err
+	}
+	if !sess.Live || sess.Status == StatusExited || sess.Status == StatusFailed {
+		return nil, sess, false, nil
+	}
+	if strings.TrimSpace(sess.RecoveryKey) == "" {
+		sess.RecoveryKey = newRecoveryKey()
+	}
+	if strings.TrimSpace(sess.LastMode) == "" {
+		sess.LastMode = SessionModeShell
+	}
+	if strings.TrimSpace(sess.LastCWD) == "" {
+		sess.LastCWD = m.defaultWorkingDir()
+	}
+	handle, err := m.launcher.Launch(context.Background())
+	if err != nil {
+		return nil, sess, true, err
+	}
+	now := time.Now().UTC()
+	sess.Live = true
+	sess.Status = StatusRunning
+	sess.ExitCode = nil
+	sess.UpdatedAt = now
+	rt := &RuntimeSession{
+		manager:     m,
+		session:     sess,
+		terminal:    handle.Terminal(),
+		process:     handle.Process(),
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+		nextSeq:     time.Now().UnixNano(),
+	}
+	m.mu.Lock()
+	if existing, exists := m.sessions[id]; exists {
+		m.mu.Unlock()
+		_ = handle.Terminal().Close()
+		s := existing.Snapshot()
+		s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+		return existing, s, true, nil
+	}
+	m.sessions[id] = rt
+	m.mu.Unlock()
+	if err := m.store.UpdateSession(ctx, sess); err != nil {
+		m.mu.Lock()
+		delete(m.sessions, id)
+		m.mu.Unlock()
+		rt.Close()
+		return nil, sess, true, err
+	}
+	go rt.streamOutput()
+	go rt.waitForExit()
+	rt.runRecoveryEnvironmentSetup()
+	rt.runRecoveryCommand()
+	s := rt.Snapshot()
+	s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+	return rt, s, true, nil
 }
 
 func (m *Manager) GetSession(ctx context.Context, id string) (Session, bool, error) {
@@ -650,6 +775,9 @@ func (rt *RuntimeSession) WriteInput(data string) error {
 	if data == "" {
 		return nil
 	}
+	if strings.Contains(data, "\x03\x03") {
+		rt.MarkAgentExitActivity()
+	}
 	if inputChangesSessionState(data) {
 		rt.MarkInputActivity(data)
 	}
@@ -681,11 +809,56 @@ func (rt *RuntimeSession) runPreStartCommand() {
 	if command == "" {
 		return
 	}
+	rt.RecordShellCommandForRecovery(command)
 	if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
 		command += "\r"
 	}
 	if _, err := rt.terminal.Write([]byte(command)); err != nil {
 		log.Printf("pre-start command failed session=%s: %v", rt.session.ID, err)
+	}
+}
+
+func (rt *RuntimeSession) runRecoveryEnvironmentSetup() {
+	if rt == nil || rt.manager == nil {
+		return
+	}
+	rt.mu.Lock()
+	sess := rt.session
+	rt.mu.Unlock()
+	codexHome := rt.manager.sessionCodexHome(sess)
+	if codexHome == "" {
+		return
+	}
+	if err := ensureCodexSessionHome(codexHome); err != nil {
+		log.Printf("recovery codex home setup failed session=%s: %v", sess.ID, err)
+	}
+	command := "export CODEX_HOME=" + shellQuote(codexHome) + "\r"
+	if _, err := rt.terminal.Write([]byte(command)); err != nil {
+		log.Printf("recovery environment setup failed session=%s: %v", sess.ID, err)
+	}
+}
+
+func (rt *RuntimeSession) runRecoveryCommand() {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	sess := rt.session
+	rt.mu.Unlock()
+	if cwd := strings.TrimSpace(sess.LastCWD); cwd != "" {
+		if _, err := rt.terminal.Write([]byte("cd " + shellQuote(cwd) + "\r")); err != nil {
+			log.Printf("recovery cwd restore failed session=%s cwd=%q: %v", sess.ID, cwd, err)
+		}
+	}
+	if strings.TrimSpace(sess.LastMode) != SessionModeAgent || strings.TrimSpace(sess.LastAgentResumeCommand) == "" {
+		return
+	}
+	command := strings.TrimSpace(sess.LastAgentResumeCommand)
+	if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
+		command += "\r"
+	}
+	if _, err := rt.terminal.Write([]byte(command)); err != nil {
+		log.Printf("agent resume command failed session=%s agent=%s: %v", sess.ID, sess.LastAgentKind, err)
 	}
 }
 
@@ -969,6 +1142,9 @@ func (rt *RuntimeSession) MarkInputActivity(data string) {
 	rt.mu.Lock()
 	previousInput := rt.lastInputText
 	submitted := rt.recordInputLocked(data)
+	if submitted {
+		rt.updateRecoveryFromSubmittedInputLocked(rt.lastInputText)
+	}
 	disabledNote, disabledOK := rt.markInputActivityLocked(submitted, previousInput)
 	s := rt.session
 	rt.mu.Unlock()
@@ -985,6 +1161,7 @@ func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 		rt.lastInputText = cleaned
 	}
 	rt.inputLineBuffer = ""
+	rt.updateRecoveryFromSubmittedInputLocked(rt.lastInputText)
 	disabledNote, disabledOK := rt.markInputActivityLocked(true, previousInput)
 	s := rt.session
 	rt.mu.Unlock()
@@ -1621,7 +1798,7 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.manager.mu.Unlock()
 	_ = rt.terminal.Close()
 	if rt.manager.store != nil {
-		_ = rt.manager.store.DeleteSession(context.Background(), s.ID)
+		_ = rt.manager.store.UpdateSession(context.Background(), s)
 	}
 	rt.manager.sessionEnded(s.ID)
 }
