@@ -64,14 +64,23 @@ func (b *wsBridge) readClient() {
 		}
 		switch msg.Type {
 		case "input":
+			if b.headless {
+				continue
+			}
 			filtered := filterTerminalResponses([]byte(msg.Data))
 			if len(filtered) > 0 {
 				b.rt.SetNotificationMentionOpenID("")
 				_ = b.rt.WriteInput(string(filtered))
 			}
 		case "submit":
+			if b.headless {
+				continue
+			}
 			_ = session.SubmitStructuredInput(b.rt, msg.Data)
 		case "resize":
+			if b.headless {
+				continue
+			}
 			_ = b.rt.Resize(msg.Cols, msg.Rows)
 		case "snapshot":
 			b.rt.SetVisibleSnapshotWithSource(msg.Data, b.snapshotSource(msg.Source))

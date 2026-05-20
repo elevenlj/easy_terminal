@@ -147,10 +147,10 @@ function initTerminal() {
   } else {
     state.term.resize?.(STANDARD_TERMINAL_COLS, STANDARD_TERMINAL_ROWS);
   }
-  state.term.onData((data) => {
-    sendWS({ type: "input", data });
-  });
   if (!headless) {
+    state.term.onData((data) => {
+      sendWS({ type: "input", data });
+    });
     window.addEventListener("resize", resizeTerm);
     observeTerminalSize();
   }
