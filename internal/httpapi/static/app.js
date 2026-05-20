@@ -122,8 +122,10 @@ function currentSession() {
 function initTerminal() {
   if (state.term) state.term.dispose();
   state.terminalResizeObserver?.disconnect?.();
+  window.removeEventListener("resize", resizeTerm);
   state.pendingTerminalWrite = Promise.resolve();
   state.lastSentTerminalSize = null;
+  const headless = isHeadlessMode();
   state.term = new Terminal({
     cols: STANDARD_TERMINAL_COLS,
     rows: STANDARD_TERMINAL_ROWS,
@@ -135,18 +137,23 @@ function initTerminal() {
     letterSpacing: 0,
     theme: { background: "#12110f", foreground: "#f4f1e8", cursor: "#f4f1e8" },
   });
-  state.fit = createFitAddon();
+  state.fit = headless ? null : createFitAddon();
   if (state.fit) state.term.loadAddon(state.fit);
   state.term.open($("terminal"));
-  resizeTerm();
-  requestAnimationFrame(() => resizeTerm());
-  setTimeout(() => resizeTerm(), 120);
+  if (!headless) {
+    resizeTerm();
+    requestAnimationFrame(() => resizeTerm());
+    setTimeout(() => resizeTerm(), 120);
+  } else {
+    state.term.resize?.(STANDARD_TERMINAL_COLS, STANDARD_TERMINAL_ROWS);
+  }
   state.term.onData((data) => {
     sendWS({ type: "input", data });
   });
-  window.removeEventListener("resize", resizeTerm);
-  window.addEventListener("resize", resizeTerm);
-  observeTerminalSize();
+  if (!headless) {
+    window.addEventListener("resize", resizeTerm);
+    observeTerminalSize();
+  }
 }
 
 function selectSession(id) {
@@ -170,7 +177,9 @@ function connectWS(id) {
   const ws = new WebSocket(terminalWebSocketURL(id));
   state.socket = ws;
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => resizeTerm();
+  ws.onopen = () => {
+    if (!isHeadlessMode()) resizeTerm();
+  };
   ws.onmessage = (ev) => {
     if (typeof ev.data === "string") {
       try {
@@ -189,9 +198,13 @@ function connectWS(id) {
 
 function terminalWebSocketURL(id) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const params = new URLSearchParams(location.search || "");
-  const suffix = params.get("headless") === "1" ? "?headless=1" : "";
+  const suffix = isHeadlessMode() ? "?headless=1" : "";
   return `${proto}://${location.host}/api/sessions/${id}/ws${suffix}`;
+}
+
+function isHeadlessMode() {
+  const params = new URLSearchParams(location.search || "");
+  return params.get("headless") === "1";
 }
 
 function sendWS(obj) {
@@ -203,6 +216,7 @@ function sendWS(obj) {
 }
 
 function resizeTerm() {
+  if (isHeadlessMode()) return;
   if (!state.term) return;
   const size = fitTerminalToContainer();
   if (!size) return;
@@ -211,6 +225,7 @@ function resizeTerm() {
 
 function observeTerminalSize() {
   state.terminalResizeObserver = null;
+  if (isHeadlessMode()) return;
   if (typeof ResizeObserver === "undefined") return;
   try {
     const target = $("terminal")?.parentElement || $("terminal");
@@ -255,6 +270,7 @@ function fitTerminalToContainer() {
 }
 
 function sendTerminalResize(cols, rows) {
+  if (isHeadlessMode()) return;
   if (cols < MIN_TERMINAL_COLS || rows < MIN_TERMINAL_ROWS) return;
   const last = state.lastSentTerminalSize;
   if (last && last.cols === cols && last.rows === rows) return;

@@ -512,6 +512,27 @@ app.state.fit = {
 app.resizeTerm();
 assert.deepEqual(sentMessages.pop(), { type: "resize", cols: 132, rows: 40 });
 app.state.fit = null;
+sentMessages.length = 0;
+context.location.search = "?headless=1";
+app.state.term = {
+  cols: 120,
+  rows: 36,
+  resize(cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
+  },
+};
+app.state.fit = {
+  fit() {
+    app.state.term.resize(140, 42);
+  },
+};
+app.resizeTerm();
+assert.equal(sentMessages.length, 0, "headless terminal should not send resize");
+assert.equal(app.state.term.cols, 120, "headless terminal should keep fixed cols");
+assert.equal(app.state.term.rows, 36, "headless terminal should keep fixed rows");
+context.location.search = "";
+app.state.fit = null;
 
 elements["composer-input"].value = "echo button";
 elements.composer.requestSubmit();
@@ -692,19 +713,19 @@ elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-prestart-command"].value = "source ~/.zshrc";
 elements["drop-rule-add"].onclick();
 let dropRuleRow = elements["drop-rule-list"].children.find((node) => node.className === "drop-rule-row");
-dropRuleRow.children[0].value = "噪声";
-dropRuleRow.children[0].oninput();
-dropRuleRow.children[1].value = "noise";
+dropRuleRow.children[1].value = "噪声";
 dropRuleRow.children[1].oninput();
+dropRuleRow.children[2].value = "noise";
+dropRuleRow.children[2].oninput();
 elements["drop-rule-add"].onclick();
 dropRuleRow = elements["drop-rule-list"].children.filter((node) => node.className === "drop-rule-row")[1];
-dropRuleRow.children[0].value = "调试";
-dropRuleRow.children[0].oninput();
-dropRuleRow.children[1].value = "debug";
+dropRuleRow.children[1].value = "调试";
 dropRuleRow.children[1].oninput();
+dropRuleRow.children[2].value = "debug";
+dropRuleRow.children[2].oninput();
 assert.deepEqual(JSON.parse(elements["cfg-drop-patterns"].value), [
-  { title: "噪声", pattern: "noise" },
-  { title: "调试", pattern: "debug" },
+  { title: "噪声", kind: "line", pattern: "noise", action: "", groups: [] },
+  { title: "调试", kind: "line", pattern: "debug", action: "", groups: [] },
 ], "drop rule editor should write JSON");
 elements["custom-shortcut-add"].onclick();
 const shortcutRow = elements["custom-shortcut-list"].children.find((node) => node.className === "custom-shortcut-row");
@@ -811,8 +832,8 @@ assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");
 assert.equal(patchedConfig.lark_ignore_message_prefix, "/ignore");
 assert.equal(patchedConfig.lark_auto_summary_prompt, "请总结上一轮输出");
 assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
-  { title: "噪声", pattern: "noise" },
-  { title: "调试", pattern: "debug" },
+  { title: "噪声", kind: "line", pattern: "noise", action: "", groups: [] },
+  { title: "调试", kind: "line", pattern: "debug", action: "", groups: [] },
 ]);
 assert.deepEqual(patchedConfig.lark_custom_shortcuts, [{ label: "状态", command: "git status" }]);
 assert.deepEqual(patchedConfig.session_start_presets, { "999999": { commands: ["claude --dangerously-skip-permissions"] }, "1": { commands: ["codex"] } });

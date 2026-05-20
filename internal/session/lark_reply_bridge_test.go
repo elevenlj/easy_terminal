@@ -1592,6 +1592,59 @@ func TestLarkReplyBridgeDisabledCardActionsAreBlockedEndToEnd(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeRefreshCanReanchorClickedCard(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	notifier := &recordingNotifier{}
+	manager := NewManager(nil, launcher, WithNotifier(notifier))
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	sess, err := manager.CreateSession(context.Background(), "Refresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.UpdateNotifyOnWaiting(context.Background(), sess.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime not found")
+	}
+	rt.SetVisibleSnapshot("> ask\nanswer\n>")
+	rt.mu.Lock()
+	rt.lastInputText = "ask"
+	rt.snapshotAtRoundStart = ">"
+	rt.snapshotAtRoundStartSet = true
+	rt.lastNotifiedMessageID = "newer-card"
+	rt.lastNotifiedContent = "newer content"
+	rt.mu.Unlock()
+	defaultLarkMessageRegistry.remember(sess.ID, "clicked-card", "newer-card")
+	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
+		Action: &callback.CallBackAction{Value: map[string]interface{}{
+			"easy_terminal_action": "refresh",
+			"session_id":           sess.ID,
+		}},
+		Context: &callback.Context{OpenMessageID: "clicked-card"},
+	}}
+
+	resp, err := bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "刷新成功" {
+		t.Fatalf("refresh should be accepted, got %#v", resp)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || notes[0].MessageID != "clicked-card" {
+		t.Fatalf("refresh should patch clicked card, got %#v", notes)
+	}
+	rt.mu.Lock()
+	last := rt.lastNotifiedMessageID
+	rt.mu.Unlock()
+	if last != "clicked-card" {
+		t.Fatalf("refresh should reanchor clicked card, got %q", last)
+	}
+}
+
 func waitForNotifierNotes(t *testing.T, notifier *recordingNotifier, want int) []WaitingNotification {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

@@ -388,7 +388,7 @@ func (b *LarkReplyBridge) handleCardShortcut(ctx context.Context, value map[stri
 }
 
 func (b *LarkReplyBridge) handleCardRefresh(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	sessionID, rt, blocked := b.resolveCardActionRuntimeForRefresh(value, openMessageID)
 	if blocked != nil {
 		return blocked, nil
 	}
@@ -496,6 +496,14 @@ func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {
 }
 
 func (b *LarkReplyBridge) resolveCardActionRuntime(value map[string]interface{}, openMessageID string) (string, *RuntimeSession, *callback.CardActionTriggerResponse) {
+	return b.resolveCardActionRuntimeWithMode(value, openMessageID, false)
+}
+
+func (b *LarkReplyBridge) resolveCardActionRuntimeForRefresh(value map[string]interface{}, openMessageID string) (string, *RuntimeSession, *callback.CardActionTriggerResponse) {
+	return b.resolveCardActionRuntimeWithMode(value, openMessageID, true)
+}
+
+func (b *LarkReplyBridge) resolveCardActionRuntimeWithMode(value map[string]interface{}, openMessageID string, refresh bool) (string, *RuntimeSession, *callback.CardActionTriggerResponse) {
 	sessionID := strings.TrimSpace(fmt.Sprint(value["session_id"]))
 	if sessionID == "" && openMessageID != "" {
 		if id, ok := defaultLarkMessageRegistry.lookup(openMessageID); ok {
@@ -512,7 +520,13 @@ func (b *LarkReplyBridge) resolveCardActionRuntime(value map[string]interface{},
 	if !exists {
 		return sessionID, nil, larkCardToast("warning", "会话不在线")
 	}
-	if err := rt.ValidateNotificationAction(openMessageID); err != nil {
+	var err error
+	if refresh {
+		err = rt.ValidateNotificationRefresh(openMessageID)
+	} else {
+		err = rt.ValidateNotificationAction(openMessageID)
+	}
+	if err != nil {
 		if errors.Is(err, errNotificationMessageDisabled) {
 			return sessionID, rt, larkCardToast("warning", larkDisabledCardToastContent)
 		}

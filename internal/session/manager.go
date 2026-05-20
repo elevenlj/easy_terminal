@@ -802,6 +802,19 @@ func (rt *RuntimeSession) ValidateNotificationAction(messageID string) error {
 	return rt.validateNotificationActionLocked(messageID)
 }
 
+func (rt *RuntimeSession) ValidateNotificationRefresh(messageID string) error {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return nil
+	}
+	if rt.notificationMessageFrozenLocked(messageID) {
+		return errNotificationMessageDisabled
+	}
+	return nil
+}
+
 func (rt *RuntimeSession) validateNotificationActionLocked(messageID string) error {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
