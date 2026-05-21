@@ -420,6 +420,70 @@ func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot
 	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
+func shouldPreservePreviousNotifyContent(previous string, current string) bool {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	if previous == "" || current == "" || previous == RunningNotificationPlaceholder || current == RunningNotificationPlaceholder {
+		return false
+	}
+	previousNorm := normalizedNotifyContentForRegression(previous)
+	currentNorm := normalizedNotifyContentForRegression(current)
+	if previousNorm == "" {
+		return false
+	}
+	if currentNorm == "" {
+		return true
+	}
+	previousRunes := []rune(previousNorm)
+	currentRunes := []rune(currentNorm)
+	if len(currentRunes) >= len(previousRunes) {
+		return false
+	}
+	if strings.HasPrefix(previousNorm, currentNorm) {
+		return len(currentRunes)*100 <= len(previousRunes)*95
+	}
+	common := commonPrefixRunes(previousNorm, currentNorm)
+	return common >= 80 && common*100 >= len(currentRunes)*80 && len(currentRunes)*100 <= len(previousRunes)*85
+}
+
+func hasMeaningfulNotifyContent(text string) bool {
+	return normalizedNotifyContentForRegression(text) != ""
+}
+
+func normalizedNotifyContentForRegression(text string) string {
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) {
+			continue
+		}
+		if text, ok := inputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		if text, ok := shellInputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	return strings.Join(strings.Fields(strings.Join(kept, "\n")), " ")
+}
+
+func commonPrefixRunes(left string, right string) int {
+	leftRunes := []rune(left)
+	rightRunes := []rune(right)
+	limit := len(leftRunes)
+	if len(rightRunes) < limit {
+		limit = len(rightRunes)
+	}
+	for i := 0; i < limit; i++ {
+		if leftRunes[i] != rightRunes[i] {
+			return i
+		}
+	}
+	return limit
+}
+
 func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) bool {
 	return notifyContentNeedsMoreSnapshotWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, "")
 }

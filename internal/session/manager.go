@@ -963,6 +963,27 @@ func (rt *RuntimeSession) currentNotifyContentLocked() string {
 	return pickNotifyContentWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
 }
 
+func (rt *RuntimeSession) stableNotifyContentForMessageLocked(messageID string, content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return content
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID != "" && rt.lastNotifiedMessageID != "" && messageID != rt.lastNotifiedMessageID {
+		return content
+	}
+	if rt.lastNotifiedMessageID == "" {
+		return content
+	}
+	previous := strings.TrimSpace(rt.lastNotifiedContent)
+	if !shouldPreservePreviousNotifyContent(previous, content) {
+		return content
+	}
+	log.Printf("lark notify shorter content suppressed session=%s message=%s previous_len=%d candidate_len=%d",
+		rt.session.ID, rt.lastNotifiedMessageID, len(previous), len(content))
+	return previous
+}
+
 func (rt *RuntimeSession) NotificationMessageFrozen(messageID string) bool {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -1378,7 +1399,6 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if !hasSnapshotContent {
 		content = "当前轮暂无内容"
 	}
-	contentHash := notifyContentHash(content)
 	rt.mu.Lock()
 	if !rt.session.Live || !rt.session.NotifyOnWaiting {
 		rt.mu.Unlock()
@@ -1393,6 +1413,8 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if len(preserveUpdateNo) > 0 && preserveUpdateNo[0] > 0 {
 		updateNo = preserveUpdateNo[0]
 	}
+	content = rt.stableNotifyContentForMessageLocked(messageID, content)
+	contentHash := notifyContentHash(content)
 	rt.notificationPatchVersion++
 	patchVersion := rt.notificationPatchVersion
 	n := WaitingNotification{
@@ -2209,6 +2231,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
 	}
+	content = rt.stableNotifyContentForMessageLocked(rt.lastNotifiedMessageID, content)
 	contentHash := notifyContentHash(content)
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
@@ -2228,6 +2251,10 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
 	}
+	if !hasMeaningfulNotifyContent(content) {
+		return WaitingNotification{}, "", false, "needs_more_snapshot"
+	}
+	content = rt.stableNotifyContentForMessageLocked(rt.lastNotifiedMessageID, content)
 	contentHash := notifyContentHash(content)
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"

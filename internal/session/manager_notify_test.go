@@ -73,6 +73,61 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 	}
 }
 
+func TestWaitingNotificationKeepsLongerContentWhenSnapshotRegressesToPrefix(t *testing.T) {
+	previous := strings.Join([]string{
+		"• 只下你需要的人像数字人版本：约 660MB。",
+		"如果用官方全量下载：约 2.14GB。",
+		"所以你流量紧张的话，按 700MB 预算准备就够，别下载动物模型和不需要的文件。",
+	}, "\n")
+	rt := &RuntimeSession{
+		manager:                     NewManager(nil, nil),
+		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		lastInputText:               "需要下载哪些东西？",
+		lastNotifiedMessageID:       "msg-1",
+		lastNotifiedContent:         previous,
+		lastNotifiedRoundHash:       notifyContentHash(previous),
+		snapshotAtRoundStart:        "> 需要下载哪些东西？",
+		snapshotAtRoundVersion:      1,
+		snapshotAtRoundStartSet:     true,
+		visibleSnapshot:             "> 需要下载哪些东西？\n• 只下你需要的人像数字人版本：约 660MB。\n如果用官方全量下载：约 2.14GB。\n›",
+		visibleSnapshotVersion:      2,
+		lastNotifiedVisibleSnapshot: "> 需要下载哪些东西？\n" + previous,
+	}
+
+	rt.mu.Lock()
+	_, _, ok, reason := rt.waitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("shorter prefix content should not be sent as an update")
+	}
+	if reason != "duplicate_hash" {
+		t.Fatalf("reason = %q, want duplicate_hash", reason)
+	}
+}
+
+func TestWaitingNotificationFallbackRejectsPromptOnlyContent(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:                 NewManager(nil, nil),
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		lastInputText:           "继续",
+		snapshotAtRoundStart:    "> 继续",
+		snapshotAtRoundVersion:  1,
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "> 继续\n›",
+		visibleSnapshotVersion:  2,
+	}
+
+	rt.mu.Lock()
+	_, _, ok, reason := rt.fallbackWaitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("prompt-only fallback should not be sent")
+	}
+	if reason != "needs_more_snapshot" {
+		t.Fatalf("reason = %q, want needs_more_snapshot", reason)
+	}
+}
+
 func TestWaitingNotificationWaitsForSnapshotAfterCurrentInput(t *testing.T) {
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil),
@@ -724,6 +779,41 @@ func TestRefreshNotificationMessageUsesFullCurrentRoundWhenRoundBaselineIsEmpty(
 	want := "first\nsecond"
 	if notes[0].Content != want {
 		t.Fatalf("manual refresh should use full current round content:\n%q\nwant:\n%q", notes[0].Content, want)
+	}
+}
+
+func TestRefreshNotificationMessageKeepsLongerContentWhenSnapshotRegressesToPrefix(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	previous := strings.Join([]string{
+		"• 只下你需要的人像数字人版本：约 660MB。",
+		"如果用官方全量下载：约 2.14GB。",
+		"所以你流量紧张的话，按 700MB 预算准备就够，别下载动物模型和不需要的文件。",
+	}, "\n")
+	rt := &RuntimeSession{
+		manager:                 m,
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:           "需要下载哪些东西？",
+		lastNotifiedMessageID:   "bot-card",
+		lastNotifiedContent:     previous,
+		lastNotifiedRoundHash:   notifyContentHash(previous),
+		snapshotAtRoundStart:    "> 需要下载哪些东西？",
+		snapshotAtRoundVersion:  1,
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "> 需要下载哪些东西？\n• 只下你需要的人像数字人版本：约 660MB。\n如果用官方全量下载：约 2.14GB。\n›",
+		visibleSnapshotVersion:  2,
+	}
+
+	if err := rt.RefreshNotificationMessage("bot-card", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	if notes[0].Content != previous {
+		t.Fatalf("manual refresh should preserve longer content:\n%q\nwant:\n%q", notes[0].Content, previous)
 	}
 }
 
