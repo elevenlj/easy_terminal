@@ -188,6 +188,10 @@ function connectWS(id) {
           void syncSnapshotNow();
           return;
         }
+        if (msg.type === "terminal_resize") {
+          syncHeadlessTerminalSize(msg.cols, msg.rows);
+          return;
+        }
       } catch {}
     }
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
@@ -277,6 +281,16 @@ function sendTerminalResize(cols, rows) {
   if (sendWS({ type: "resize", cols, rows })) {
     state.lastSentTerminalSize = { cols, rows };
   }
+}
+
+function syncHeadlessTerminalSize(cols, rows) {
+  if (!isHeadlessMode()) return;
+  if (!state.term || typeof state.term.resize !== "function") return;
+  const nextCols = Math.floor(Number(cols));
+  const nextRows = Math.floor(Number(rows));
+  if (nextCols < MIN_TERMINAL_COLS || nextRows < MIN_TERMINAL_ROWS) return;
+  if (Math.floor(Number(state.term.cols)) === nextCols && Math.floor(Number(state.term.rows)) === nextRows) return;
+  state.term.resize(nextCols, nextRows);
 }
 
 function writeTerminal(text) {
@@ -1699,6 +1713,7 @@ if (typeof window !== "undefined") {
     terminalVisibleSnapshot,
     terminalWebSocketURL,
     resizeTerm,
+    syncHeadlessTerminalSize,
     standardTerminal: {
       cols: STANDARD_TERMINAL_COLS,
       rows: STANDARD_TERMINAL_ROWS,

@@ -278,11 +278,13 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 		return sess, err
 	}
 	rt := &RuntimeSession{
-		manager:     m,
-		session:     sess,
-		terminal:    handle.Terminal(),
-		process:     handle.Process(),
-		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+		manager:      m,
+		session:      sess,
+		terminal:     handle.Terminal(),
+		process:      handle.Process(),
+		subscribers:  make(map[chan RuntimeEvent]runtimeSubscriber),
+		terminalCols: defaultTerminalCols,
+		terminalRows: defaultTerminalRows,
 	}
 	if m.store != nil {
 		if err := m.store.CreateSession(ctx, sess); err != nil {
@@ -419,12 +421,14 @@ func (m *Manager) RecoverRuntime(ctx context.Context, id string) (*RuntimeSessio
 	sess.ExitCode = nil
 	sess.UpdatedAt = now
 	rt := &RuntimeSession{
-		manager:     m,
-		session:     sess,
-		terminal:    handle.Terminal(),
-		process:     handle.Process(),
-		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
-		nextSeq:     time.Now().UnixNano(),
+		manager:      m,
+		session:      sess,
+		terminal:     handle.Terminal(),
+		process:      handle.Process(),
+		subscribers:  make(map[chan RuntimeEvent]runtimeSubscriber),
+		terminalCols: defaultTerminalCols,
+		terminalRows: defaultTerminalRows,
+		nextSeq:      time.Now().UnixNano(),
 	}
 	m.mu.Lock()
 	if existing, exists := m.sessions[id]; exists {
@@ -675,6 +679,8 @@ type RuntimeSession struct {
 	visibleSnapshot             string
 	visibleSnapshotSource       string
 	visibleSnapshotVersion      int64
+	terminalCols                uint16
+	terminalRows                uint16
 	snapshotAtRoundStart        string
 	snapshotAtRoundVersion      int64
 	snapshotAtRoundStartSet     bool
@@ -711,6 +717,8 @@ type RuntimeSession struct {
 type RuntimeEvent struct {
 	Type string
 	Data []byte
+	Cols uint16
+	Rows uint16
 }
 
 type runtimeSubscriber struct {
@@ -720,6 +728,7 @@ type runtimeSubscriber struct {
 const (
 	RuntimeEventOutput          = "output"
 	RuntimeEventSnapshotRequest = "snapshot_request"
+	RuntimeEventTerminalResize  = "terminal_resize"
 )
 
 func (rt *RuntimeSession) Snapshot() Session {
@@ -734,6 +743,24 @@ func (rt *RuntimeSession) OutputSnapshot() []byte {
 	cp := make([]byte, len(rt.output))
 	copy(cp, rt.output)
 	return cp
+}
+
+func (rt *RuntimeSession) TerminalSize() (uint16, uint16) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.terminalSizeLocked()
+}
+
+func (rt *RuntimeSession) terminalSizeLocked() (uint16, uint16) {
+	cols := rt.terminalCols
+	rows := rt.terminalRows
+	if cols < 80 {
+		cols = defaultTerminalCols
+	}
+	if rows < 20 {
+		rows = defaultTerminalRows
+	}
+	return cols, rows
 }
 
 func (rt *RuntimeSession) Subscribe() (chan RuntimeEvent, func()) {
@@ -866,7 +893,34 @@ func (rt *RuntimeSession) Resize(cols, rows uint16) error {
 	if cols < 80 || rows < 20 {
 		return nil
 	}
-	return rt.terminal.Resize(cols, rows)
+	rt.mu.Lock()
+	currentCols, currentRows := rt.terminalSizeLocked()
+	terminal := rt.terminal
+	if currentCols == cols && currentRows == rows {
+		rt.mu.Unlock()
+		return nil
+	}
+	rt.mu.Unlock()
+	if terminal == nil {
+		return nil
+	}
+	if err := terminal.Resize(cols, rows); err != nil {
+		return err
+	}
+	rt.mu.Lock()
+	rt.terminalCols = cols
+	rt.terminalRows = rows
+	for ch, sub := range rt.subscribers {
+		if !sub.Headless {
+			continue
+		}
+		select {
+		case ch <- RuntimeEvent{Type: RuntimeEventTerminalResize, Cols: cols, Rows: rows}:
+		default:
+		}
+	}
+	rt.mu.Unlock()
+	return nil
 }
 
 func (rt *RuntimeSession) SetVisibleSnapshot(data string) {

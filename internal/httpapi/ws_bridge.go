@@ -32,6 +32,13 @@ func serveWS(w http.ResponseWriter, r *http.Request, rt *session.RuntimeSession)
 	}
 	headless := r.URL.Query().Get("headless") == "1"
 	b := &wsBridge{rt: rt, conn: conn, headless: headless}
+	if headless {
+		cols, rows := rt.TerminalSize()
+		if err := b.writeTerminalResize(cols, rows); err != nil {
+			_ = conn.Close()
+			return
+		}
+	}
 	_ = conn.WriteMessage(websocket.BinaryMessage, rt.OutputSnapshot())
 	ch, cancel := rt.SubscribeWithMode(headless)
 	defer cancel()
@@ -44,12 +51,21 @@ func serveWS(w http.ResponseWriter, r *http.Request, rt *session.RuntimeSession)
 			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
+		case session.RuntimeEventTerminalResize:
+			if err := b.writeTerminalResize(ev.Cols, ev.Rows); err != nil {
+				return
+			}
 		default:
 			if err := conn.WriteMessage(websocket.BinaryMessage, ev.Data); err != nil {
 				return
 			}
 		}
 	}
+}
+
+func (b *wsBridge) writeTerminalResize(cols, rows uint16) error {
+	msg, _ := json.Marshal(map[string]any{"type": "terminal_resize", "cols": cols, "rows": rows})
+	return b.conn.WriteMessage(websocket.TextMessage, msg)
 }
 
 func (b *wsBridge) readClient() {

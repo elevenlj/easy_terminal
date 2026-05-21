@@ -531,6 +531,10 @@ app.resizeTerm();
 assert.equal(sentMessages.length, 0, "headless terminal should not send resize");
 assert.equal(app.state.term.cols, 120, "headless terminal should keep fixed cols");
 assert.equal(app.state.term.rows, 36, "headless terminal should keep fixed rows");
+app.syncHeadlessTerminalSize(150, 44);
+assert.equal(sentMessages.length, 0, "headless terminal size sync should not send resize");
+assert.equal(app.state.term.cols, 150, "headless terminal should follow backend cols");
+assert.equal(app.state.term.rows, 44, "headless terminal should follow backend rows");
 context.location.search = "";
 app.state.fit = null;
 

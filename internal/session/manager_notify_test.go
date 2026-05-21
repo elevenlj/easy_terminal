@@ -2195,6 +2195,52 @@ func TestBrowserSnapshotIgnoredWhenHeadlessActive(t *testing.T) {
 	}
 }
 
+func TestResizeBroadcastsTerminalSizeToHeadlessOnly(t *testing.T) {
+	terminal := &resizeRecordingTerminal{}
+	rt := &RuntimeSession{
+		manager:      NewManager(nil, nil),
+		session:      Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		terminal:     terminal,
+		subscribers:  make(map[chan RuntimeEvent]runtimeSubscriber),
+		terminalCols: defaultTerminalCols,
+		terminalRows: defaultTerminalRows,
+	}
+	headlessCh, headlessCancel := rt.SubscribeWithMode(true)
+	defer headlessCancel()
+	realCh, realCancel := rt.SubscribeWithMode(false)
+	defer realCancel()
+
+	if err := rt.Resize(150, 44); err != nil {
+		t.Fatal(err)
+	}
+
+	if terminal.cols != 150 || terminal.rows != 44 {
+		t.Fatalf("terminal resize = %dx%d, want 150x44", terminal.cols, terminal.rows)
+	}
+	select {
+	case ev := <-headlessCh:
+		if ev.Type != RuntimeEventTerminalResize || ev.Cols != 150 || ev.Rows != 44 {
+			t.Fatalf("headless resize event = %#v", ev)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected resize event for headless subscriber")
+	}
+	select {
+	case ev := <-realCh:
+		t.Fatalf("real browser should not receive headless resize sync event: %#v", ev)
+	default:
+	}
+
+	if err := rt.Resize(150, 44); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev := <-headlessCh:
+		t.Fatalf("same size should not rebroadcast resize: %#v", ev)
+	default:
+	}
+}
+
 func TestRequestFreshSnapshotStartsHeadlessInsteadOfUsingRealBrowser(t *testing.T) {
 	needed := make(chan string, 1)
 	rt := &RuntimeSession{
@@ -2425,6 +2471,22 @@ type recordingNotifier struct {
 	messageIDs       []string
 	createMessageIDs []string
 	createIndex      int
+}
+
+type resizeRecordingTerminal struct {
+	cols uint16
+	rows uint16
+}
+
+func (t *resizeRecordingTerminal) Read([]byte) (int, error) { return 0, io.EOF }
+func (t *resizeRecordingTerminal) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+func (t *resizeRecordingTerminal) Close() error { return nil }
+func (t *resizeRecordingTerminal) Resize(cols, rows uint16) error {
+	t.cols = cols
+	t.rows = rows
+	return nil
 }
 
 func (n *recordingNotifier) Available() bool { return true }
