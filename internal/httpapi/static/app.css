@@ -828,7 +828,8 @@ dialog::backdrop {
   color: var(--danger);
 }
 
-.name-preset-editor {
+.name-preset-editor,
+.start-preset-editor {
   margin-top: 12px;
   padding: 12px;
   border: 1px solid var(--line);
@@ -838,13 +839,15 @@ dialog::backdrop {
   gap: 12px;
 }
 
-.name-preset-editor p {
+.name-preset-editor p,
+.start-preset-editor p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 13px;
 }
 
-.name-preset-form {
+.name-preset-form,
+.start-preset-form {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;
   gap: 10px;
@@ -852,6 +855,7 @@ dialog::backdrop {
 }
 
 .name-preset-form label,
+.start-preset-form label,
 .preset-command-editor {
   display: grid;
   gap: 6px;
@@ -873,6 +877,7 @@ dialog::backdrop {
 
 .preset-command-row input,
 .name-preset-form input,
+.start-preset-form input,
 .preset-command-add-row input,
 .preset-inline-command-input {
   border-radius: 12px;
@@ -884,7 +889,8 @@ dialog::backdrop {
   background: transparent;
 }
 
-.name-preset-actions {
+.name-preset-actions,
+.start-preset-actions {
   display: flex;
   gap: 8px;
   align-items: center;
@@ -1269,6 +1275,7 @@ dialog::backdrop {
   .agent-preset-controls,
   .drop-rule-row,
   .name-preset-form,
+  .start-preset-form,
   .preset-command-row,
   .preset-command-display-row,
   .preset-item {

@@ -221,6 +221,21 @@
               <div id="preset-status" class="preset-status" aria-live="polite"></div>
               <div id="preset-list" class="preset-list"></div>
             </div>
+            <div class="start-preset-editor">
+              <div>
+                <strong>启动指令预设</strong>
+                <p>配置会话名后面的数字编号。飞书发送“/start 会话名 1”或“开始 会话名 1-2”时，会按编号依次执行对应命令。0 号保留为仅进入目录。</p>
+              </div>
+              <div class="start-preset-form">
+                <label><span>编号</span><input id="start-preset-code" inputmode="numeric" placeholder="例如：1"></label>
+                <div class="start-preset-actions">
+                  <button id="start-preset-save" type="button">添加编号</button>
+                  <button id="start-preset-clear" type="button">清空</button>
+                </div>
+              </div>
+              <div id="start-preset-status" class="preset-status" aria-live="polite"></div>
+              <div id="start-preset-list" class="preset-list"></div>
+            </div>
             <textarea id="cfg-prestart-command" class="hidden" hidden></textarea>
             <textarea id="cfg-session-name-presets" class="hidden" hidden spellcheck="false"></textarea>
             <textarea id="cfg-session-start-presets" class="hidden" hidden spellcheck="false"></textarea>
@@ -329,7 +344,7 @@
               <div><strong>通知过滤规则</strong><span>可按行、块首行或正则捕获分组过滤通知内容。</span></div>
               <div><strong>飞书自定义快捷键</strong><span>配置按钮名称和指令。按钮会显示在系统快捷键下一行，点击后提交该指令。</span></div>
               <div><strong>默认会话 Agent</strong><span>选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令后，会更新 999999 号启动预设；可通过会话预设命令覆盖。0 号保留为仅进入目录。</span></div>
-              <div><strong>启动预设</strong><span>可以用可视化编辑器维护，也可以切到 JSON 查看和编辑。</span></div>
+              <div><strong>启动预设</strong><span>会话名预设和启动指令预设都可以用可视化编辑器维护，也可以切到 JSON 查看和编辑。</span></div>
             </div>
           </section>
           <section id="help-files" class="help-panel">

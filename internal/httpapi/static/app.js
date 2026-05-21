@@ -9,6 +9,7 @@ const state = {
   search: "",
   larkRegistrationTimer: null,
   editingPresetCommand: null,
+  editingStartPresetCommand: null,
   startupJSONDirty: false,
   pendingTerminalWrite: Promise.resolve(),
   snapshotRequestSeq: 0,
@@ -494,8 +495,11 @@ function renderConfig() {
   renderAgentPresetControls();
   setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 号启动预设；发送“开始 会话名”会默认启动它。0 号表示仅进入目录。`);
   $("preset-session-name").value = "";
+  $("start-preset-code").value = "";
   state.editingPresetCommand = null;
+  state.editingStartPresetCommand = null;
   setPresetStatus("");
+  setStartPresetStatus("");
   stopLarkRegistrationPolling();
   $("cfg-fast-waiting").value = cfg.fast_waiting_transition_ms;
   $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
@@ -520,6 +524,7 @@ function renderConfig() {
   renderLarkPermissionGuide();
   renderPreStartCommandRows();
   renderNamePresets();
+  renderStartPresets();
   state.startupJSONDirty = false;
   updateStartupJSONPreview();
   $("config-error").textContent = "";
@@ -1076,12 +1081,22 @@ function writeNamePresetsFromUI(presets) {
 
 function writeStartPresetsFromUI(presets) {
   $("cfg-session-start-presets").value = JSON.stringify(presets || {}, null, 2);
+  renderStartPresets();
+  renderDefaultAgentPresetFromStartPreset(presets || {});
+  renderAgentPresetControls();
   state.startupJSONDirty = false;
   updateStartupJSONPreview();
 }
 
 function setPresetStatus(message, ok = null) {
   const el = $("preset-status");
+  el.textContent = message || "";
+  el.classList.toggle("ok", ok === true);
+  el.classList.toggle("fail", ok === false);
+}
+
+function setStartPresetStatus(message, ok = null) {
+  const el = $("start-preset-status");
   el.textContent = message || "";
   el.classList.toggle("ok", ok === true);
   el.classList.toggle("fail", ok === false);
@@ -1317,6 +1332,220 @@ function renderNamePresets() {
   }
 }
 
+function normalizeStartPresetCodeForUI(code) {
+  return String(code || "").trim();
+}
+
+function validateStartPresetCodeForUI(code) {
+  if (!/^\d+$/.test(code)) return "编号只能使用数字。";
+  if (code === "0") return "0 号保留为仅进入目录，不需要配置命令。";
+  return "";
+}
+
+function compareStartPresetCodes(a, b) {
+  const an = Number(a);
+  const bn = Number(b);
+  if (Number.isSafeInteger(an) && Number.isSafeInteger(bn) && an !== bn) return an - bn;
+  if (a.length !== b.length) return a.length - b.length;
+  return a.localeCompare(b);
+}
+
+function startPresetTitle(code) {
+  if (code === DEFAULT_AGENT_PRESET_CODE) return `${code}（默认 Agent）`;
+  return `${code} 号`;
+}
+
+function saveStartPresetFromForm() {
+  const presets = readStartPresetsForUI();
+  if (!presets) {
+    setStartPresetStatus("启动指令预设 JSON 格式不正确，先修正后再添加编号。", false);
+    return;
+  }
+  const code = normalizeStartPresetCodeForUI($("start-preset-code").value);
+  if (!code) {
+    setStartPresetStatus("请填写编号。", false);
+    return;
+  }
+  const invalid = validateStartPresetCodeForUI(code);
+  if (invalid) {
+    setStartPresetStatus(invalid, false);
+    return;
+  }
+  if (presets[code]) {
+    setStartPresetStatus(`${code} 号已存在，可以直接在下方添加命令。`, null);
+    return;
+  }
+  presets[code] = { commands: [] };
+  writeStartPresetsFromUI(presets);
+  $("start-preset-code").value = "";
+  setStartPresetStatus(`已添加 ${code} 号启动指令预设。`, true);
+}
+
+function clearStartPresetForm() {
+  $("start-preset-code").value = "";
+  state.editingStartPresetCommand = null;
+  renderStartPresets();
+  setStartPresetStatus("");
+}
+
+function addStartPresetCommand(code, command) {
+  const presets = readStartPresetsForUI();
+  if (!presets?.[code]) return;
+  const value = command.trim();
+  if (!value) {
+    setStartPresetStatus(`请填写 ${code} 号要添加的命令。`, false);
+    return;
+  }
+  if (!Array.isArray(presets[code].commands)) presets[code].commands = [];
+  presets[code].commands.push(value);
+  writeStartPresetsFromUI(presets);
+  setStartPresetStatus(`已为 ${code} 号添加命令。`, true);
+}
+
+function editStartPresetCommand(code, index) {
+  state.editingStartPresetCommand = { code, index };
+  renderStartPresets();
+  setStartPresetStatus(`正在编辑 ${code} 号第 ${index + 1} 条命令。`, null);
+}
+
+function updateStartPresetCommand(code, index, command) {
+  const presets = readStartPresetsForUI();
+  const commands = presets?.[code]?.commands;
+  if (!Array.isArray(commands)) return;
+  const value = command.trim();
+  if (!value) {
+    setStartPresetStatus("命令不能为空。", false);
+    return;
+  }
+  commands[index] = value;
+  state.editingStartPresetCommand = null;
+  writeStartPresetsFromUI(presets);
+  setStartPresetStatus(`已更新 ${code} 号第 ${index + 1} 条命令。`, true);
+}
+
+function cancelEditStartPresetCommand() {
+  state.editingStartPresetCommand = null;
+  renderStartPresets();
+  setStartPresetStatus("");
+}
+
+function deleteStartPresetCommand(code, index) {
+  const presets = readStartPresetsForUI();
+  const commands = presets?.[code]?.commands;
+  if (!Array.isArray(commands)) return;
+  commands.splice(index, 1);
+  writeStartPresetsFromUI(presets);
+  setStartPresetStatus(`已删除 ${code} 号的第 ${index + 1} 条命令。`, true);
+}
+
+function deleteStartPresetCode(code) {
+  const presets = readStartPresetsForUI();
+  if (!presets?.[code]) return;
+  delete presets[code];
+  if (state.editingStartPresetCommand?.code === code) state.editingStartPresetCommand = null;
+  writeStartPresetsFromUI(presets);
+  setStartPresetStatus(`已删除 ${code} 号启动指令预设。`, true);
+}
+
+function renderStartPresets() {
+  const list = $("start-preset-list");
+  list.innerHTML = "";
+  const presets = readStartPresetsForUI();
+  if (!presets) {
+    setStartPresetStatus("启动指令预设 JSON 格式不正确，列表无法同步。", false);
+    return;
+  }
+  const codes = Object.keys(presets).sort(compareStartPresetCodes);
+  if (codes.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "preset-empty";
+    empty.textContent = "还没有启动指令预设。";
+    list.appendChild(empty);
+    return;
+  }
+  for (const code of codes) {
+    const commands = Array.isArray(presets[code]?.commands) ? presets[code].commands : [];
+    const item = document.createElement("article");
+    item.className = "preset-item";
+    const head = document.createElement("div");
+    head.className = "preset-item-head";
+    const title = document.createElement("strong");
+    title.textContent = startPresetTitle(code);
+    const deleteCode = document.createElement("button");
+    deleteCode.type = "button";
+    deleteCode.className = "preset-session-delete";
+    deleteCode.textContent = "删除编号";
+    deleteCode.onclick = () => deleteStartPresetCode(code);
+    head.appendChild(title);
+    head.appendChild(deleteCode);
+    item.appendChild(head);
+    const display = document.createElement("div");
+    display.className = "preset-command-display";
+    item.appendChild(display);
+    if (commands.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "preset-command-display-row";
+      empty.textContent = "未配置命令";
+      display.appendChild(empty);
+    }
+    commands.forEach((command, index) => {
+      const row = document.createElement("div");
+      row.className = "preset-command-display-row";
+      const editing = state.editingStartPresetCommand?.code === code && state.editingStartPresetCommand.index === index;
+      const commandEl = editing ? document.createElement("input") : document.createElement("code");
+      if (editing) {
+        commandEl.className = "preset-inline-command-input";
+        commandEl.value = command;
+      } else {
+        commandEl.textContent = command;
+      }
+      const actions = document.createElement("div");
+      actions.className = "preset-item-actions";
+      if (editing) {
+        const save = document.createElement("button");
+        save.type = "button";
+        save.textContent = "保存";
+        save.onclick = () => updateStartPresetCommand(code, index, commandEl.value);
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "取消";
+        cancel.onclick = cancelEditStartPresetCommand;
+        actions.appendChild(save);
+        actions.appendChild(cancel);
+      } else {
+        const edit = document.createElement("button");
+        edit.className = "preset-edit";
+        edit.type = "button";
+        edit.textContent = "编辑";
+        edit.onclick = () => editStartPresetCommand(code, index);
+        const remove = document.createElement("button");
+        remove.className = "preset-delete";
+        remove.type = "button";
+        remove.textContent = "删除";
+        remove.onclick = () => deleteStartPresetCommand(code, index);
+        actions.appendChild(edit);
+        actions.appendChild(remove);
+      }
+      row.appendChild(commandEl);
+      row.appendChild(actions);
+      display.appendChild(row);
+    });
+    const addRow = document.createElement("div");
+    addRow.className = "preset-command-add-row";
+    const input = document.createElement("input");
+    input.className = "preset-new-command-input";
+    input.placeholder = `给 ${code} 号添加命令`;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.textContent = "添加命令";
+    add.onclick = () => addStartPresetCommand(code, input.value);
+    addRow.appendChild(input);
+    addRow.appendChild(add);
+    item.appendChild(addRow);
+    list.appendChild(item);
+  }
+}
+
 function startupJSONValue() {
   return {
     session_pre_start_command: $("cfg-prestart-command").value,
@@ -1374,6 +1603,9 @@ function syncStartupJSONPreview(options = {}) {
   state.startupJSONDirty = false;
   renderPreStartCommandRows();
   renderNamePresets();
+  renderStartPresets();
+  renderDefaultAgentPresetFromStartPreset(startPresets);
+  renderAgentPresetControls();
   $("config-error").textContent = "";
   if (!options.keepText) updateStartupJSONPreview();
   return true;
@@ -1532,6 +1764,8 @@ $("cfg-agent-custom-command").onchange = ensureDefaultAgentPreset;
 
 $("preset-save").onclick = saveNamePresetFromForm;
 $("preset-clear").onclick = clearNamePresetForm;
+$("start-preset-save").onclick = saveStartPresetFromForm;
+$("start-preset-clear").onclick = clearStartPresetForm;
 $("prestart-command-add").onclick = () => addPreStartCommandRow("");
 $("drop-rule-add").onclick = addDropRule;
 $("custom-shortcut-add").onclick = addCustomShortcut;
@@ -1547,6 +1781,9 @@ $("cfg-session-name-presets").oninput = () => {
 };
 $("cfg-session-start-presets").oninput = () => {
   state.startupJSONDirty = false;
+  renderStartPresets();
+  renderDefaultAgentPresetFromStartPreset(readStartPresetsForUI() || {});
+  renderAgentPresetControls();
   updateStartupJSONPreview();
 };
 $("cfg-prestart-command").oninput = () => {
@@ -1707,6 +1944,8 @@ if (typeof window !== "undefined") {
     ensureDefaultAgentPreset,
     saveNamePresetFromForm,
     renderNamePresets,
+    saveStartPresetFromForm,
+    renderStartPresets,
     addPreStartCommandRow,
     visibleSessions,
     syncSnapshotNow,
