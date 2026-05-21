@@ -97,7 +97,7 @@
             <div class="agent-preset">
               <div>
                 <strong>默认会话 Agent</strong>
-                <p>选择后会更新 999999 号启动预设；发送“/start 会话名”或“开始 会话名”会默认启动它。0 号表示仅进入目录。</p>
+                <p>选择后会更新 999999 默认 Agent 预设；发送“/start 会话名”或“开始 会话名”会默认启动它。0 表示仅进入目录。</p>
               </div>
               <div class="agent-preset-controls">
                 <select id="cfg-agent-preset">
@@ -224,10 +224,10 @@
             <div class="start-preset-editor">
               <div>
                 <strong>启动指令预设</strong>
-                <p>配置会话名后面的数字编号。飞书发送“/start 会话名 1”或“开始 会话名 1-2”时，会按编号依次执行对应命令。0 号保留为仅进入目录。</p>
+                <p>配置会话名后面的字符串标识。飞书发送“/start 会话名 codex”或“开始 会话名 setup,codex”时，会按标识依次执行对应命令。0 保留为仅进入目录。</p>
               </div>
               <div class="start-preset-form">
-                <label><span>编号</span><input id="start-preset-code" inputmode="numeric" placeholder="例如：1"></label>
+                <label><span>标识</span><input id="start-preset-code" placeholder="例如：codex"></label>
                 <div class="start-preset-actions">
                   <button id="start-preset-save" type="button">添加编号</button>
                   <button id="start-preset-clear" type="button">清空</button>
@@ -302,7 +302,7 @@
             <div class="help-steps">
               <p><strong>/start 会话名 / 开始 会话名</strong>：创建会话；未命中会话名预设时，进入默认工作目录并启动“默认会话 Agent”。</p>
               <p><strong>/start 会话名 0 / 开始 会话名 0</strong>：创建会话，只进入默认工作目录，不启动 Agent。</p>
-              <p><strong>/start 会话名 1 / 开始 会话名 1</strong>：创建会话，并执行会话名后面数字对应的启动预设。</p>
+              <p><strong>/start 会话名 codex / 开始 会话名 setup,codex</strong>：创建会话，并执行会话名后面标识对应的启动预设。</p>
               <p><strong>/start 会话名 999999 / 开始 会话名 999999</strong>：创建会话，并显式启动“默认会话 Agent”。</p>
               <p><strong>直接在会话群聊发消息</strong>：消息会路由到绑定的终端会话。</p>
               <p><strong>回复等待通知</strong>：如果没有独立群聊，也可以通过回复通知继续对应会话。</p>
@@ -343,7 +343,7 @@
               <div><strong>通知最大行数</strong><span>飞书通知中最多保留多少行终端内容，默认 100。</span></div>
               <div><strong>通知过滤规则</strong><span>可按行、块首行或正则捕获分组过滤通知内容。</span></div>
               <div><strong>飞书自定义快捷键</strong><span>配置按钮名称和指令。按钮会显示在系统快捷键下一行，点击后提交该指令。</span></div>
-              <div><strong>默认会话 Agent</strong><span>选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令后，会更新 999999 号启动预设；可通过会话预设命令覆盖。0 号保留为仅进入目录。</span></div>
+              <div><strong>默认会话 Agent</strong><span>选择 Codex、OpenCode、Claude Code、Gemini、Aiden 或自定义命令后，会更新 999999 默认 Agent 预设；可通过会话预设命令覆盖。0 保留为仅进入目录。</span></div>
               <div><strong>启动预设</strong><span>会话名预设和启动指令预设都可以用可视化编辑器维护，也可以切到 JSON 查看和编辑。</span></div>
             </div>
           </section>

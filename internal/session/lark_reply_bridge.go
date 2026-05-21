@@ -1089,7 +1089,7 @@ func (b *LarkReplyBridge) parseLarkStartCommand(text string) (string, string, bo
 			continue
 		}
 		body := strings.TrimSpace(strings.TrimPrefix(text, prefix))
-		name, codes := splitSessionNameAndPresetCodes(body)
+		name, codes := b.splitSessionNameAndPresetCodes(body)
 		if name == "" {
 			b.mu.Lock()
 			name = b.defaultStartSessionName
@@ -1103,20 +1103,56 @@ func (b *LarkReplyBridge) parseLarkStartCommand(text string) (string, string, bo
 	return "", "", false
 }
 
-func splitSessionNameAndPresetCodes(body string) (string, string) {
+func (b *LarkReplyBridge) splitSessionNameAndPresetCodes(body string) (string, string) {
+	body = strings.TrimSpace(body)
+	if b.hasNamePreset(body) {
+		return body, ""
+	}
 	fields := strings.Fields(strings.TrimSpace(body))
 	if len(fields) <= 1 {
 		return strings.TrimSpace(body), ""
 	}
 	last := fields[len(fields)-1]
-	if !isPresetCodeSuffix(last) {
+	if !b.isStartPresetCodeExpression(last) {
 		return strings.TrimSpace(body), ""
 	}
 	name := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(body), last))
 	return name, last
 }
 
-func isPresetCodeSuffix(text string) bool {
+func (b *LarkReplyBridge) hasNamePreset(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.namePresets[name]
+	return ok
+}
+
+func (b *LarkReplyBridge) isStartPresetCodeExpression(text string) bool {
+	codes := splitPresetCodes(text)
+	if len(codes) == 0 {
+		return false
+	}
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, code := range codes {
+		if code == "0" {
+			continue
+		}
+		if _, ok := b.startPresets[code]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func isLegacyNumericPresetCodeList(text string) bool {
 	if text == "" {
 		return false
 	}
@@ -1145,17 +1181,22 @@ func splitPresetCodes(codes string) []string {
 	if codes == "" {
 		return nil
 	}
-	parts := strings.Split(codes, "-")
+	var parts []string
+	if isLegacyNumericPresetCodeList(codes) && strings.Contains(codes, "-") {
+		parts = strings.Split(codes, "-")
+	} else {
+		parts = strings.FieldsFunc(codes, func(r rune) bool {
+			return r == ',' || r == '，' || r == '+' || r == '＋'
+		})
+	}
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			return nil
 		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return nil
-			}
+		if strings.ContainsAny(part, " \t\r\n") {
+			return nil
 		}
 		out = append(out, part)
 	}

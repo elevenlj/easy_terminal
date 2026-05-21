@@ -493,7 +493,7 @@ function renderConfig() {
   $("lark-test-result").innerHTML = "";
   renderDefaultAgentPresetFromStartPreset(cfg.session_start_presets || {});
   renderAgentPresetControls();
-  setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 号启动预设；发送“开始 会话名”会默认启动它。0 号表示仅进入目录。`);
+  setAgentPresetStatus(`选择默认会话 Agent 后，会更新 ${DEFAULT_AGENT_PRESET_CODE} 默认 Agent 预设；发送“开始 会话名”会默认启动它。0 表示仅进入目录。`);
   $("preset-session-name").value = "";
   $("start-preset-code").value = "";
   state.editingPresetCommand = null;
@@ -1000,12 +1000,12 @@ function ensureDefaultAgentPreset() {
   if (!command) {
     delete presets[DEFAULT_AGENT_PRESET_CODE];
     writeStartPresetsFromUI(presets);
-    setAgentPresetStatus(`已清空 ${DEFAULT_AGENT_PRESET_CODE} 号默认 Agent 预设。`, true);
+    setAgentPresetStatus(`已清空 ${DEFAULT_AGENT_PRESET_CODE} 默认 Agent 预设。`, true);
     return;
   }
   presets[DEFAULT_AGENT_PRESET_CODE] = { commands: [command] };
   writeStartPresetsFromUI(presets);
-  setAgentPresetStatus(`已更新 ${DEFAULT_AGENT_PRESET_CODE} 号默认 Agent 预设：${command}`, true);
+  setAgentPresetStatus(`已更新 ${DEFAULT_AGENT_PRESET_CODE} 默认 Agent 预设：${command}`, true);
 }
 
 function renderOnboardingAgentControls() {
@@ -1337,8 +1337,9 @@ function normalizeStartPresetCodeForUI(code) {
 }
 
 function validateStartPresetCodeForUI(code) {
-  if (!/^\d+$/.test(code)) return "编号只能使用数字。";
-  if (code === "0") return "0 号保留为仅进入目录，不需要配置命令。";
+  if (/\s/.test(code)) return "标识不能包含空格。";
+  if (/[,+，＋]/.test(code)) return "标识不能包含逗号或加号；这些符号用于组合多个预设。";
+  if (code === "0") return "0 保留为仅进入目录，不需要配置命令。";
   return "";
 }
 
@@ -1352,18 +1353,18 @@ function compareStartPresetCodes(a, b) {
 
 function startPresetTitle(code) {
   if (code === DEFAULT_AGENT_PRESET_CODE) return `${code}（默认 Agent）`;
-  return `${code} 号`;
+  return code;
 }
 
 function saveStartPresetFromForm() {
   const presets = readStartPresetsForUI();
   if (!presets) {
-    setStartPresetStatus("启动指令预设 JSON 格式不正确，先修正后再添加编号。", false);
+    setStartPresetStatus("启动指令预设 JSON 格式不正确，先修正后再添加标识。", false);
     return;
   }
   const code = normalizeStartPresetCodeForUI($("start-preset-code").value);
   if (!code) {
-    setStartPresetStatus("请填写编号。", false);
+    setStartPresetStatus("请填写标识。", false);
     return;
   }
   const invalid = validateStartPresetCodeForUI(code);
@@ -1372,13 +1373,13 @@ function saveStartPresetFromForm() {
     return;
   }
   if (presets[code]) {
-    setStartPresetStatus(`${code} 号已存在，可以直接在下方添加命令。`, null);
+    setStartPresetStatus(`“${code}”已存在，可以直接在下方添加命令。`, null);
     return;
   }
   presets[code] = { commands: [] };
   writeStartPresetsFromUI(presets);
   $("start-preset-code").value = "";
-  setStartPresetStatus(`已添加 ${code} 号启动指令预设。`, true);
+  setStartPresetStatus(`已添加“${code}”启动指令预设。`, true);
 }
 
 function clearStartPresetForm() {
@@ -1393,19 +1394,19 @@ function addStartPresetCommand(code, command) {
   if (!presets?.[code]) return;
   const value = command.trim();
   if (!value) {
-    setStartPresetStatus(`请填写 ${code} 号要添加的命令。`, false);
+    setStartPresetStatus(`请填写“${code}”要添加的命令。`, false);
     return;
   }
   if (!Array.isArray(presets[code].commands)) presets[code].commands = [];
   presets[code].commands.push(value);
   writeStartPresetsFromUI(presets);
-  setStartPresetStatus(`已为 ${code} 号添加命令。`, true);
+  setStartPresetStatus(`已为“${code}”添加命令。`, true);
 }
 
 function editStartPresetCommand(code, index) {
   state.editingStartPresetCommand = { code, index };
   renderStartPresets();
-  setStartPresetStatus(`正在编辑 ${code} 号第 ${index + 1} 条命令。`, null);
+  setStartPresetStatus(`正在编辑“${code}”第 ${index + 1} 条命令。`, null);
 }
 
 function updateStartPresetCommand(code, index, command) {
@@ -1420,7 +1421,7 @@ function updateStartPresetCommand(code, index, command) {
   commands[index] = value;
   state.editingStartPresetCommand = null;
   writeStartPresetsFromUI(presets);
-  setStartPresetStatus(`已更新 ${code} 号第 ${index + 1} 条命令。`, true);
+  setStartPresetStatus(`已更新“${code}”第 ${index + 1} 条命令。`, true);
 }
 
 function cancelEditStartPresetCommand() {
@@ -1435,7 +1436,7 @@ function deleteStartPresetCommand(code, index) {
   if (!Array.isArray(commands)) return;
   commands.splice(index, 1);
   writeStartPresetsFromUI(presets);
-  setStartPresetStatus(`已删除 ${code} 号的第 ${index + 1} 条命令。`, true);
+  setStartPresetStatus(`已删除“${code}”的第 ${index + 1} 条命令。`, true);
 }
 
 function deleteStartPresetCode(code) {
@@ -1444,7 +1445,7 @@ function deleteStartPresetCode(code) {
   delete presets[code];
   if (state.editingStartPresetCommand?.code === code) state.editingStartPresetCommand = null;
   writeStartPresetsFromUI(presets);
-  setStartPresetStatus(`已删除 ${code} 号启动指令预设。`, true);
+  setStartPresetStatus(`已删除“${code}”启动指令预设。`, true);
 }
 
 function renderStartPresets() {
@@ -1534,7 +1535,7 @@ function renderStartPresets() {
     addRow.className = "preset-command-add-row";
     const input = document.createElement("input");
     input.className = "preset-new-command-input";
-    input.placeholder = `给 ${code} 号添加命令`;
+    input.placeholder = `给“${code}”添加命令`;
     const add = document.createElement("button");
     add.type = "button";
     add.textContent = "添加命令";

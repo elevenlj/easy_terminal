@@ -1958,6 +1958,43 @@ func TestLarkReplyBridgeStartRunsConfiguredPresets(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeStartRunsStringPresetCode(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"setup":    {Commands: []string{"setup-project"}},
+		"qa-agent": {Commands: []string{"qa-agent --run"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-string-code", "", "", "text", `{"text":"开始 测试 setup,qa-agent"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "测试" {
+		t.Fatalf("string preset suffix should not be part of session name, got %#v", sessions)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/测试'\r",
+		"setup-project\r",
+		"qa-agent --run\r",
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("string preset writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("string preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
 func TestLarkReplyBridgeStartWithoutCodesUsesDefaultAgentPreset(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
@@ -2191,6 +2228,40 @@ func TestLarkReplyBridgeStartNamePresetTakesPriorityOverCodePresets(t *testing.T
 	for i := range want {
 		if parts[i] != want[i] {
 			t.Fatalf("preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
+		}
+	}
+}
+
+func TestLarkReplyBridgeExactNamePresetCanEndWithStringCode(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetNamePresets(map[string]SessionStartPreset{
+		"会话 dev": {Commands: []string{"name-preset"}},
+	})
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"dev": {Commands: []string{"code-preset"}},
+	})
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-name-ending-code", "", "", "text", `{"text":"开始 会话 dev"}`)); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Name != "会话 dev" {
+		t.Fatalf("exact name preset should not be split as code suffix, got %#v", sessions)
+	}
+	parts := launcher.terminals[0].writeParts()
+	want := []string{"name-preset\r"}
+	if len(parts) != len(want) {
+		t.Fatalf("exact name preset writes = %#v, want %#v", parts, want)
+	}
+	for i := range want {
+		if parts[i] != want[i] {
+			t.Fatalf("exact name preset write %d = %q, want %q; all writes=%#v", i, parts[i], want[i], parts)
 		}
 	}
 }

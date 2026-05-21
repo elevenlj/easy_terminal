@@ -764,30 +764,30 @@ devAddRow.children[0].value = "codex";
 devAddRow.children[1].onclick();
 let editedNamePresets = JSON.parse(elements["cfg-session-name-presets"].value);
 assert.deepEqual(editedNamePresets["开发"], { commands: ["cd project/dev", "codex"] }, "visual preset editor should write JSON");
-elements["start-preset-code"].value = "2";
+elements["start-preset-code"].value = "dev";
 elements["start-preset-save"].onclick();
-let startPreset = elements["start-preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "2 号");
+let startPreset = elements["start-preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "dev");
 let startAddRow = startPreset.children.find((node) => node.className === "preset-command-add-row");
 startAddRow.children[0].value = "opencode";
 startAddRow.children[1].onclick();
 let editedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
-assert.deepEqual(editedStartPresets["2"], { commands: ["opencode"] }, "visual start preset editor should write JSON");
+assert.deepEqual(editedStartPresets.dev, { commands: ["opencode"] }, "visual start preset editor should write JSON");
 elements["start-preset-code"].value = "0";
 elements["start-preset-save"].onclick();
-assert.match(elements["start-preset-status"].textContent, /0 号保留/, "start preset editor should reject reserved 0");
+assert.match(elements["start-preset-status"].textContent, /0 保留/, "start preset editor should reject reserved 0");
 elements["startup-json-toggle"].onclick();
 assert.equal(elements["startup-json-preview"].hidden, false, "json preview should open");
 assert.ok(elements["startup-json-preview"].value.includes('"开发"'), "json preview should show current presets");
 elements["startup-json-preview"].value = JSON.stringify({
   session_pre_start_command: "source ~/.zshrc\nexport A=1",
   session_name_presets: { "JSON会话": { commands: ["pwd"] } },
-  session_start_presets: { "2": { commands: ["opencode"] } },
+  session_start_presets: { agent: { commands: ["opencode"] } },
 }, null, 2);
 elements["startup-json-preview"].oninput();
 assert.equal(elements["cfg-prestart-command"].value, "source ~/.zshrc\nexport A=1", "json editor should sync prestart command");
 assert.deepEqual(JSON.parse(elements["cfg-session-name-presets"].value), { "JSON会话": { commands: ["pwd"] } }, "json editor should sync name presets");
-assert.deepEqual(JSON.parse(elements["cfg-session-start-presets"].value), { "2": { commands: ["opencode"] } }, "json editor should sync start presets");
-assert.equal(elements["start-preset-list"].children[0].children[0].children[0].textContent, "2 号", "json editor should sync visual start preset list");
+assert.deepEqual(JSON.parse(elements["cfg-session-start-presets"].value), { agent: { commands: ["opencode"] } }, "json editor should sync start presets");
+assert.equal(elements["start-preset-list"].children[0].children[0].children[0].textContent, "agent", "json editor should sync visual start preset list");
 elements["startup-json-preview"].value = "{";
 elements["startup-json-preview"].oninput();
 await assert.rejects(() => app.saveConfig(), /启动配置 JSON 格式不正确/, "invalid startup json should block save");
