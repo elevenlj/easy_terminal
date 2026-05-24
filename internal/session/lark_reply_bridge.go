@@ -895,6 +895,10 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		rt, _ = b.manager.GetRuntime(sessionID)
 	}
 	b.manager.EnsureBrowser(sessionID)
+	if b.enqueueInputIfRuntimeBusy(rt, sessionID, parts, routeCtx.SenderOpenID) {
+		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
+		return sessionID, nil
+	}
 	b.enqueuePipeline(sessionID, parts[1:], routeCtx.SenderOpenID)
 	if err := SubmitStructuredInputWithMention(rt, text, routeCtx.SenderOpenID); err != nil {
 		return sessionID, err
@@ -903,6 +907,22 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 	defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
 	b.notifyInputRunning(sessionID)
 	return sessionID, nil
+}
+
+func (b *LarkReplyBridge) enqueueInputIfRuntimeBusy(rt *RuntimeSession, sessionID string, parts []string, mentionOpenID string) bool {
+	if rt == nil || sessionID == "" || len(parts) == 0 {
+		return false
+	}
+	snapshot := rt.Snapshot()
+	if snapshot.Status != StatusRunning || snapshot.LastMode != SessionModeAgent {
+		return false
+	}
+	if structuredInputNumericOnlyRE.MatchString(strings.TrimSpace(parts[0])) {
+		return false
+	}
+	b.enqueuePipeline(sessionID, parts, mentionOpenID)
+	log.Printf("lark reply bridge queued input session=%s parts=%d reason=runtime_running", sessionID, len(parts))
+	return true
 }
 
 func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRouteContext, text string, parts []string, refs []larkAttachmentRef) (string, error) {
@@ -2049,6 +2069,9 @@ func extractLarkIncomingMessage(content string, messageType string) larkIncoming
 	case "file":
 		collectLarkAttachmentRefs(raw, &incoming.Attachments)
 		incoming.Text = strings.TrimSpace(collectLarkPlainTextFields(raw))
+	case "audio", "media":
+		collectLarkAttachmentRefs(raw, &incoming.Attachments)
+		incoming.Text = strings.TrimSpace(collectLarkPlainTextFields(raw))
 	default:
 		if m, ok := raw.(map[string]any); ok {
 			if text := strings.TrimSpace(stringFromAny(m["text"])); text != "" {
@@ -2082,7 +2105,7 @@ func collectLarkPlainTextFieldParts(v any, parts *[]string) {
 			collectLarkPlainTextFieldParts(item, parts)
 		}
 	case map[string]any:
-		for _, key := range []string{"text", "caption"} {
+		for _, key := range []string{"text", "caption", "asr_text"} {
 			if text := stringFromAny(x[key]); strings.TrimSpace(text) != "" {
 				*parts = append(*parts, text)
 			}

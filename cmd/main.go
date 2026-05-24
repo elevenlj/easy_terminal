@@ -33,13 +33,22 @@ const (
 	defaultFastWaitingTransitionMs         = 1000
 	defaultConservativeWaitingTransitionMs = 3000
 	defaultLarkAutoRefreshIntervalMs       = 5000
-	defaultLarkNotifyMaxLines              = 100
+	defaultLarkNotifyMaxLines              = 200
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
 )
 
 var defaultLarkNotifyDropLineRules = session.LarkNotifyDropLineRules{
 	{Title: "空行", Pattern: `^\s*$`},
 	{Title: "横线", Pattern: `^\s*[-‐-‒–—―─━═]{3,}\s*$`},
+	{Pattern: `^(• Ran|• Explored|• Edit|• Edited).*`, Kind: "block_head", Action: "keep_head"},
+	{Pattern: `^(.*)Worked for.*?(─+)$`},
+	{Pattern: `^─{1,}.*`},
+	{Pattern: `^(⏺ Ran|⏺ Explored|⏺ Edit|⏺ Edited|⏺ Wri|⏺ Bash|✶ Generating).*`, Kind: "block_head", Action: "keep_head"},
+	{Pattern: `^[╭╮╰╯│─▐▛▜▝▘ ]+$`},
+	{Pattern: `^\s*[▐▛▜▝▘█▙▟▚▞]+\s*$`},
+	{Pattern: `[╭╮╰╯│─]`},
+	{Pattern: `^\s*$`},
+	{Pattern: `^(Welcome back|Tips|What's new|Run |\/usage|\/diff|\/release-notes|deepseek-v4-pro|~\/)`},
 }
 
 type Config struct {
@@ -242,6 +251,7 @@ func defaultConfig() Config {
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+		LarkNotifyMergeWrappedLines:     true,
 		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
 	}
 }

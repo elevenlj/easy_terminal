@@ -817,6 +817,29 @@ func TestRefreshNotificationMessageKeepsLongerContentWhenSnapshotRegressesToPref
 	}
 }
 
+func TestRefreshNotificationMessageRejectsStaleSnapshot(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:                 m,
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:           "next question",
+		lastNotifiedMessageID:   "bot-card",
+		snapshotAtRoundStart:    "> next question",
+		snapshotAtRoundVersion:  2,
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "> next question",
+		visibleSnapshotVersion:  2,
+	}
+
+	if err := rt.RefreshNotificationMessage("bot-card", 1); err == nil {
+		t.Fatal("manual refresh should reject a stale current-round snapshot")
+	}
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("stale manual refresh should not patch notification, got %d notes", got)
+	}
+}
+
 func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
@@ -2270,6 +2293,47 @@ func TestRequestFreshSnapshotStartsHeadlessInsteadOfUsingRealBrowser(t *testing.
 	case ev := <-realCh:
 		t.Fatalf("real browser should not receive snapshot request while headless is required: %#v", ev)
 	default:
+	}
+	select {
+	case fresh := <-done:
+		if fresh {
+			t.Fatal("request should not become fresh without a headless snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestRequestFreshSnapshotRestartsStaleHeadlessWhenNoSubscriber(t *testing.T) {
+	events := make(chan string, 2)
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil,
+			WithBrowserStopped(func(sessionID string) {
+				events <- "stop:" + sessionID
+			}),
+			WithBrowserNeeded(func(sessionID string) {
+				events <- "start:" + sessionID
+			}),
+		),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(80 * time.Millisecond)
+	}()
+
+	want := []string{"stop:sess-1", "start:sess-1"}
+	for _, expected := range want {
+		select {
+		case got := <-events:
+			if got != expected {
+				t.Fatalf("browser event = %q, want %q", got, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("expected browser event %q", expected)
+		}
 	}
 	select {
 	case fresh := <-done:

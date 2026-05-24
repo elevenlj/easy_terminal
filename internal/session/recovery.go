@@ -102,8 +102,8 @@ func (rt *RuntimeSession) applyShellSegmentForRecoveryLocked(segment string) {
 			rt.session.LastAgentKind = info.Kind
 			rt.session.LastAgentStartCommand = strings.TrimSpace(segment)
 			rt.session.LastAgentResumeCommand = info.ResumeCommand
-			if info.Kind == "codex" && rt.manager != nil {
-				rt.session.LastAgentHome = rt.manager.sessionCodexHome(rt.session)
+			if rt.manager != nil {
+				rt.session.LastAgentHome = rt.manager.sessionAgentHome(rt.session, info.Kind)
 			}
 		}
 	}
@@ -461,8 +461,28 @@ func ensureCodexSessionHome(codexHome string) error {
 	}
 	source := sourceCodexHome(codexHome)
 	for _, name := range []string{"auth.json", "config.toml", "skills", "plugins"} {
-		if err := linkCodexHomeEntry(source, codexHome, name); err != nil {
+		if err := linkAgentHomeEntry(source, codexHome, name); err != nil {
 			log.Printf("codex home link skipped name=%s: %v", name, err)
+		}
+	}
+	return nil
+}
+
+func ensureClaudeSessionHome(claudeHome string) error {
+	claudeHome = strings.TrimSpace(claudeHome)
+	if claudeHome == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Join(claudeHome, "sessions"), 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(claudeHome, "projects"), 0o755); err != nil {
+		return err
+	}
+	source := sourceClaudeHome(claudeHome)
+	for _, name := range []string{".claude.json", "settings.json", "settings.local.json", "plugins", "commands", "agents", "hooks", "skills", "output-styles"} {
+		if err := linkAgentHomeEntry(source, claudeHome, name); err != nil {
+			log.Printf("claude home link skipped name=%s: %v", name, err)
 		}
 	}
 	return nil
@@ -475,8 +495,20 @@ func sourceCodexHome(target string) string {
 	return filepath.Join(userHomeDir(), ".codex")
 }
 
-func linkCodexHomeEntry(source, target, name string) error {
+func sourceClaudeHome(target string) string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" && filepath.Clean(dir) != filepath.Clean(target) {
+		return dir
+	}
+	return filepath.Join(userHomeDir(), ".claude")
+}
+
+func linkAgentHomeEntry(source, target, name string) error {
 	src := filepath.Join(source, name)
+	if name == ".claude.json" {
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			src = filepath.Join(userHomeDir(), ".claude.json")
+		}
+	}
 	dst := filepath.Join(target, name)
 	if _, err := os.Stat(src); err != nil {
 		return nil

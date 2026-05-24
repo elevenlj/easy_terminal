@@ -224,6 +224,20 @@ func (m *Manager) StopBrowser(sessionID string) {
 	go m.onBrowserStopped(sessionID)
 }
 
+func (m *Manager) RestartBrowser(sessionID string) {
+	if m.onBrowserNeeded == nil || sessionID == "" {
+		return
+	}
+	stopped := m.onBrowserStopped
+	needed := m.onBrowserNeeded
+	go func() {
+		if stopped != nil {
+			stopped(sessionID)
+		}
+		needed(sessionID)
+	}()
+}
+
 func (m *Manager) SetNotificationSentHook(fn func(string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -343,11 +357,26 @@ func (m *Manager) sessionRecoveryDir(sess Session) string {
 }
 
 func (m *Manager) sessionCodexHome(sess Session) string {
+	return m.sessionAgentHome(sess, "codex")
+}
+
+func (m *Manager) sessionClaudeHome(sess Session) string {
+	return m.sessionAgentHome(sess, "claude")
+}
+
+func (m *Manager) sessionAgentHome(sess Session, kind string) string {
 	dir := m.sessionRecoveryDir(sess)
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "codex_home")
+	switch strings.TrimSpace(kind) {
+	case "codex":
+		return filepath.Join(dir, "codex_home")
+	case "claude":
+		return filepath.Join(dir, "claude_home")
+	default:
+		return ""
+	}
 }
 
 func (m *Manager) ListSessions(ctx context.Context) ([]Session, error) {
@@ -852,14 +881,25 @@ func (rt *RuntimeSession) runRecoveryEnvironmentSetup() {
 	rt.mu.Lock()
 	sess := rt.session
 	rt.mu.Unlock()
+	var exports []string
 	codexHome := rt.manager.sessionCodexHome(sess)
-	if codexHome == "" {
+	if codexHome != "" {
+		if err := ensureCodexSessionHome(codexHome); err != nil {
+			log.Printf("recovery codex home setup failed session=%s: %v", sess.ID, err)
+		}
+		exports = append(exports, "CODEX_HOME="+shellQuote(codexHome))
+	}
+	claudeHome := rt.manager.sessionClaudeHome(sess)
+	if claudeHome != "" {
+		if err := ensureClaudeSessionHome(claudeHome); err != nil {
+			log.Printf("recovery claude home setup failed session=%s: %v", sess.ID, err)
+		}
+		exports = append(exports, "CLAUDE_CONFIG_DIR="+shellQuote(claudeHome))
+	}
+	if len(exports) == 0 {
 		return
 	}
-	if err := ensureCodexSessionHome(codexHome); err != nil {
-		log.Printf("recovery codex home setup failed session=%s: %v", sess.ID, err)
-	}
-	command := "export CODEX_HOME=" + shellQuote(codexHome) + "\r"
+	command := "export " + strings.Join(exports, " ") + "\r"
 	if _, err := rt.terminal.Write([]byte(command)); err != nil {
 		log.Printf("recovery environment setup failed session=%s: %v", sess.ID, err)
 	}
@@ -989,8 +1029,8 @@ func (rt *RuntimeSession) NotificationMentionOpenID() string {
 }
 
 func (rt *RuntimeSession) CurrentRoundContent() string {
-	rt.RequestFreshSnapshot(800 * time.Millisecond)
-	return rt.CachedCurrentRoundContent()
+	content, _ := rt.currentRoundContentWithFreshSnapshot(800 * time.Millisecond)
+	return content
 }
 
 func (rt *RuntimeSession) CachedCurrentRoundContent() string {
@@ -1015,6 +1055,13 @@ func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
 
 func (rt *RuntimeSession) currentNotifyContentLocked() string {
 	return pickNotifyContentWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+}
+
+func (rt *RuntimeSession) currentRoundContentWithFreshSnapshot(timeout time.Duration) (string, bool) {
+	fresh := rt.RequestFreshSnapshot(timeout)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.currentNotifyContentLocked(), fresh
 }
 
 func (rt *RuntimeSession) stableNotifyContentForMessageLocked(messageID string, content string) string {
@@ -1164,7 +1211,7 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	}
 	rt.mu.Unlock()
 	if needsBrowser {
-		rt.manager.EnsureBrowser(sessionID)
+		rt.manager.RestartBrowser(sessionID)
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1444,7 +1491,14 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		return errors.New("notification message is frozen")
 	}
 	rt.mu.Unlock()
-	content := strings.TrimSpace(rt.CurrentRoundContent())
+	content, fresh := rt.currentRoundContentWithFreshSnapshot(800 * time.Millisecond)
+	content = strings.TrimSpace(content)
+	rt.mu.Lock()
+	stale := rt.visibleSnapshotStaleForCurrentRoundLocked()
+	rt.mu.Unlock()
+	if !fresh && stale {
+		return errors.New("current visible snapshot is stale")
+	}
 	hasSnapshotContent := content != ""
 	if !hasSnapshotContent {
 		content = strings.TrimSpace(rt.CurrentVisibleContent())

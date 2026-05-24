@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,6 +48,31 @@ func TestRecoveryRecordsCodexResumeCommandWithFlags(t *testing.T) {
 	}
 }
 
+func TestRecoveryRecordsClaudeResumeCommandWithHome(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "sessions")
+	manager := NewManager(nil, nil, WithRecoveryBaseDir(base))
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{ID: "sess-1", Name: "A", RecoveryKey: "rk", LastMode: SessionModeShell, LastCWD: "/tmp"},
+	}
+
+	rt.MarkStructuredInputActivity("claude --dangerously-skip-permissions")
+	s := rt.Snapshot()
+
+	if s.LastMode != SessionModeAgent || s.LastAgentKind != "claude" {
+		t.Fatalf("agent state = mode %q kind %q", s.LastMode, s.LastAgentKind)
+	}
+	if !strings.Contains(s.LastAgentResumeCommand, "--continue") {
+		t.Fatalf("resume command = %q, want claude --continue", s.LastAgentResumeCommand)
+	}
+	if !strings.Contains(s.LastAgentResumeCommand, "--dangerously-skip-permissions") {
+		t.Fatalf("resume command did not preserve flags: %q", s.LastAgentResumeCommand)
+	}
+	if !strings.HasSuffix(s.LastAgentHome, filepath.Join("rk", "claude_home")) {
+		t.Fatalf("LastAgentHome = %q", s.LastAgentHome)
+	}
+}
+
 func TestRecoveryBaseDirIsAbsolute(t *testing.T) {
 	manager := NewManager(nil, nil, WithRecoveryBaseDir(filepath.Join("conf", "data", "sessions")))
 	got := manager.sessionCodexHome(Session{RecoveryKey: "rk"})
@@ -56,6 +82,69 @@ func TestRecoveryBaseDirIsAbsolute(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, filepath.Join("conf", "data", "sessions", "rk", "codex_home")) {
 		t.Fatalf("codex home = %q, want recovery path suffix", got)
+	}
+	got = manager.sessionClaudeHome(Session{RecoveryKey: "rk"})
+	if !filepath.IsAbs(got) {
+		t.Fatalf("claude home = %q, want absolute path", got)
+	}
+	if !strings.HasSuffix(got, filepath.Join("conf", "data", "sessions", "rk", "claude_home")) {
+		t.Fatalf("claude home = %q, want recovery path suffix", got)
+	}
+}
+
+func TestRecoveryEnvironmentExportsAgentHomes(t *testing.T) {
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher, WithRecoveryBaseDir(filepath.Join(t.TempDir(), "sessions")))
+
+	if _, err := manager.CreateSession(context.Background(), "test"); err != nil {
+		t.Fatalf("CreateSession() error = %v", err)
+	}
+
+	writes := launcher.terminals[0].writes()
+	for _, want := range []string{"export CODEX_HOME=", "CLAUDE_CONFIG_DIR=", "codex_home", "claude_home"} {
+		if !strings.Contains(writes, want) {
+			t.Fatalf("recovery environment writes = %q, want %q", writes, want)
+		}
+	}
+}
+
+func TestEnsureClaudeSessionHomeLinksSharedConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	source := filepath.Join(home, ".claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", source)
+	if err := os.MkdirAll(filepath.Join(source, "plugins"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"userID":"u1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "settings.json"), []byte(`{"theme":"dark"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "claude_home")
+
+	if err := ensureClaudeSessionHome(target); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"sessions", "projects"} {
+		if info, err := os.Stat(filepath.Join(target, dir)); err != nil || !info.IsDir() {
+			t.Fatalf("%s dir stat=%v err=%v", dir, info, err)
+		}
+	}
+	for name, want := range map[string]string{
+		".claude.json":  filepath.Join(home, ".claude.json"),
+		"settings.json": filepath.Join(source, "settings.json"),
+		"plugins":       filepath.Join(source, "plugins"),
+	} {
+		got, err := os.Readlink(filepath.Join(target, name))
+		if err != nil {
+			t.Fatalf("Readlink(%s) error = %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("link %s = %q, want %q", name, got, want)
+		}
 	}
 }
 

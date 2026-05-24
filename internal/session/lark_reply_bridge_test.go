@@ -1062,6 +1062,42 @@ func TestLarkReplyBridgeFollowupCreatesRunningCard(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+
+	sess, err := manager.CreateSession(context.Background(), "Queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime session missing")
+	}
+	rt.mu.Lock()
+	rt.session.Status = StatusRunning
+	rt.session.LastMode = SessionModeAgent
+	rt.mu.Unlock()
+	defaultLarkMessageRegistry.remember(sess.ID, "bot-card")
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow-queue", "bot-card", "", "text", `{"text":"queued question"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	parts := launcher.terminals[0].writeParts()
+	if lastSubmittedWrite(parts, "queued question") || strings.Contains(launcher.terminals[0].writes(), "queued question") {
+		t.Fatalf("running followup should be queued instead of written immediately, parts=%#v", parts)
+	}
+
+	bridge.OnNotificationSent("sess-1")
+	parts = launcher.terminals[0].writeParts()
+	if !lastSubmittedWrite(parts, "queued question") {
+		t.Fatalf("queued followup should submit after notification, got %#v", parts)
+	}
+}
+
 func TestLarkReplyBridgeOverlappingFollowupFreezesRunningCardEndToEnd(t *testing.T) {
 	resetLarkRegistryForTest()
 	previousDelay := structuredInputEnterDelay
