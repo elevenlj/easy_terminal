@@ -111,7 +111,7 @@ class FakeElement {
   }
 
   querySelector(selector) {
-    return this._bySelector.get(selector) || null;
+    return this._bySelector.get(selector) || this.querySelectorAll(selector)[0] || null;
   }
 
   querySelectorAll(selector) {
@@ -772,6 +772,15 @@ startAddRow.children[0].value = "opencode";
 startAddRow.children[1].onclick();
 let editedStartPresets = JSON.parse(elements["cfg-session-start-presets"].value);
 assert.deepEqual(editedStartPresets.dev, { commands: ["opencode"] }, "visual start preset editor should write JSON");
+startPreset = elements["start-preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "dev");
+let startCommandRow = startPreset.children.find((node) => node.className === "preset-command-display").children[0];
+startCommandRow.children[1].children[0].onclick();
+startPreset = elements["start-preset-list"].children.find((child) => child.children[0]?.children?.[0]?.textContent === "dev");
+startCommandRow = startPreset.children.find((node) => node.className === "preset-command-display").children[0];
+startCommandRow.children[0].value = "claude --dangerously-skip-permissions";
+await app.testLarkConfig();
+let editedStartConfig = fetchCalls.filter((call) => call.path === "/api/config/lark-test" && call.options.method === "POST").at(-1);
+assert.deepEqual(JSON.parse(editedStartConfig.options.body).session_start_presets.dev, { commands: ["claude --dangerously-skip-permissions"] }, "config read should flush pending edited start preset command");
 elements["start-preset-code"].value = "0";
 elements["start-preset-save"].onclick();
 assert.match(elements["start-preset-status"].textContent, /0 保留/, "start preset editor should reject reserved 0");

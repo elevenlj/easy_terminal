@@ -601,6 +601,7 @@ function readNumber(id, fallback) {
 
 function readConfigForm() {
   if (state.startupJSONDirty) syncStartupJSONPreview({ throwOnError: true });
+  flushPendingPresetCommandEdits();
   const namePresets = parseJSONObject($("cfg-session-name-presets").value || "{}", "会话名预设 JSON");
   const startPresets = parseJSONObject($("cfg-session-start-presets").value || "{}", "开始命令后缀预设 JSON");
   const dropRules = parseJSONArray($("cfg-drop-patterns").value || "[]", "通知过滤规则 JSON")
@@ -1153,16 +1154,17 @@ function editPresetCommand(name, index) {
 function updatePresetCommand(name, index, command) {
   const presets = readNamePresetsForUI();
   const commands = presets?.[name]?.commands;
-  if (!Array.isArray(commands)) return;
+  if (!Array.isArray(commands)) return false;
   const value = command.trim();
   if (!value) {
     setPresetStatus("命令不能为空。", false);
-    return;
+    return false;
   }
   commands[index] = value;
   state.editingPresetCommand = null;
   writeNamePresetsFromUI(presets);
   setPresetStatus(`已更新“${name}”第 ${index + 1} 条命令。`, true);
+  return true;
 }
 
 function cancelEditPresetCommand() {
@@ -1412,16 +1414,34 @@ function editStartPresetCommand(code, index) {
 function updateStartPresetCommand(code, index, command) {
   const presets = readStartPresetsForUI();
   const commands = presets?.[code]?.commands;
-  if (!Array.isArray(commands)) return;
+  if (!Array.isArray(commands)) return false;
   const value = command.trim();
   if (!value) {
     setStartPresetStatus("命令不能为空。", false);
-    return;
+    return false;
   }
   commands[index] = value;
   state.editingStartPresetCommand = null;
   writeStartPresetsFromUI(presets);
   setStartPresetStatus(`已更新“${code}”第 ${index + 1} 条命令。`, true);
+  return true;
+}
+
+function flushPendingPresetCommandEdits() {
+  const pendingNameEdit = state.editingPresetCommand;
+  if (pendingNameEdit) {
+    const input = $("preset-list").querySelector(".preset-inline-command-input");
+    if (input && !updatePresetCommand(pendingNameEdit.name, pendingNameEdit.index, input.value)) {
+      throw new Error("会话名预设命令不能为空");
+    }
+  }
+  const pendingStartEdit = state.editingStartPresetCommand;
+  if (pendingStartEdit) {
+    const input = $("start-preset-list").querySelector(".preset-inline-command-input");
+    if (input && !updateStartPresetCommand(pendingStartEdit.code, pendingStartEdit.index, input.value)) {
+      throw new Error("启动指令预设命令不能为空");
+    }
+  }
 }
 
 function cancelEditStartPresetCommand() {
