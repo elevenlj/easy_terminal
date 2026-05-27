@@ -28,6 +28,8 @@ type larkBridgeWSClient struct {
 	conn        *websocket.Conn
 	serviceID   string
 	pingEvery   time.Duration
+	retryEvery  time.Duration
+	connURL     func(context.Context) (string, error)
 	writeMu     sync.Mutex
 }
 
@@ -38,23 +40,52 @@ func newLarkBridgeWSClient(appID, appSecret string, handler *dispatcher.EventDis
 		handler:     handler,
 		cardHandler: cardHandler,
 		pingEvery:   2 * time.Minute,
+		retryEvery:  2 * time.Second,
 	}
 }
 
 func (c *larkBridgeWSClient) Start(ctx context.Context) error {
 	for {
 		if err := c.connect(ctx); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			log.Printf("lark bridge ws connect failed: %v", err)
+			if err := c.waitBeforeReconnect(ctx); err != nil {
+				return err
+			}
+			continue
 		}
-		go c.pingLoop(ctx)
+		connCtx, cancelPing := context.WithCancel(ctx)
+		go c.pingLoop(connCtx)
 		if err := c.receiveLoop(ctx); err != nil {
 			log.Printf("lark bridge ws disconnected: %v", err)
 		}
+		cancelPing()
+		_ = c.Close()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		default:
 		}
+		if err := c.waitBeforeReconnect(ctx); err != nil {
+			return err
+		}
+	}
+}
+
+func (c *larkBridgeWSClient) waitBeforeReconnect(ctx context.Context) error {
+	delay := c.retryEvery
+	if delay <= 0 {
+		delay = 2 * time.Second
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -70,7 +101,11 @@ func (c *larkBridgeWSClient) Close() error {
 }
 
 func (c *larkBridgeWSClient) connect(ctx context.Context) error {
-	connURL, err := c.getConnURL(ctx)
+	getConnURL := c.connURL
+	if getConnURL == nil {
+		getConnURL = c.getConnURL
+	}
+	connURL, err := getConnURL(ctx)
 	if err != nil {
 		return err
 	}

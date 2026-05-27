@@ -3,8 +3,11 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -93,5 +96,26 @@ func TestLarkBridgeWSCardHandlerExecutesShortcutWithEmptyAck(t *testing.T) {
 	parts := launcher.terminals[0].writeParts()
 	if len(parts) == 0 || parts[len(parts)-1] != "\x03" {
 		t.Fatalf("card payload should send Ctrl-C, got %#v", parts)
+	}
+}
+
+func TestLarkBridgeWSStartRetriesEndpointErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := newLarkBridgeWSClient("app", "secret", nil, nil)
+	client.retryEvery = time.Millisecond
+	var attempts atomic.Int32
+	client.connURL = func(context.Context) (string, error) {
+		if attempts.Add(1) >= 3 {
+			cancel()
+		}
+		return "", errors.New("temporary endpoint failure")
+	}
+	err := client.Start(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start error = %v, want context.Canceled", err)
+	}
+	if got := attempts.Load(); got < 3 {
+		t.Fatalf("endpoint should be retried, attempts=%d", got)
 	}
 }
