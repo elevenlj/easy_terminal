@@ -1065,7 +1065,8 @@ func TestLarkReplyBridgeFollowupCreatesRunningCard(t *testing.T) {
 func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
-	manager := NewManager(nil, launcher)
+	notifier := &recordingNotifier{createMessageIDs: []string{"old-card", "new-card"}}
+	manager := NewManager(nil, launcher, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
 
 	sess, err := manager.CreateSession(context.Background(), "Queue")
@@ -1079,11 +1080,35 @@ func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
 	rt.mu.Lock()
 	rt.session.Status = StatusRunning
 	rt.session.LastMode = SessionModeAgent
+	rt.session.Live = true
+	rt.session.NotifyOnWaiting = true
 	rt.mu.Unlock()
+	rt.NotifyInputRunning()
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if len(notes) != 1 || !notes[0].Running || notes[0].MessageID != "" {
+		t.Fatalf("expected initial running card create, got %#v", notes)
+	}
 	defaultLarkMessageRegistry.remember(sess.ID, "bot-card")
 
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow-queue", "bot-card", "", "text", `{"text":"queued question"}`)); err != nil {
 		t.Fatal(err)
+	}
+	notes = waitForNotifierNotes(t, notifier, 3)
+	if len(notes) < 3 {
+		t.Fatalf("queued followup should disable old card and create new running card, got %#v", notes)
+	}
+	disabledOldCard := false
+	newRunningCard := false
+	for _, note := range notes {
+		if note.MessageID == "old-card" && note.Disabled && !note.Running {
+			disabledOldCard = true
+		}
+		if note.MessageID == "" && note.Running && note.Content == RunningNotificationPlaceholder {
+			newRunningCard = true
+		}
+	}
+	if !disabledOldCard || !newRunningCard {
+		t.Fatalf("queued followup should disable previous running card and create latest running card, got %#v", notes)
 	}
 
 	parts := launcher.terminals[0].writeParts()

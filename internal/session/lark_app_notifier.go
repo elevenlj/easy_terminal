@@ -93,7 +93,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	elements = append(elements, larkTerminalTextElement(note.Content))
 	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
 	if !note.Disabled {
-		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.AutoSummaryEnabled, note.MentionModeEnabled)...)
+		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.MentionModeEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
 		}
@@ -150,22 +150,19 @@ func larkTerminalPlainText(content string) string {
 	return content
 }
 
-func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, autoSummaryEnabled bool, mentionModeEnabled bool) []map[string]any {
+func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, mentionModeEnabled bool) []map[string]any {
 	return []map[string]any{
 		larkShortcutActionElement(
 			larkRefreshButtonColumn(sessionID, updateNo),
 			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
-			larkAutoSummaryButtonColumn(sessionID, updateNo, autoSummaryEnabled),
 			larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
+			larkDeleteSessionButtonColumn(sessionID),
 		),
 		larkShortcutActionElement(
 			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
 			larkShortcutButtonColumn("退出agent", "primary", sessionID, "exit_agent"),
 			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
 			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
-		),
-		larkShortcutActionElement(
-			larkDeleteSessionButtonColumn(sessionID),
 		),
 	}
 }
@@ -240,37 +237,6 @@ func larkAutoRefreshButtonColumn(sessionID string, updateNo int, enabled bool) m
 						"type": "callback",
 						"value": map[string]any{
 							"easy_terminal_action": "toggle_auto_refresh",
-							"session_id":           sessionID,
-							"update_no":            updateNo,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func larkAutoSummaryButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
-	label := "自动总结"
-	if enabled {
-		label = "停总结"
-	}
-	return map[string]any{
-		"tag":              "column",
-		"width":            "auto",
-		"vertical_spacing": "8px",
-		"elements": []map[string]any{
-			{
-				"tag":   "button",
-				"type":  "primary",
-				"size":  "tiny",
-				"width": "default",
-				"text":  map[string]any{"tag": "plain_text", "content": label},
-				"behaviors": []map[string]any{
-					{
-						"type": "callback",
-						"value": map[string]any{
-							"easy_terminal_action": "toggle_auto_summary",
 							"session_id":           sessionID,
 							"update_no":            updateNo,
 						},

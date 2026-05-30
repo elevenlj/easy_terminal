@@ -1596,9 +1596,6 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !strings.Contains(content, "自动刷新") || !strings.Contains(content, `"easy_terminal_action":"toggle_auto_refresh"`) {
 		t.Fatalf("card content should include auto refresh button, got %s", content)
 	}
-	if !strings.Contains(content, "自动总结") || !strings.Contains(content, `"easy_terminal_action":"toggle_auto_summary"`) {
-		t.Fatalf("card content should include auto summary button, got %s", content)
-	}
 	if !strings.Contains(content, "艾特模式") || !strings.Contains(content, `"easy_terminal_action":"toggle_mention_mode"`) {
 		t.Fatalf("card content should include mention mode button, got %s", content)
 	}
@@ -1610,19 +1607,18 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	}
 	if !(strings.Index(content, `"content":"刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"自动总结"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"艾特模式"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
+		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出agent"`) &&
 		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
-		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"content":"删除会话"`) &&
 		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
 	}
 	if !strings.Contains(content, "状态") || !strings.Contains(content, `"easy_terminal_action":"custom_shortcut"`) || !strings.Contains(content, "git status") {
 		t.Fatalf("card content should include custom shortcut row, got %s", content)
 	}
-	for _, label := range []string{"刷新", "自动刷新", "自动总结", "艾特模式", "删除会话", "Ctrl-C", "退出agent", "Esc", "Enter"} {
+	for _, label := range []string{"刷新", "自动刷新", "艾特模式", "删除会话", "Ctrl-C", "退出agent", "Esc", "Enter"} {
 		if !strings.Contains(content, `"content":"`+label+`"`) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
@@ -1661,10 +1657,10 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 		}
 		systemRows = append(systemRows, elem)
 	}
-	if len(systemRows) != 3 {
+	if len(systemRows) != 2 {
 		t.Fatalf("system shortcut buttons should use fixed rows, got %#v", systemRows)
 	}
-	wantSystemColumns := []int{4, 4, 1}
+	wantSystemColumns := []int{4, 4}
 	for i, row := range systemRows {
 		if row.FlexMode != "none" || len(row.Columns) != wantSystemColumns[i] {
 			t.Fatalf("system shortcut row %d should use fixed columns, got %#v", i, row)
@@ -1700,19 +1696,6 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	}
 	if !strings.Contains(enabled, "停自动") {
 		t.Fatalf("enabled auto refresh card should show close button, got %s", enabled)
-	}
-	summaryEnabled, err := larkNotificationCardContent(WaitingNotification{
-		SessionID:          "sess-1",
-		Name:               "A",
-		Content:            RunningNotificationPlaceholder,
-		Running:            true,
-		AutoSummaryEnabled: true,
-	}, "ou_1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(summaryEnabled, "停总结") {
-		t.Fatalf("enabled auto summary card should show close button, got %s", summaryEnabled)
 	}
 	mentionModeEnabled, err := larkNotificationCardContent(WaitingNotification{
 		SessionID:          "sess-1",

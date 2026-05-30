@@ -886,6 +886,9 @@ func inputEchoText(line string) (string, bool) {
 	if rest, ok := trimPromptPrefix(trimmed, ">"); ok {
 		return rest, true
 	}
+	if rest, ok := trimPromptPrefix(trimmed, "⏺"); ok {
+		return unwrapAgentActionName(rest), true
+	}
 	for _, prompt := range []string{"%", "$", "#", ">"} {
 		if rest, ok := trimPromptPrefix(trimmed, prompt); ok {
 			return rest, true
@@ -896,6 +899,17 @@ func inputEchoText(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func unwrapAgentActionName(text string) string {
+	text = strings.TrimSpace(text)
+	if idx := strings.Index(text, "("); idx > 0 && strings.HasSuffix(text, ")") {
+		inner := strings.TrimSpace(text[idx+1 : len(text)-1])
+		if inner != "" {
+			return inner
+		}
+	}
+	return text
 }
 
 func isStructuredInputAnchorLine(line string, input string) bool {
@@ -913,6 +927,9 @@ func inputEchoTextRaw(line string) (string, bool) {
 	}
 	if rest, ok := trimPromptPrefixRaw(trimmedLeft, ">"); ok {
 		return rest, true
+	}
+	if rest, ok := trimPromptPrefixRaw(trimmedLeft, "⏺"); ok {
+		return unwrapAgentActionName(rest), true
 	}
 	for _, prompt := range []string{"%", "$", "#", ">"} {
 		if rest, ok := trimPromptPrefixRaw(trimmedLeft, prompt); ok {
