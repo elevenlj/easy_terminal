@@ -30,6 +30,7 @@ const (
 	defaultNotifySnapshotDeadline        = 2500 * time.Millisecond
 	defaultInputBaselineSnapshotDeadline = 2500 * time.Millisecond
 	defaultStartupPresetSettleDelay      = 2 * time.Second
+	defaultStartupInputQueueWindow       = 30 * time.Second
 	defaultNotificationSendAttempts      = 3
 	defaultNotificationSendRetryDelay    = 120 * time.Millisecond
 )
@@ -292,13 +293,14 @@ func (m *Manager) CreateSession(ctx context.Context, name string) (Session, erro
 		return sess, err
 	}
 	rt := &RuntimeSession{
-		manager:      m,
-		session:      sess,
-		terminal:     handle.Terminal(),
-		process:      handle.Process(),
-		subscribers:  make(map[chan RuntimeEvent]runtimeSubscriber),
-		terminalCols: defaultTerminalCols,
-		terminalRows: defaultTerminalRows,
+		manager:         m,
+		session:         sess,
+		terminal:        handle.Terminal(),
+		process:         handle.Process(),
+		subscribers:     make(map[chan RuntimeEvent]runtimeSubscriber),
+		terminalCols:    defaultTerminalCols,
+		terminalRows:    defaultTerminalRows,
+		inputQueueUntil: now.Add(defaultStartupInputQueueWindow),
 	}
 	if m.store != nil {
 		if err := m.store.CreateSession(ctx, sess); err != nil {
@@ -458,6 +460,9 @@ func (m *Manager) RecoverRuntime(ctx context.Context, id string) (*RuntimeSessio
 		terminalCols: defaultTerminalCols,
 		terminalRows: defaultTerminalRows,
 		nextSeq:      time.Now().UnixNano(),
+	}
+	if strings.TrimSpace(sess.LastMode) == SessionModeAgent && strings.TrimSpace(sess.LastAgentResumeCommand) != "" {
+		rt.inputQueueUntil = time.Now().Add(defaultStartupInputQueueWindow)
 	}
 	m.mu.Lock()
 	if existing, exists := m.sessions[id]; exists {
@@ -732,6 +737,7 @@ type RuntimeSession struct {
 	autoRefreshStop             chan struct{}
 	autoSummaryEnabled          bool
 	startupNotifyMode           startupNotifyMode
+	inputQueueUntil             time.Time
 	subscribers                 map[chan RuntimeEvent]runtimeSubscriber
 	snapshotWaiters             []chan struct{}
 	pendingHeadlessSnapshots    int
@@ -764,6 +770,22 @@ func (rt *RuntimeSession) Snapshot() Session {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	return rt.session
+}
+
+func (rt *RuntimeSession) ShouldQueueInputWhileRunning() bool {
+	if rt == nil {
+		return false
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.shouldQueueInputWhileRunningLocked(time.Now())
+}
+
+func (rt *RuntimeSession) shouldQueueInputWhileRunningLocked(now time.Time) bool {
+	return rt.session.Status == StatusRunning &&
+		strings.TrimSpace(rt.session.LastMode) == SessionModeAgent &&
+		!rt.inputQueueUntil.IsZero() &&
+		now.Before(rt.inputQueueUntil)
 }
 
 func (rt *RuntimeSession) OutputSnapshot() []byte {
@@ -973,7 +995,7 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 		source = "unknown"
 	}
 	rt.mu.Lock()
-	if isBrowserSnapshotSource(source) && (rt.pendingHeadlessSnapshots > 0 || rt.hasHeadlessSubscriberLocked()) {
+	if isBrowserSnapshotSource(source) && (rt.pendingHeadlessSnapshots > 0 || (rt.hasHeadlessSubscriberLocked() && !rt.hasRealSubscriberLocked())) {
 		sessionID := rt.session.ID
 		rt.mu.Unlock()
 		log.Printf("visible snapshot ignored session=%s source=%s reason=headless_snapshot_active len=%d", sessionID, source, len(data))
@@ -1187,8 +1209,9 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	sessionID := rt.session.ID
 	hasSubscribers := len(rt.subscribers) > 0
 	headlessSubscribers := rt.headlessSubscriberCountLocked()
+	realSubscribers := rt.realSubscriberCountLocked()
 	canStartHeadless := rt.manager != nil && rt.manager.onBrowserNeeded != nil
-	useHeadless := headlessSubscribers > 0 || canStartHeadless
+	useHeadless := realSubscribers == 0 && (headlessSubscribers > 0 || canStartHeadless)
 	needsBrowser := useHeadless && headlessSubscribers == 0 && canStartHeadless
 	if !hasSubscribers && !needsBrowser {
 		rt.mu.Unlock()
@@ -1202,6 +1225,9 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	}
 	for ch, sub := range rt.subscribers {
 		if useHeadless && !sub.Headless {
+			continue
+		}
+		if !useHeadless && sub.Headless {
 			continue
 		}
 		select {

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -124,6 +125,7 @@ func run() error {
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
 	headless := newHeadlessBrowserManager(cfg.Port)
+	defer headless.StopAll()
 	mgr := session.NewManager(
 		st,
 		session.ShellLauncher{},
@@ -134,6 +136,7 @@ func run() error {
 		),
 		session.WithAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs)*time.Millisecond),
 		session.WithBrowserNeeded(headless.Ensure),
+		session.WithBrowserActive(headless.Stop),
 		session.WithBrowserStopped(headless.Stop),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 		session.WithRecoveryBaseDir(filepath.Join(dataDir, "data", "sessions")),
@@ -163,7 +166,30 @@ func run() error {
 	srv := httpapi.NewServer(mgr, uploadsDir, configSvc)
 	addr := ":" + cfg.Port
 	log.Printf("easy_terminal listening on http://localhost%s", addr)
-	return http.ListenAndServe(addr, srv.Handler())
+	httpSrv := &http.Server{Addr: addr, Handler: srv.Handler()}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpSrv.ListenAndServe()
+	}()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, interruptSignals()...)
+	defer signal.Stop(sigCh)
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case sig := <-sigCh:
+		log.Printf("easy_terminal stopping on signal %s", sig)
+		headless.StopAll()
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := httpSrv.Shutdown(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
 }
 
 type startupOptions struct {
@@ -484,6 +510,7 @@ type headlessBrowserManager struct {
 	port     string
 	mu       sync.Mutex
 	sessions map[string]*headlessBrowserSession
+	starting map[string]struct{}
 }
 
 type headlessBrowserSession struct {
@@ -493,7 +520,11 @@ type headlessBrowserSession struct {
 }
 
 func newHeadlessBrowserManager(port string) *headlessBrowserManager {
-	return &headlessBrowserManager{port: port, sessions: make(map[string]*headlessBrowserSession)}
+	return &headlessBrowserManager{
+		port:     port,
+		sessions: make(map[string]*headlessBrowserSession),
+		starting: make(map[string]struct{}),
+	}
 }
 
 func (m *headlessBrowserManager) Ensure(sessionID string) {
@@ -505,7 +536,21 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 		m.mu.Unlock()
 		return
 	}
+	if _, ok := m.starting[sessionID]; ok {
+		m.mu.Unlock()
+		return
+	}
+	m.starting[sessionID] = struct{}{}
 	m.mu.Unlock()
+	started := false
+	defer func() {
+		if started {
+			return
+		}
+		m.mu.Lock()
+		delete(m.starting, sessionID)
+		m.mu.Unlock()
+	}()
 
 	chrome := findChrome()
 	if chrome == "" {
@@ -519,14 +564,23 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 	}
 	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID) + "&headless=1"
 	cmd := exec.Command(chrome, headlessChromeArgs(profile, pageURL)...)
+	configureHeadlessCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
 		log.Printf("headless browser start failed: %v", err)
 		return
 	}
 	m.mu.Lock()
+	delete(m.starting, sessionID)
+	if existing := m.sessions[sessionID]; existing != nil && existing.cmd != nil && existing.cmd.ProcessState == nil {
+		m.mu.Unlock()
+		terminateHeadlessProcess(cmd)
+		_ = os.RemoveAll(profile)
+		return
+	}
 	m.sessions[sessionID] = &headlessBrowserSession{cmd: cmd, profile: profile, started: time.Now()}
 	m.mu.Unlock()
+	started = true
 	log.Printf("headless browser started for terminal snapshots (pid=%d, session=%s)", cmd.Process.Pid, sessionID)
 	go func() {
 		if err := cmd.Wait(); err != nil {
@@ -555,7 +609,22 @@ func (m *headlessBrowserManager) Stop(sessionID string) {
 		return
 	}
 	log.Printf("headless browser stopped (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
-	_ = sess.cmd.Process.Kill()
+	terminateHeadlessProcess(sess.cmd)
+}
+
+func (m *headlessBrowserManager) StopAll() {
+	m.mu.Lock()
+	sessions := m.sessions
+	m.sessions = make(map[string]*headlessBrowserSession)
+	m.starting = make(map[string]struct{})
+	m.mu.Unlock()
+	for sessionID, sess := range sessions {
+		if sess == nil || sess.cmd == nil || sess.cmd.Process == nil || sess.cmd.ProcessState != nil {
+			continue
+		}
+		log.Printf("headless browser stopped (pid=%d, session=%s)", sess.cmd.Process.Pid, sessionID)
+		terminateHeadlessProcess(sess.cmd)
+	}
 }
 
 func headlessChromeArgs(profile, pageURL string) []string {

@@ -1,6 +1,6 @@
 {
   "name": "@lijuneleven/easy-terminal",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "Local web terminal with Feishu remote session control.",
   "license": "MIT",
   "bin": {

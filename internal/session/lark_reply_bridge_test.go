@@ -1062,7 +1062,7 @@ func TestLarkReplyBridgeFollowupCreatesRunningCard(t *testing.T) {
 	}
 }
 
-func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
+func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunningDuringStartupWindow(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
 	notifier := &recordingNotifier{createMessageIDs: []string{"old-card", "new-card"}}
@@ -1082,6 +1082,7 @@ func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
 	rt.session.LastMode = SessionModeAgent
 	rt.session.Live = true
 	rt.session.NotifyOnWaiting = true
+	rt.inputQueueUntil = time.Now().Add(time.Minute)
 	rt.mu.Unlock()
 	rt.NotifyInputRunning()
 	notes := waitForNotifierNotes(t, notifier, 1)
@@ -1120,6 +1121,18 @@ func TestLarkReplyBridgeQueuesFollowupWhileRuntimeRunning(t *testing.T) {
 	parts = launcher.terminals[0].writeParts()
 	if !lastSubmittedWrite(parts, "queued question") {
 		t.Fatalf("queued followup should submit after notification, got %#v", parts)
+	}
+
+	rt.mu.Lock()
+	rt.session.Status = StatusRunning
+	rt.inputQueueUntil = time.Now().Add(-time.Second)
+	rt.mu.Unlock()
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-follow-direct", "bot-card", "", "text", `{"text":"direct question"}`)); err != nil {
+		t.Fatal(err)
+	}
+	parts = launcher.terminals[0].writeParts()
+	if !lastSubmittedWrite(parts, "direct question") {
+		t.Fatalf("running followup after startup window should be written immediately, got %#v", parts)
 	}
 }
 

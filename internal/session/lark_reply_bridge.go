@@ -913,8 +913,7 @@ func (b *LarkReplyBridge) enqueueInputIfRuntimeBusy(rt *RuntimeSession, sessionI
 	if rt == nil || sessionID == "" || len(parts) == 0 {
 		return false
 	}
-	snapshot := rt.Snapshot()
-	if snapshot.Status != StatusRunning || snapshot.LastMode != SessionModeAgent {
+	if !rt.ShouldQueueInputWhileRunning() {
 		return false
 	}
 	if structuredInputNumericOnlyRE.MatchString(strings.TrimSpace(parts[0])) {

@@ -2139,7 +2139,7 @@ func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
 	}
 }
 
-func TestRequestFreshSnapshotPrefersHeadlessOverRealBrowser(t *testing.T) {
+func TestRequestFreshSnapshotPrefersRealBrowserOverHeadless(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:     NewManager(nil, nil),
 		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
@@ -2156,23 +2156,23 @@ func TestRequestFreshSnapshotPrefersHeadlessOverRealBrowser(t *testing.T) {
 	}()
 
 	select {
-	case ev := <-headlessCh:
+	case ev := <-realCh:
 		if ev.Type != RuntimeEventSnapshotRequest {
 			t.Fatalf("event type = %q, want snapshot request", ev.Type)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected headless snapshot request")
+		t.Fatal("expected real browser snapshot request")
 	}
 	select {
-	case ev := <-realCh:
-		t.Fatalf("real browser should not receive notification snapshot request while headless is active: %#v", ev)
+	case ev := <-headlessCh:
+		t.Fatalf("headless browser should not receive notification snapshot request while a real browser is active: %#v", ev)
 	default:
 	}
-	rt.SetVisibleSnapshotWithSource("fresh from headless", "headless:buffer")
+	rt.SetVisibleSnapshotWithSource("fresh from browser", "browser:buffer")
 	select {
 	case fresh := <-done:
 		if !fresh {
-			t.Fatal("request should report a fresh headless snapshot")
+			t.Fatal("request should report a fresh browser snapshot")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("snapshot request did not finish")
@@ -2186,8 +2186,6 @@ func TestBrowserSnapshotIgnoredWhenHeadlessActive(t *testing.T) {
 		visibleSnapshot: "headless baseline",
 		subscribers:     make(map[chan RuntimeEvent]runtimeSubscriber),
 	}
-	_, cancel := rt.SubscribeWithMode(false)
-	defer cancel()
 	_, headlessCancel := rt.SubscribeWithMode(true)
 	defer headlessCancel()
 
@@ -2247,7 +2245,7 @@ func TestResizeBroadcastsTerminalSizeToHeadlessOnly(t *testing.T) {
 	}
 }
 
-func TestRequestFreshSnapshotStartsHeadlessInsteadOfUsingRealBrowser(t *testing.T) {
+func TestRequestFreshSnapshotUsesRealBrowserInsteadOfStartingHeadless(t *testing.T) {
 	needed := make(chan string, 1)
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil, WithBrowserNeeded(func(sessionID string) {
@@ -2265,22 +2263,23 @@ func TestRequestFreshSnapshotStartsHeadlessInsteadOfUsingRealBrowser(t *testing.
 	}()
 
 	select {
-	case got := <-needed:
-		if got != "sess-1" {
-			t.Fatalf("headless session = %q, want sess-1", got)
+	case ev := <-realCh:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("event type = %q, want snapshot request", ev.Type)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected headless startup request")
+		t.Fatal("expected real browser snapshot request")
 	}
 	select {
-	case ev := <-realCh:
-		t.Fatalf("real browser should not receive snapshot request while headless is required: %#v", ev)
+	case got := <-needed:
+		t.Fatalf("headless should not start while a real browser is active, got session %q", got)
 	default:
 	}
+	rt.SetVisibleSnapshotWithSource("fresh from browser", "browser:buffer")
 	select {
 	case fresh := <-done:
-		if fresh {
-			t.Fatal("request should not become fresh without a headless snapshot")
+		if !fresh {
+			t.Fatal("request should report a fresh browser snapshot")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("snapshot request did not finish")
