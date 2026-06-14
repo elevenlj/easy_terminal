@@ -566,7 +566,7 @@ func TestLarkReplyBridgeImageWaitsForTextBeforeEnter(t *testing.T) {
 	if len(launcher.terminals) != 1 {
 		t.Fatalf("expected one terminal, got %d", len(launcher.terminals))
 	}
-	if got := launcher.terminals[0].writes(); got != "/tmp/lark-image.png " {
+	if got := launcher.terminals[0].writes(); got != " /tmp/lark-image.png " {
 		t.Fatalf("image-only message should write path without enter, got %q", got)
 	}
 	if len(replies) != 1 || replies[0] != "图片已上传成功，等待你的说明后执行。" {
@@ -839,7 +839,7 @@ func TestLarkReplyBridgeMultiImageWithTextSubmitsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if !lastSubmittedWrite(parts, "/tmp/a.png /tmp/b.png 对比这两张图") {
+	if !lastSubmittedWrite(parts, " /tmp/a.png /tmp/b.png 对比这两张图") {
 		t.Fatalf("image+text should submit immediately, got %#v", parts)
 	}
 	if len(replies) != 0 {
@@ -865,7 +865,7 @@ func TestLarkReplyBridgeImageMessageWithTextSubmitsImmediately(t *testing.T) {
 		t.Fatal(err)
 	}
 	parts := launcher.terminals[0].writeParts()
-	if !lastSubmittedWrite(parts, "/tmp/a.png 请分析这张图") {
+	if !lastSubmittedWrite(parts, " /tmp/a.png 请分析这张图") {
 		t.Fatalf("image message with text should submit immediately, got %#v", parts)
 	}
 	if len(replies) != 0 {
@@ -898,7 +898,7 @@ func TestLarkReplyBridgeAttachmentWithTextClearsStalePendingInput(t *testing.T) 
 	if parts[len(parts)-3] != "\x15" {
 		t.Fatalf("new attachment+text should clear stale pending input before submit, got %#v", parts)
 	}
-	if !lastSubmittedWrite(parts, "/tmp/new.png 分析新的") {
+	if !lastSubmittedWrite(parts, " /tmp/new.png 分析新的") {
 		t.Fatalf("new attachment+text should submit only current attachment and text, got %#v", parts)
 	}
 }
@@ -920,7 +920,7 @@ func TestLarkReplyBridgeFileWaitsForTextBeforeEnter(t *testing.T) {
 	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-file", "", "", "file", `{"file_key":"file_a","file_name":"报告.pdf"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if got := launcher.terminals[0].writes(); got != "/tmp/report.pdf " {
+	if got := launcher.terminals[0].writes(); got != " /tmp/report.pdf " {
 		t.Fatalf("file-only message should write path without enter, got %q", got)
 	}
 	if len(replies) != 1 || replies[0] != "文件已上传成功，等待你的说明后执行。" {

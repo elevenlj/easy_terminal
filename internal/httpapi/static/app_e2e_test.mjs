@@ -688,7 +688,7 @@ await elements.terminal.dispatchEvent({
 });
 await Promise.resolve();
 assert.equal(pastePrevented, true, "terminal image paste should prevent default paste handling");
-assert.deepEqual(sentMessages.pop(), { type: "input", data: "/tmp/easy-terminal-test/paste.png " });
+assert.deepEqual(sentMessages.pop(), { type: "input", data: " /tmp/easy-terminal-test/paste.png " });
 
 app.state.sessions = [{
   id: "sess-1",

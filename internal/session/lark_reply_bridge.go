@@ -2192,7 +2192,10 @@ func formatLarkAttachmentInput(files []pendingLarkAttachment) string {
 			paths = append(paths, quoteLarkInputPath(file.Path))
 		}
 	}
-	return strings.Join(paths, " ")
+	if len(paths) == 0 {
+		return ""
+	}
+	return " " + strings.Join(paths, " ")
 }
 
 func quoteLarkInputPath(path string) string {

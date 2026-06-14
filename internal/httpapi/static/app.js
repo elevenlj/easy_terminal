@@ -1934,11 +1934,12 @@ async function handleImagePaste(ev) {
   form.append("file", file, file.name || "paste.png");
   form.append("mime_type", file.type);
   const res = await api(`/api/sessions/${state.active}/uploads`, { method: "POST", body: form });
+  const uploadedPathInput = ` ${res.path}`;
   const target = ev.target;
   if (target === $("composer-input")) {
-    $("composer-input").value += `${res.path}\n`;
+    $("composer-input").value += `${uploadedPathInput}\n`;
   } else {
-    sendWS({ type: "input", data: `${res.path} ` });
+    sendWS({ type: "input", data: `${uploadedPathInput} ` });
     state.term?.focus?.();
   }
 }
