@@ -2286,6 +2286,68 @@ func TestRequestFreshSnapshotUsesRealBrowserInsteadOfStartingHeadless(t *testing
 	}
 }
 
+func TestRequestFreshSnapshotFallsBackToHeadlessWhenRealBrowserStalls(t *testing.T) {
+	events := make(chan string, 2)
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil,
+			WithBrowserStopped(func(sessionID string) {
+				events <- "stop:" + sessionID
+			}),
+			WithBrowserNeeded(func(sessionID string) {
+				events <- "start:" + sessionID
+			}),
+		),
+		session:     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	realCh, realCancel := rt.SubscribeWithMode(false)
+	defer realCancel()
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- rt.RequestFreshSnapshot(time.Second)
+	}()
+
+	select {
+	case ev := <-realCh:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("event type = %q, want snapshot request", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected real browser snapshot request")
+	}
+	for _, expected := range []string{"stop:sess-1", "start:sess-1"} {
+		select {
+		case got := <-events:
+			if got != expected {
+				t.Fatalf("browser event = %q, want %q", got, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("expected browser event %q", expected)
+		}
+	}
+
+	headlessCh, headlessCancel := rt.SubscribeWithMode(true)
+	defer headlessCancel()
+	select {
+	case ev := <-headlessCh:
+		if ev.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("headless event type = %q, want snapshot request", ev.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected headless snapshot request")
+	}
+	rt.SetVisibleSnapshotWithSource("fresh from headless", "headless:buffer")
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("request should report a fresh headless snapshot")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
 func TestRequestFreshSnapshotRestartsStaleHeadlessWhenNoSubscriber(t *testing.T) {
 	events := make(chan string, 2)
 	rt := &RuntimeSession{
@@ -2426,6 +2488,32 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	}
 	if notes[0].Content != "• 你想查哪个城市的天气？例如：上海、北京。" {
 		t.Fatalf("unexpected retry notification content: %q", notes[0].Content)
+	}
+}
+
+func TestManualRefreshSkipsCodexTUIStatusOnlySnapshot(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil, WithNotifier(notifier)),
+		session: Session{ID: "sess-1", Name: "减肥", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+	}
+	rt.MarkInputActivity("你好\r")
+	rt.mu.Lock()
+	rt.session.Status = StatusWaiting
+	rt.mu.Unlock()
+	rt.SetVisibleSnapshot(strings.Join([]string{
+		"› 你好",
+		"• Working (1s • esc to interrupt)",
+		"1 background terminal running · /ps to view · /stop to close",
+		"› Run /review on my current changes",
+		"gpt-5.5 xhigh fast · ~/Easy_Terminal_Workspace/减肥",
+	}, "\n"))
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err == nil {
+		t.Fatal("manual refresh should reject status-only snapshot")
+	}
+	if got := notifier.count(); got != 0 {
+		t.Fatalf("status-only manual refresh should not send notification, got %d", got)
 	}
 }
 

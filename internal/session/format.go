@@ -1113,6 +1113,9 @@ func isTransientStatusLine(line string) bool {
 	lower := strings.ToLower(line)
 	return strings.Contains(lower, "working (") ||
 		strings.Contains(lower, "esc to interrupt") ||
+		(strings.Contains(lower, "background terminal") && strings.Contains(lower, "running")) ||
+		strings.Contains(lower, "/ps to view") ||
+		strings.Contains(lower, "/stop to close") ||
 		strings.Contains(lower, "falling back from websockets") ||
 		strings.Contains(lower, "stream disconnected before completion")
 }
@@ -1186,7 +1189,7 @@ func isInputEchoLine(line string, input string) bool {
 
 func isPromptStatusLine(line string) bool {
 	lower := strings.ToLower(line)
-	return strings.HasPrefix(lower, "gpt-") && strings.Contains(lower, "medium") && strings.Contains(line, "~")
+	return strings.HasPrefix(lower, "gpt-") && strings.Contains(line, "~")
 }
 
 func isCodexSuggestionLine(line string) bool {

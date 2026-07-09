@@ -300,6 +300,19 @@ func TestNotifyContentNeedsMoreSnapshotForInputOnlyOrTransientOnly(t *testing.T)
 	}
 }
 
+func TestPickNotifyContentDropsCodexTUIStatusOnlySnapshot(t *testing.T) {
+	visible := strings.Join([]string{
+		"› 你好",
+		"• Working (1s • esc to interrupt)",
+		"1 background terminal running · /ps to view · /stop to close",
+		"› Run /review on my current changes",
+		"gpt-5.5 xhigh fast · ~/Easy_Terminal_Workspace/减肥",
+	}, "\n")
+	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "你好") {
+		t.Fatalf("TUI status-only snapshot should wait for real reply")
+	}
+}
+
 func TestPickNotifyContentSanitizesEmail(t *testing.T) {
 	got := PickNotifyContent("contact me@example.com", "", nil, "")
 	if strings.Contains(got, "me@example.com") || !strings.Contains(got, "[email]") {

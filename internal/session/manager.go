@@ -1199,11 +1199,41 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	if timeout <= 0 {
 		return false
 	}
+	primaryTimeout := timeout
+	allowHeadlessFallback := false
+	rt.mu.Lock()
+	if rt.session.Live && rt.realSubscriberCountLocked() > 0 && rt.manager != nil && rt.manager.onBrowserNeeded != nil {
+		allowHeadlessFallback = true
+		if timeout >= 300*time.Millisecond {
+			primaryTimeout = minDuration(timeout/2, 500*time.Millisecond)
+		}
+	}
+	rt.mu.Unlock()
+	fresh, attempted := rt.requestFreshSnapshotAttempt(primaryTimeout, false)
+	if fresh || !attempted || !allowHeadlessFallback {
+		return fresh
+	}
+	fallbackTimeout := timeout - primaryTimeout
+	if fallbackTimeout < timeout {
+		fallbackTimeout = timeout
+	}
+	fallbackTimeout = minDuration(fallbackTimeout, defaultNotifySnapshotDeadline)
+	if fallbackTimeout <= 0 {
+		return false
+	}
+	fresh, _ = rt.requestFreshSnapshotAttempt(fallbackTimeout, true)
+	return fresh
+}
+
+func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, forceHeadless bool) (bool, bool) {
+	if timeout <= 0 {
+		return false, false
+	}
 	headlessRequest := false
 	rt.mu.Lock()
 	if !rt.session.Live {
 		rt.mu.Unlock()
-		return false
+		return false, false
 	}
 	before := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
@@ -1211,11 +1241,11 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	headlessSubscribers := rt.headlessSubscriberCountLocked()
 	realSubscribers := rt.realSubscriberCountLocked()
 	canStartHeadless := rt.manager != nil && rt.manager.onBrowserNeeded != nil
-	useHeadless := realSubscribers == 0 && (headlessSubscribers > 0 || canStartHeadless)
+	useHeadless := (forceHeadless && (headlessSubscribers > 0 || canStartHeadless)) || (realSubscribers == 0 && (headlessSubscribers > 0 || canStartHeadless))
 	needsBrowser := useHeadless && headlessSubscribers == 0 && canStartHeadless
 	if !hasSubscribers && !needsBrowser {
 		rt.mu.Unlock()
-		return false
+		return false, false
 	}
 	waiter := make(chan struct{})
 	rt.snapshotWaiters = append(rt.snapshotWaiters, waiter)
@@ -1255,7 +1285,7 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	headlessSubscriberCount := rt.headlessSubscriberCountLocked()
 	rt.mu.Unlock()
 	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d real_subscribers=%d headless_subscribers=%d needed_browser=%v headless_request=%v timeout=%s", sessionID, fresh, subscriberCount, realSubscriberCount, headlessSubscriberCount, needsBrowser, useHeadless, timeout)
-	return fresh
+	return fresh, true
 }
 
 func (rt *RuntimeSession) hasRealSubscriberLocked() bool {
@@ -1534,6 +1564,7 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		content = "当前轮暂无内容"
 	}
 	rt.mu.Lock()
+	lastInputText := rt.lastInputText
 	if !rt.session.Live || !rt.session.NotifyOnWaiting {
 		rt.mu.Unlock()
 		return errors.New("notification is not enabled")
@@ -1541,6 +1572,10 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if rt.notificationMessageFrozenLocked(messageID) {
 		rt.mu.Unlock()
 		return errors.New("notification message is frozen")
+	}
+	if strings.TrimSpace(lastInputText) != "" && !hasReplyLine(content, lastInputText) {
+		rt.mu.Unlock()
+		return errors.New("current round has no reply content")
 	}
 	running := rt.session.Status == StatusRunning
 	updateNo := rt.notificationUpdateNo

@@ -705,6 +705,15 @@ func isLarkGroupChatType(chatType string) bool {
 	}
 }
 
+func isLarkDirectChatType(chatType string) bool {
+	switch strings.ToLower(strings.TrimSpace(chatType)) {
+	case "p2p", "private":
+		return true
+	default:
+		return false
+	}
+}
+
 func isUnsupportedLarkForwardedCard(messageType string) bool {
 	return messageType == "interactive"
 }
@@ -876,7 +885,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		return sessionID, nil
 	}
 	if sessionID == "" {
-		s, err := b.createLarkSessionForMessage(ctx, "lark-session", routeCtx)
+		s, err := b.createImplicitLarkSessionForMessage(ctx, routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -934,7 +943,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	}
 	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType)
 	if sessionID == "" {
-		s, err := b.createLarkSessionForMessage(ctx, "lark-session", routeCtx)
+		s, err := b.createImplicitLarkSessionForMessage(ctx, routeCtx)
 		if err != nil {
 			return "", err
 		}
@@ -1008,6 +1017,35 @@ func (b *LarkReplyBridge) createLarkSession(ctx context.Context, name string) (S
 		return s, err
 	}
 	return s, nil
+}
+
+func (b *LarkReplyBridge) createImplicitLarkSessionForMessage(ctx context.Context, routeCtx larkRouteContext) (Session, error) {
+	if routeCtx.ChatID != "" && isLarkDirectChatType(routeCtx.ChatType) {
+		return b.createDirectBotSessionForMessage(ctx, routeCtx)
+	}
+	return b.createLarkSessionForMessage(ctx, "lark-session", routeCtx)
+}
+
+func (b *LarkReplyBridge) createDirectBotSessionForMessage(ctx context.Context, routeCtx larkRouteContext) (Session, error) {
+	name := "机器人会话"
+	b.mu.Lock()
+	if strings.TrimSpace(b.defaultStartSessionName) != "" {
+		name = b.defaultStartSessionName
+	}
+	b.mu.Unlock()
+	s, err := b.createLarkSession(ctx, name)
+	if err != nil {
+		return s, err
+	}
+	if rt, ok := b.manager.GetRuntime(s.ID); ok {
+		rt.SetNotificationMentionOpenID(routeCtx.SenderOpenID)
+	}
+	updated, err := b.bindSessionToLarkChat(ctx, s, routeCtx.ChatID)
+	if err != nil {
+		return updated, err
+	}
+	log.Printf("lark reply bridge bound direct bot chat session=%s chat=%s", updated.ID, routeCtx.ChatID)
+	return b.enableLarkSessionNotifications(ctx, updated)
 }
 
 func (b *LarkReplyBridge) createLarkSessionForMessage(ctx context.Context, name string, routeCtx larkRouteContext) (Session, error) {
@@ -1901,6 +1939,9 @@ func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, 
 		return m
 	}
 	if chatID != "" && isLarkGroupChatType(chatType) {
+		return ""
+	}
+	if chatID != "" && isLarkDirectChatType(chatType) {
 		return ""
 	}
 	return defaultLarkMessageRegistry.latestNotifiedSessionID()

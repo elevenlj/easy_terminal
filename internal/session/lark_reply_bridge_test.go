@@ -418,6 +418,57 @@ func TestLarkReplyBridgeMentionModeDoesNotFilterDirectChat(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeDirectBotChatDoesNotRouteToLatestSession(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+
+	latest, err := manager.CreateSession(context.Background(), "Latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultLarkMessageRegistry.rememberLatest(latest.ID)
+
+	err = bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-direct-bot", "", "", "text", `{"text":"pwd"}`, "p2p", "oc-direct-bot", "ou-user"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 2 {
+		t.Fatalf("direct bot chat should create its own session, terminal count=%d", len(launcher.terminals))
+	}
+	if got := launcher.terminals[0].writes(); strings.Contains(got, PrepareStructuredInput("pwd")) {
+		t.Fatalf("latest session should not receive direct bot input, got %q", got)
+	}
+	if got := launcher.terminals[1].writes(); !strings.Contains(got, PrepareStructuredInput("pwd")) {
+		t.Fatalf("direct bot session should receive input, got %q", got)
+	}
+	if got, ok := defaultLarkMessageRegistry.lookupChat("oc-direct-bot"); !ok || got == "" || got == latest.ID {
+		t.Fatalf("direct bot chat should bind to its own session, got %q,%v latest=%s", got, ok, latest.ID)
+	}
+}
+
+func TestLarkReplyBridgeDirectBotChatReusesOwnSession(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-direct-bot-1", "", "", "text", `{"text":"pwd"}`, "p2p", "oc-direct-bot", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2MessageWithChat("m-direct-bot-2", "", "", "text", `{"text":"whoami"}`, "p2p", "oc-direct-bot", "ou-user")); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 {
+		t.Fatalf("direct bot chat should reuse bound session, terminal count=%d", len(launcher.terminals))
+	}
+	got := launcher.terminals[0].writes()
+	if !strings.Contains(got, PrepareStructuredInput("pwd")) || !strings.Contains(got, PrepareStructuredInput("whoami")) {
+		t.Fatalf("direct bot session should receive both inputs, got %q", got)
+	}
+}
+
 func TestLarkReplyBridgeP1MentionModeUsesBotMentionFlag(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}
