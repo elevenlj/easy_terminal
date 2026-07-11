@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"unicode"
+	"unicode/utf8"
 )
 
 var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
@@ -156,10 +157,16 @@ func applyConfiguredLarkNotifyBlockFilters(text string, patterns []larkNotifyDro
 func splitLarkNotifyBlocks(lines []string) [][]string {
 	blocks := make([][]string, 0, len(lines))
 	var current []string
+	currentUsesMarkerBoundary := false
 	for _, line := range lines {
-		if startsLarkNotifyBlock(line) && len(current) > 0 {
+		markerBoundary := startsLarkNotifyMarkerBlock(line)
+		startsNext := markerBoundary || (!currentUsesMarkerBoundary && startsLarkNotifyBlock(line))
+		if startsNext && len(current) > 0 {
 			blocks = append(blocks, current)
 			current = nil
+			currentUsesMarkerBoundary = markerBoundary
+		} else if len(current) == 0 {
+			currentUsesMarkerBoundary = markerBoundary
 		}
 		current = append(current, line)
 	}
@@ -167,6 +174,15 @@ func splitLarkNotifyBlocks(lines []string) [][]string {
 		blocks = append(blocks, current)
 	}
 	return blocks
+}
+
+func startsLarkNotifyMarkerBlock(line string) bool {
+	trimmed := strings.TrimLeftFunc(line, unicode.IsSpace)
+	if trimmed == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(trimmed)
+	return r == '•' || r == '⏺'
 }
 
 func startsLarkNotifyBlock(line string) bool {
@@ -414,10 +430,19 @@ func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot
 	if body == "" {
 		return ""
 	}
+	if isRawLarkNotifyInput(lastInputText) {
+		return strings.TrimSpace(body)
+	}
 	body = trimVisibleText(body)
+	body = dropCodexPromptStatusLines(body)
 	body = applyConfiguredLarkNotifyFilters(body)
 	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
+}
+
+func isRawLarkNotifyInput(input string) bool {
+	input = strings.TrimSpace(input)
+	return input == "/c" || strings.HasPrefix(input, "/c ")
 }
 
 func shouldPreservePreviousNotifyContent(previous string, current string) bool {
@@ -1012,6 +1037,18 @@ func cleanupLarkNotifyText(text string, lastInputText string) string {
 		out = append(out, strings.TrimRight(line, " \t"))
 	}
 	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func dropCodexPromptStatusLines(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if isPromptStatusLine(strings.TrimSpace(line)) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
 }
 
 func restoreWrappedInputEcho(text string, lastInputText string) string {

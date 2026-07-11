@@ -198,6 +198,28 @@ func TestRecoverRuntimeRestoresAgentCommand(t *testing.T) {
 	}
 }
 
+func TestRecoveryEnvironmentExportsAgentTurnHookCredentials(t *testing.T) {
+	terminal := &recordingTerminal{readCh: make(chan []byte)}
+	manager := NewManager(nil, nil, WithAgentTurnHookURL("http://127.0.0.1:8001/"))
+	rt := &RuntimeSession{
+		manager:  manager,
+		terminal: terminal,
+		session:  Session{ID: "sess-9", RecoveryKey: "secret-token"},
+	}
+
+	rt.runRecoveryEnvironmentSetup()
+	writes := terminal.writes()
+	for _, want := range []string{
+		"EASY_TERMINAL_HOOK_URL='http://127.0.0.1:8001'",
+		"EASY_TERMINAL_SESSION_ID='sess-9'",
+		"EASY_TERMINAL_HOOK_TOKEN='secret-token'",
+	} {
+		if !strings.Contains(writes, want) {
+			t.Fatalf("hook environment missing %q from %q", want, writes)
+		}
+	}
+}
+
 type memoryStore struct {
 	sessions map[string]Session
 }

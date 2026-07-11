@@ -90,11 +90,26 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	if mention && mentionID != "" {
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + mentionID + "></at>"})
 	}
-	elements = append(elements, larkTerminalTextElement(note.Content))
-	elements = append(elements, map[string]any{"tag": "markdown", "content": larkNotificationStatusLine(note)})
+	var interactionElement map[string]any
+	if !note.Disabled && !note.Running {
+		interactionElement = larkTerminalInteractionElement(note.SessionID, note.Interaction)
+	}
+	if interactionElement == nil {
+		elements = append(elements, larkTerminalTextElement(note.Content))
+	} else {
+		if note.Interaction.Kind == TerminalInteractionCodexResume {
+			elements = append(elements, larkTerminalInteractionHeadingElement("选择要恢复的会话"))
+		}
+		elements = append(elements, interactionElement)
+	}
+	if contextElement := larkTerminalAgentContextElement(note.AgentContext); contextElement != nil {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, contextElement)
+	}
 	if !note.Disabled {
 		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.MentionModeEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
+			elements = append(elements, map[string]any{"tag": "hr"})
 			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
 		}
 	}
@@ -109,6 +124,16 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 	}
 	b, err := json.Marshal(card)
 	return string(b), err
+}
+
+func larkTerminalInteractionHeadingElement(title string) map[string]any {
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":     "plain_text",
+			"content": strings.TrimSpace(title),
+		},
+	}
 }
 
 func larkNotificationMentionID(note WaitingNotification, receiveID string) string {
@@ -141,6 +166,143 @@ func larkTerminalTextElement(content string) map[string]any {
 	}
 }
 
+func larkTerminalAgentContextElement(context *TerminalAgentContext) map[string]any {
+	if context == nil || strings.TrimSpace(context.Directory) == "" || strings.TrimSpace(context.Model) == "" {
+		return nil
+	}
+	parts := []string{
+		"目录：" + truncateLarkInteractionText(context.Directory, 140),
+		"模型：" + truncateLarkInteractionText(context.Model, 80),
+	}
+	if reasoning := strings.TrimSpace(context.Reasoning); reasoning != "" {
+		parts = append(parts, "Reasoning："+truncateLarkInteractionText(reasoning, 40))
+	}
+	return map[string]any{
+		"tag": "div",
+		"text": map[string]any{
+			"tag":     "plain_text",
+			"content": strings.Join(parts, " · "),
+		},
+	}
+}
+
+func larkTerminalInteractionElement(sessionID string, interaction *TerminalInteraction) map[string]any {
+	minimumOptions := 2
+	if interaction != nil && interaction.Kind == TerminalInteractionCodexResume {
+		minimumOptions = 1
+	}
+	if interaction == nil || strings.TrimSpace(interaction.ID) == "" || len(interaction.Options) < minimumOptions {
+		return nil
+	}
+	options := make([]map[string]any, 0, len(interaction.Options))
+	initialOption := ""
+	for _, option := range interaction.Options {
+		optionID := strings.TrimSpace(option.ID)
+		label := larkTerminalInteractionOptionLabel(option)
+		if optionID == "" || label == "" {
+			continue
+		}
+		options = append(options, map[string]any{
+			"text":  map[string]any{"tag": "plain_text", "content": label},
+			"value": optionID,
+		})
+		if option.Current || (initialOption == "" && option.Default) {
+			initialOption = optionID
+		}
+	}
+	if len(options) < minimumOptions {
+		return nil
+	}
+	element := map[string]any{
+		"tag":        "select_static",
+		"element_id": interaction.ID,
+		"name":       "easy_terminal_select",
+		"width":      "fill",
+		"placeholder": map[string]any{
+			"tag":     "plain_text",
+			"content": larkTerminalInteractionPlaceholder(interaction),
+		},
+		"options": options,
+		"behaviors": []map[string]any{
+			{
+				"type": "callback",
+				"value": map[string]any{
+					"easy_terminal_action": "terminal_select",
+					"session_id":           sessionID,
+					"interaction_id":       interaction.ID,
+				},
+			},
+		},
+	}
+	if initialOption != "" {
+		element["initial_option"] = initialOption
+	}
+	return element
+}
+
+func larkTerminalInteractionPlaceholder(interaction *TerminalInteraction) string {
+	label := "请选择选项"
+	switch interaction.Kind {
+	case TerminalInteractionCodexModel:
+		label = "请选择模型"
+	case TerminalInteractionCodexReasoning:
+		label = "请选择推理等级"
+	case TerminalInteractionCodexResume:
+		label = "请选择历史会话"
+	}
+	for _, option := range interaction.Options {
+		if option.Current {
+			return truncateLarkInteractionText(label+"（当前："+option.Label+"）", 100)
+		}
+	}
+	for _, option := range interaction.Options {
+		if option.Default {
+			return truncateLarkInteractionText(label+"（默认："+option.Label+"）", 100)
+		}
+	}
+	return label
+}
+
+func larkTerminalInteractionOptionLabel(option TerminalInteractionOption) string {
+	label := strings.TrimSpace(option.Label)
+	if label == "" {
+		return ""
+	}
+	if input := strings.TrimSpace(option.Input); input != "" && isDecimalTerminalInteractionInput(input) {
+		label = input + ". " + label
+	}
+	if option.Current {
+		label += "（当前）"
+	} else if option.Default {
+		label += "（默认）"
+	}
+	return truncateLarkInteractionText(label, 100)
+}
+
+func isDecimalTerminalInteractionInput(input string) bool {
+	if input == "" {
+		return false
+	}
+	for _, r := range input {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func truncateLarkInteractionText(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if maxRunes <= 0 || len(runes) <= maxRunes {
+		return text
+	}
+	if maxRunes == 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
+}
+
 func larkTerminalPlainText(content string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
@@ -152,17 +314,15 @@ func larkTerminalPlainText(content string) string {
 
 func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, mentionModeEnabled bool) []map[string]any {
 	return []map[string]any{
-		larkShortcutActionElement(
+		larkFlowShortcutActionElement(
 			larkRefreshButtonColumn(sessionID, updateNo),
 			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
 			larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
+			larkShortcutButtonColumn("Ctrl-C", "default", sessionID, "ctrl_c"),
+			larkShortcutButtonColumn("Esc", "default", sessionID, "esc"),
+			larkShortcutButtonColumn("Enter", "default", sessionID, "enter"),
+			larkShortcutButtonColumn("退出agent", "default", sessionID, "exit_agent"),
 			larkDeleteSessionButtonColumn(sessionID),
-		),
-		larkShortcutActionElement(
-			larkShortcutButtonColumn("Ctrl-C", "primary", sessionID, "ctrl_c"),
-			larkShortcutButtonColumn("退出agent", "primary", sessionID, "exit_agent"),
-			larkShortcutButtonColumn("Esc", "primary", sessionID, "esc"),
-			larkShortcutButtonColumn("Enter", "primary", sessionID, "enter"),
 		),
 	}
 }
@@ -197,7 +357,7 @@ func larkMentionModeButtonColumn(sessionID string, updateNo int, enabled bool) m
 		"elements": []map[string]any{
 			{
 				"tag":   "button",
-				"type":  "primary",
+				"type":  "default",
 				"size":  "tiny",
 				"width": "default",
 				"text":  map[string]any{"tag": "plain_text", "content": label},
@@ -228,7 +388,7 @@ func larkAutoRefreshButtonColumn(sessionID string, updateNo int, enabled bool) m
 		"elements": []map[string]any{
 			{
 				"tag":   "button",
-				"type":  "primary",
+				"type":  "default",
 				"size":  "tiny",
 				"width": "default",
 				"text":  map[string]any{"tag": "plain_text", "content": label},
@@ -340,15 +500,7 @@ func larkRefreshButtonColumn(sessionID string, updateNo int) map[string]any {
 }
 
 func larkCustomShortcutActionElements(sessionID string, shortcuts []LarkCustomShortcut) []map[string]any {
-	rows := make([]map[string]any, 0, (len(shortcuts)+larkCustomShortcutButtonsPerRow-1)/larkCustomShortcutButtonsPerRow)
-	for start := 0; start < len(shortcuts); start += larkCustomShortcutButtonsPerRow {
-		end := start + larkCustomShortcutButtonsPerRow
-		if end > len(shortcuts) {
-			end = len(shortcuts)
-		}
-		rows = append(rows, larkCustomShortcutActionElement(sessionID, shortcuts[start:end]))
-	}
-	return rows
+	return []map[string]any{larkCustomShortcutActionElement(sessionID, shortcuts)}
 }
 
 func larkCustomShortcutActionElement(sessionID string, shortcuts []LarkCustomShortcut) map[string]any {
@@ -358,7 +510,7 @@ func larkCustomShortcutActionElement(sessionID string, shortcuts []LarkCustomSho
 	}
 	return map[string]any{
 		"tag":                "column_set",
-		"flex_mode":          "none",
+		"flex_mode":          "flow",
 		"horizontal_align":   "left",
 		"horizontal_spacing": "4px",
 		"columns":            columns,
@@ -373,7 +525,7 @@ func larkCustomShortcutButtonColumn(sessionID string, shortcut LarkCustomShortcu
 		"elements": []map[string]any{
 			{
 				"tag":   "button",
-				"type":  "primary",
+				"type":  "default",
 				"size":  "tiny",
 				"width": "default",
 				"text":  map[string]any{"tag": "plain_text", "content": shortcut.Label},
@@ -397,27 +549,6 @@ func larkNotificationTitle(note WaitingNotification) string {
 		return note.Name + "（Running）"
 	}
 	return note.Name
-}
-
-func larkNotificationStatusLine(note WaitingNotification) string {
-	prefix := ""
-	if note.UpdateNo > 0 {
-		prefix = fmt.Sprintf("已更新-%d · ", note.UpdateNo)
-	}
-	if note.Disabled {
-		return prefix + "状态：disabled"
-	}
-	if note.Running {
-		return prefix + `状态：<font color="green">Running</font>` + larkMentionModeStatusSuffix(note.MentionModeEnabled)
-	}
-	return prefix + "状态：Not Running" + larkMentionModeStatusSuffix(note.MentionModeEnabled)
-}
-
-func larkMentionModeStatusSuffix(enabled bool) string {
-	if enabled {
-		return " · 艾特模式：开"
-	}
-	return " · 艾特模式：关"
 }
 
 func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string) (WaitingNotificationResult, error) {
@@ -558,12 +689,10 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 	}
 
 	n.tipMu.Lock()
-	sent = n.tipSent[messageID]
-	if sent == nil {
-		sent = make(map[int]bool)
-		n.tipSent[messageID] = sent
+	if n.tipSent[messageID] == nil {
+		n.tipSent[messageID] = make(map[int]bool)
 	}
-	sent[updateNo] = true
+	n.tipSent[messageID][updateNo] = true
 	n.tipMu.Unlock()
 	return nil
 }
@@ -582,14 +711,9 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 	if receiveID == "" {
 		return nil
 	}
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(receiveIDType).
-		Body(larkim.NewCreateMessageReqBodyBuilder().
-			ReceiveId(receiveID).
-			MsgType("interactive").
-			Content(content).
-			Build()).
-		Build()
+	req := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(
+		larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType("interactive").Content(content).Build(),
+	).Build()
 	resp, err := retryLarkCreateMessage(func() (*larkim.CreateMessageResp, error) {
 		return n.client.Im.V1.Message.Create(context.Background(), req)
 	})
@@ -597,22 +721,21 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 		return err
 	}
 	if !resp.Success() {
-		return fmt.Errorf("lark update tip message API returned code %d: %s", resp.Code, resp.Msg)
+		return fmt.Errorf("lark completion tip message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
 }
 
-func larkUpdateTipCardContent(updateNo int, receiveID string, mention bool) (string, error) {
+func larkUpdateTipCardContent(_ int, receiveID string, mention bool) (string, error) {
 	elements := []map[string]any{}
 	if mention && strings.TrimSpace(receiveID) != "" {
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=" + strings.TrimSpace(receiveID) + "></at>"})
 	}
-	elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": fmt.Sprintf("已更新-%d", updateNo)}}})
-	card := map[string]any{
+	elements = append(elements, map[string]any{"tag": "note", "elements": []map[string]any{{"tag": "plain_text", "content": "任务已完成"}}})
+	b, err := json.Marshal(map[string]any{
 		"config":   map[string]any{"wide_screen_mode": false},
 		"elements": elements,
-	}
-	b, err := json.Marshal(card)
+	})
 	return string(b), err
 }
 

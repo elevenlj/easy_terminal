@@ -146,6 +146,8 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "hook":
+		s.handleAgentHook(w, r, id, parts[2:])
 	case "output":
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -196,6 +198,31 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request, sessionID string, parts []string) {
+	if len(parts) != 1 || parts[0] != "turn-ended" || r.Method != http.MethodPost || s.manager == nil {
+		http.NotFound(w, r)
+		return
+	}
+	token := strings.TrimSpace(r.Header.Get("X-Easy-Terminal-Hook-Token"))
+	if token == "" {
+		const bearerPrefix = "Bearer "
+		authorization := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(authorization, bearerPrefix) {
+			token = strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
+		}
+	}
+	sess, accepted, err := s.manager.CompleteAgentTurn(r.Context(), sessionID, token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err)
+		return
+	}
+	if sess.ID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted, "status": sess.Status}, nil)
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, id string) {

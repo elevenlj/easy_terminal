@@ -24,9 +24,6 @@ func (n *LarkNotifier) NotifyWaiting(note WaitingNotification) (WaitingNotificat
 	}
 	content := larkTerminalPlainText(note.Content)
 	elements := []map[string]any{}
-	if note.UpdateNo > 0 {
-		content += fmt.Sprintf("\n\n已更新-%d", note.UpdateNo)
-	}
 	if n.MentionAll {
 		elements = append(elements, map[string]any{"tag": "markdown", "content": "<at id=all></at>"})
 	}

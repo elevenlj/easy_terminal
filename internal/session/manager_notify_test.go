@@ -32,6 +32,108 @@ func TestWaitingNotificationRequiresReplyContent(t *testing.T) {
 	}
 }
 
+func TestCompleteAgentTurnUsesAuthenticatedHookWithIdleFallback(t *testing.T) {
+	manager := NewManager(nil, nil)
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{
+			ID:            "sess-1",
+			Status:        StatusRunning,
+			Live:          true,
+			RecoveryKey:   "hook-token",
+			LastMode:      SessionModeAgent,
+			LastAgentKind: "codex",
+		},
+	}
+	manager.sessions[rt.session.ID] = rt
+
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "wrong-token"); err == nil || accepted {
+		t.Fatalf("invalid token should be rejected, accepted=%v err=%v", accepted, err)
+	}
+	got, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token")
+	if err != nil || !accepted {
+		t.Fatalf("authenticated hook result accepted=%v err=%v", accepted, err)
+	}
+	if got.Status != StatusWaiting || rt.Snapshot().Status != StatusWaiting || !rt.agentTurnHookVerified {
+		t.Fatalf("hook should complete the Codex turn, session=%#v verified=%v", got, rt.agentTurnHookVerified)
+	}
+
+	rt.HandleOutput([]byte("late terminal output"))
+	if got := rt.Snapshot().Status; got != StatusRunning {
+		t.Fatalf("new output should return hook-enabled Agent to running, got %q", got)
+	}
+	rt.mu.Lock()
+	timer := rt.notifyStableTimer
+	rt.mu.Unlock()
+	if timer == nil {
+		t.Fatal("verified Agent hook should retain the idle completion fallback")
+	}
+}
+
+func TestAgentIdleFallbackDoesNotRecompleteWaitingTurn(t *testing.T) {
+	manager := NewManager(nil, nil)
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{
+			ID:            "sess-1",
+			Status:        StatusWaiting,
+			Live:          true,
+			LastMode:      SessionModeAgent,
+			LastAgentKind: "codex",
+		},
+		agentTurnHookVerified: true,
+		notifyVersion:         7,
+		stateVersion:          9,
+	}
+	rt.mu.Lock()
+	rt.resetAgentIdleCompletionTimerLocked()
+	timer := rt.notifyStableTimer
+	rt.mu.Unlock()
+	if timer != nil {
+		t.Fatal("completed Agent turn must not schedule another completion")
+	}
+	rt.notifyAfterStable(9)
+	if got := rt.Snapshot(); got.Status != StatusWaiting {
+		t.Fatalf("completed Agent turn changed status: %#v", got)
+	}
+	rt.mu.Lock()
+	if rt.notifyVersion != 7 {
+		t.Fatalf("completed Agent turn changed notify version to %d", rt.notifyVersion)
+	}
+	rt.mu.Unlock()
+}
+
+func TestCodexModelMenuImmediatelyWaitsWithoutVerifiedHook(t *testing.T) {
+	manager := NewManager(nil, nil, WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond))
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{
+			ID:            "sess-1",
+			Status:        StatusRunning,
+			Live:          true,
+			LastMode:      SessionModeAgent,
+			LastAgentKind: "codex",
+		},
+		lastInputText: "/model",
+	}
+	rt.SetVisibleSnapshot(strings.Join([]string{
+		"Select Model and Effort",
+		"› 1. gpt-5.6-terra (current)   Frontier model",
+		"  2. gpt-5.5                 Strong model",
+		"Press enter to confirm or esc to go back",
+	}, "\n"))
+
+	if got := rt.Snapshot().Status; got != StatusWaiting {
+		t.Fatalf("model menu should immediately transition to waiting, got %q", got)
+	}
+	rt.mu.Lock()
+	timer := rt.notifyStableTimer
+	rt.mu.Unlock()
+	if timer != nil {
+		t.Fatal("recognized Codex model menu must not wait for the idle timer")
+	}
+}
+
 func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *testing.T) {
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil),
@@ -335,6 +437,12 @@ func TestWaitingNotificationKeepsCodexModelMenusFromVisibleSnapshot(t *testing.T
 	if n.Content != wantModel {
 		t.Fatalf("model menu should preserve visible formatting:\n%q\nwant:\n%q", n.Content, wantModel)
 	}
+	if n.Interaction == nil || n.Interaction.Kind != TerminalInteractionCodexModel || len(n.Interaction.Options) != 2 {
+		t.Fatalf("model menu should include a structured interaction, got %#v", n.Interaction)
+	}
+	if n.AgentContext == nil || n.AgentContext.Directory != "~/project" || n.AgentContext.Model != "gpt-5.5" || n.AgentContext.Reasoning != "Medium" {
+		t.Fatalf("model menu should include the Codex card context, got %#v", n.AgentContext)
+	}
 
 	SetLarkNotifyMaxLines(11)
 	reasoningMenu := strings.Join([]string{
@@ -366,6 +474,9 @@ func TestWaitingNotificationKeepsCodexModelMenusFromVisibleSnapshot(t *testing.T
 	}, "\n")
 	if n.Content != wantReasoning {
 		t.Fatalf("reasoning menu should preserve visible formatting:\n%q\nwant:\n%q", n.Content, wantReasoning)
+	}
+	if n.Interaction == nil || n.Interaction.Kind != TerminalInteractionCodexReasoning || len(n.Interaction.Options) != 4 {
+		t.Fatalf("reasoning menu should include a structured interaction, got %#v", n.Interaction)
 	}
 }
 
@@ -1448,7 +1559,7 @@ func TestRunningTitleUpdateSkipsStaleMessageAfterReplacement(t *testing.T) {
 	}
 }
 
-func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
+func TestLarkNotificationCardContentKeepsSessionTitleWithoutStatusNoise(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
 		Name:      "A",
@@ -1458,14 +1569,14 @@ func TestLarkNotificationCardContentIncludesUpdateNumber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "已更新-2") {
-		t.Fatalf("card content should include update marker, got %s", content)
+	if strings.Contains(content, "已更新-2") || strings.Contains(content, "状态：") {
+		t.Fatalf("card content should hide update and status markers, got %s", content)
 	}
 	if !strings.Contains(content, `"update_no":2`) {
-		t.Fatalf("refresh action should carry current update marker, got %s", content)
+		t.Fatalf("refresh action should still carry its internal update number, got %s", content)
 	}
-	if !strings.Contains(content, "状态：Not Running") {
-		t.Fatalf("card content should include non-running status marker, got %s", content)
+	if !strings.Contains(content, `"content":"A"`) {
+		t.Fatalf("card header should keep the session title, got %s", content)
 	}
 }
 
@@ -1535,7 +1646,7 @@ func TestLarkNotificationCardContentDoesNotWarnOnBufferFallback(t *testing.T) {
 	}
 }
 
-func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
+func TestLarkNotificationCardContentUsesTaskStateInTitleOnly(t *testing.T) {
 	content, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
 		Name:      "A",
@@ -1545,14 +1656,14 @@ func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "A（Running）") {
+	if !strings.Contains(content, `"content":"A（Running）"`) {
 		t.Fatalf("card content should include running title suffix, got %s", content)
 	}
-	if !strings.Contains(content, `状态：\u003cfont color=\"green\"\u003eRunning\u003c/font\u003e`) {
-		t.Fatalf("running card should include green running status text, got %s", content)
+	if strings.Contains(content, "状态：") {
+		t.Fatalf("running card should not duplicate status in the body, got %s", content)
 	}
-	if !strings.Contains(content, `"template":"blue"`) || strings.Contains(content, `"background_style"`) {
-		t.Fatalf("running card should use default header and no body background, got %s", content)
+	if !strings.Contains(content, `"template":"blue"`) || !strings.Contains(content, `"tag":"column_set"`) {
+		t.Fatalf("running card should use default header and native action rows, got %s", content)
 	}
 	stopped, err := larkNotificationCardContent(WaitingNotification{
 		SessionID: "sess-1",
@@ -1563,8 +1674,8 @@ func TestLarkNotificationCardContentIncludesRunningTitleSuffix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stopped, "状态：Not Running") || !strings.Contains(stopped, `"template":"blue"`) || strings.Contains(stopped, `"background_style"`) {
-		t.Fatalf("non-running card should use default header, no body background, and status text, got %s", stopped)
+	if !strings.Contains(stopped, `"content":"A"`) || strings.Contains(stopped, "状态：") || !strings.Contains(stopped, `"template":"blue"`) || !strings.Contains(stopped, `"tag":"column_set"`) {
+		t.Fatalf("completed card should restore the session title without duplicate body status, got %s", stopped)
 	}
 }
 
@@ -1608,10 +1719,10 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if !(strings.Index(content, `"content":"刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"自动刷新"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
 		strings.Index(content, `"content":"艾特模式"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"content":"Ctrl-C"`) &&
-		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"退出agent"`) &&
-		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"Esc"`) &&
+		strings.Index(content, `"content":"Ctrl-C"`) < strings.Index(content, `"content":"Esc"`) &&
 		strings.Index(content, `"content":"Esc"`) < strings.Index(content, `"content":"Enter"`) &&
+		strings.Index(content, `"content":"Enter"`) < strings.Index(content, `"content":"退出agent"`) &&
+		strings.Index(content, `"content":"退出agent"`) < strings.Index(content, `"content":"删除会话"`) &&
 		strings.Index(content, `"content":"删除会话"`) < strings.Index(content, `"easy_terminal_action":"custom_shortcut"`)) {
 		t.Fatalf("refresh button should be first and custom shortcuts below system shortcuts, got %s", content)
 	}
@@ -1623,57 +1734,29 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 			t.Fatalf("card content should include system shortcut %s, got %s", label, content)
 		}
 	}
-	type shortcutBehavior struct {
-		Value struct {
-			Action string `json:"easy_terminal_action"`
-		} `json:"value"`
-	}
-	type shortcutButton struct {
-		Behaviors []shortcutBehavior `json:"behaviors"`
-	}
-	type shortcutColumn struct {
-		Elements []shortcutButton `json:"elements"`
-	}
-	type shortcutElement struct {
-		Tag      string           `json:"tag"`
-		FlexMode string           `json:"flex_mode"`
-		Columns  []shortcutColumn `json:"columns"`
-	}
-	var card struct {
-		Body struct {
-			Elements []shortcutElement `json:"elements"`
-		} `json:"body"`
-	}
+	var card map[string]any
 	if err := json.Unmarshal([]byte(content), &card); err != nil {
 		t.Fatal(err)
 	}
-	systemRows := []shortcutElement{}
-	for _, elem := range card.Body.Elements {
-		if elem.Tag != "column_set" || len(elem.Columns) == 0 || len(elem.Columns[0].Elements) == 0 || len(elem.Columns[0].Elements[0].Behaviors) == 0 {
-			continue
-		}
-		if elem.Columns[0].Elements[0].Behaviors[0].Value.Action == "custom_shortcut" {
-			continue
-		}
-		systemRows = append(systemRows, elem)
+	systemRows := findLarkActionRows(card, "refresh")
+	if len(systemRows) != 1 {
+		t.Fatalf("system shortcut buttons should use one flowing row, got %#v", systemRows)
 	}
-	if len(systemRows) != 2 {
-		t.Fatalf("system shortcut buttons should use fixed rows, got %#v", systemRows)
-	}
-	wantSystemColumns := []int{4, 4}
+	wantSystemColumns := []int{8}
 	for i, row := range systemRows {
-		if row.FlexMode != "none" || len(row.Columns) != wantSystemColumns[i] {
-			t.Fatalf("system shortcut row %d should use fixed columns, got %#v", i, row)
+		columns, _ := row["columns"].([]any)
+		if row["flex_mode"] != "flow" || len(columns) != wantSystemColumns[i] {
+			t.Fatalf("system shortcut row %d should use responsive columns, got %#v", i, row)
 		}
 	}
-	if strings.Count(content, `"type":"primary"`) < 7 {
-		t.Fatalf("system and custom shortcut buttons should use blue primary color, got %s", content)
+	if strings.Count(content, `"type":"primary"`) != 1 || strings.Count(content, `"type":"default"`) < 7 {
+		t.Fatalf("only refresh should be primary while secondary actions stay neutral, got %s", content)
 	}
-	if strings.Contains(content, `"tag":"interactive_container"`) || strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
-		t.Fatalf("custom shortcut actions should use native tiny buttons, got %s", content)
+	if strings.Contains(content, `"border_color":"green"`) || strings.Contains(content, `"background_style":"green"`) {
+		t.Fatalf("custom shortcut actions should use neutral shadow containers, got %s", content)
 	}
-	if !strings.Contains(content, `"content":"状态","tag":"plain_text"`) || !strings.Contains(content, `"type":"primary"`) {
-		t.Fatalf("custom shortcut label should use a blue tiny button, got %s", content)
+	if !strings.Contains(content, `"content":"状态","tag":"plain_text"`) || !strings.Contains(content, `"type":"default"`) {
+		t.Fatalf("custom shortcut label should use a neutral tiny button, got %s", content)
 	}
 	if !strings.Contains(content, `"size":"tiny"`) {
 		t.Fatalf("card shortcut buttons should be small, got %s", content)
@@ -1707,8 +1790,8 @@ func TestLarkNotificationCardContentIncludesShortcutButtons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(mentionModeEnabled, "停艾特") || !strings.Contains(mentionModeEnabled, "艾特模式：开") {
-		t.Fatalf("enabled mention mode card should show close button and status, got %s", mentionModeEnabled)
+	if !strings.Contains(mentionModeEnabled, "停艾特") || strings.Contains(mentionModeEnabled, "艾特模式：开") {
+		t.Fatalf("enabled mention mode card should show the close button without duplicate status text, got %s", mentionModeEnabled)
 	}
 }
 
@@ -1723,10 +1806,10 @@ func TestLarkNotificationCardContentDisabledRemovesButtons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(content, "状态：disabled") {
-		t.Fatalf("disabled card should include disabled status, got %s", content)
+	if strings.Contains(content, "状态：") {
+		t.Fatalf("disabled card should not include duplicate status text, got %s", content)
 	}
-	for _, forbidden := range []string{`"tag":"button"`, `"easy_terminal_action"`, `"custom_shortcut"`, `"content":"刷新"`, `"content":"Ctrl-C"`, "A（Running）"} {
+	for _, forbidden := range []string{`"tag":"button"`, `"easy_terminal_action"`, `"custom_shortcut"`, `"content":"刷新"`, `"content":"Ctrl-C"`, "任务执行中"} {
 		if strings.Contains(content, forbidden) {
 			t.Fatalf("disabled card should remove buttons and running title, found %q in %s", forbidden, content)
 		}
@@ -1753,63 +1836,72 @@ func TestLarkNotificationCardContentWrapsCustomShortcutButtons(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	type behavior struct {
-		Value struct {
-			Action string `json:"easy_terminal_action"`
-		} `json:"value"`
-	}
-	type button struct {
-		Text struct {
-			Content string `json:"content"`
-		} `json:"text"`
-		Behaviors []behavior `json:"behaviors"`
-	}
-	type column struct {
-		Elements []button `json:"elements"`
-	}
-	type element struct {
-		Tag     string   `json:"tag"`
-		Columns []column `json:"columns"`
-	}
-	var card struct {
-		Body struct {
-			Elements []element `json:"elements"`
-		} `json:"body"`
-	}
+	var card map[string]any
 	if err := json.Unmarshal([]byte(content), &card); err != nil {
 		t.Fatal(err)
 	}
-
-	customRows := []element{}
-	for _, elem := range card.Body.Elements {
-		if elem.Tag != "column_set" {
-			continue
-		}
-		if len(elem.Columns) == 0 || len(elem.Columns[0].Elements) == 0 || len(elem.Columns[0].Elements[0].Behaviors) == 0 {
-			continue
-		}
-		if elem.Columns[0].Elements[0].Behaviors[0].Value.Action == "custom_shortcut" {
-			customRows = append(customRows, elem)
-		}
+	if strings.Contains(content, "系统操作") || strings.Contains(content, "自定义操作") || !strings.Contains(content, `"tag":"hr"`) || strings.Contains(content, `"interactive_container"`) {
+		t.Fatalf("card should use an unlabeled native divider between action groups: %s", content)
 	}
-	if len(customRows) != 3 {
-		t.Fatalf("custom shortcut buttons should wrap into 3 rows, got %#v", customRows)
+	customRows := findLarkActionRows(card, "custom_shortcut")
+	if len(customRows) != 1 {
+		t.Fatalf("custom shortcut buttons should use one flowing row, got %#v", customRows)
 	}
 	var labels []string
 	for _, row := range customRows {
-		if len(row.Columns) > larkCustomShortcutButtonsPerRow {
-			t.Fatalf("custom shortcut row should contain at most %d buttons, got %#v", larkCustomShortcutButtonsPerRow, row)
+		columns, _ := row["columns"].([]any)
+		if row["flex_mode"] != "flow" || len(columns) != len(shortcuts) {
+			t.Fatalf("custom shortcut row should flow all buttons responsively, got %#v", row)
 		}
-		for _, col := range row.Columns {
-			if len(col.Elements) == 0 {
-				t.Fatalf("custom shortcut column should contain a button, got %#v", row)
-			}
-			labels = append(labels, col.Elements[0].Text.Content)
+		for _, rawColumn := range columns {
+			column, _ := rawColumn.(map[string]any)
+			elements, _ := column["elements"].([]any)
+			button, _ := elements[0].(map[string]any)
+			textValue, _ := button["text"].(map[string]any)
+			labels = append(labels, textValue["content"].(string))
 		}
 	}
 	if strings.Join(labels, ",") != "cdx启动,查看状态,拉取更新,运行测试,查看日志,重启服务,构建发布" {
 		t.Fatalf("custom shortcut labels should keep order, got %#v", labels)
 	}
+}
+
+func findLarkActionRows(value any, action string) []map[string]any {
+	var rows []map[string]any
+	var walk func(any)
+	walk = func(value any) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				walk(item)
+			}
+		case map[string]any:
+			if typed["tag"] == "column_set" && strings.Contains(mustJSONForTest(typed), `"easy_terminal_action":"`+action+`"`) {
+				columns, _ := typed["columns"].([]any)
+				if len(columns) > 0 {
+					column, _ := columns[0].(map[string]any)
+					elements, _ := column["elements"].([]any)
+					if len(elements) > 0 {
+						button, _ := elements[0].(map[string]any)
+						if button["tag"] == "button" {
+							rows = append(rows, typed)
+							return
+						}
+					}
+				}
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return rows
+}
+
+func mustJSONForTest(value any) string {
+	b, _ := json.Marshal(value)
+	return string(b)
 }
 
 func TestRefreshNotificationMessageRetriesNotifierFailures(t *testing.T) {
@@ -1863,73 +1955,12 @@ func TestUpdateNotificationRunningRetriesNotifierFailures(t *testing.T) {
 	}
 }
 
-func TestLarkUpdateTipCardContentIsSmallNote(t *testing.T) {
-	content, err := larkUpdateTipCardContent(3, "", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(content, "已更新-3") {
-		t.Fatalf("tip content should include update marker, got %s", content)
-	}
-	if !strings.Contains(content, `"tag":"note"`) {
-		t.Fatalf("tip content should use note element, got %s", content)
-	}
-	if strings.Contains(content, `"header"`) {
-		t.Fatalf("tip content should not include a header, got %s", content)
-	}
-}
-
-func TestLarkUpdateTipCardContentIncludesMentionWhenEnabled(t *testing.T) {
-	content, err := larkUpdateTipCardContent(3, "ou_1", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(content, `\u003cat id=ou_1\u003e\u003c/at\u003e`) {
-		t.Fatalf("tip content should include mention when enabled, got %s", content)
-	}
-	if !strings.Contains(content, "已更新-3") {
-		t.Fatalf("tip content should include update marker, got %s", content)
-	}
-}
-
-func TestLarkUpdateTipSendsEachUpdateNumberOnce(t *testing.T) {
-	notifier := &LarkAppNotifier{}
-	var sent []string
-	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
-		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
-		return nil
-	}
-
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 1, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := notifier.sendUpdateTipOnce("msg-1", "oc_1", 2, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := notifier.sendUpdateTipOnce("msg-2", "oc_2", 1, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	want := []string{"msg-1:oc_1:1", "msg-1:oc_1:2", "msg-2:oc_2:1"}
-	if len(sent) != len(want) {
-		t.Fatalf("sent tips = %#v, want %#v", sent, want)
-	}
-	for i := range want {
-		if sent[i] != want[i] {
-			t.Fatalf("sent tip %d = %q, want %q; all=%#v", i, sent[i], want[i], sent)
-		}
-	}
-}
-
-func TestLarkUpdateWaitingSendsUpdateTip(t *testing.T) {
+func TestLarkUpdateWaitingSendsTaskCompletedTip(t *testing.T) {
 	notifier := &LarkAppNotifier{}
 	notifier.client = fakeLarkSuccessClient(t)
-	var sent []string
-	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
-		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
+	var sent int
+	notifier.tipSender = func(messageID, chatID string, updateNo int) error {
+		sent++
 		return nil
 	}
 
@@ -1938,45 +1969,17 @@ func TestLarkUpdateWaitingSendsUpdateTip(t *testing.T) {
 		Name:      "A",
 		Content:   "updated",
 		MessageID: "msg-1",
-		ChatID:    "oc_1",
 		UpdateNo:  2,
 	}, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.TipSent {
-		t.Fatalf("expected update tip to be sent, got %#v", result)
+	if !result.TipSent || sent != 1 {
+		t.Fatalf("card completion should create one completion-tip message, got result=%#v sent=%d", result, sent)
 	}
-	if len(sent) != 1 || sent[0] != "msg-1:oc_1:2" {
-		t.Fatalf("sent tips = %#v", sent)
-	}
-}
-
-func TestLarkUpdateWaitingSuppressesManualRefreshTip(t *testing.T) {
-	notifier := &LarkAppNotifier{}
-	notifier.client = fakeLarkSuccessClient(t)
-	var sent []string
-	notifier.tipSender = func(messageID string, chatID string, updateNo int) error {
-		sent = append(sent, fmt.Sprintf("%s:%s:%d", messageID, chatID, updateNo))
-		return nil
-	}
-
-	result, err := notifier.updateWaiting(WaitingNotification{
-		SessionID:         "sess-1",
-		Name:              "A",
-		Content:           "updated",
-		MessageID:         "msg-1",
-		UpdateNo:          2,
-		SuppressUpdateTip: true,
-	}, "{}")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.TipSent {
-		t.Fatalf("manual refresh should suppress update tip, got %#v", result)
-	}
-	if len(sent) != 0 {
-		t.Fatalf("manual refresh should not send tip messages, got %#v", sent)
+	content, err := larkUpdateTipCardContent(2, "", false)
+	if err != nil || !strings.Contains(content, `"content":"任务已完成"`) || strings.Contains(content, "已更新") {
+		t.Fatalf("completion tip content is wrong: content=%s err=%v", content, err)
 	}
 }
 

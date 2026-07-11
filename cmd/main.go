@@ -31,8 +31,8 @@ const (
 	defaultLarkSessionChatPrefix           = "ET · "
 	defaultLarkIgnoreMessagePrefix         = "/i"
 	defaultLarkAutoSummaryPrompt           = session.DefaultLarkAutoSummaryPrompt
-	defaultFastWaitingTransitionMs         = 1000
-	defaultConservativeWaitingTransitionMs = 3000
+	defaultFastWaitingTransitionMs         = 500
+	defaultConservativeWaitingTransitionMs = 500
 	defaultLarkAutoRefreshIntervalMs       = 5000
 	defaultLarkNotifyMaxLines              = 200
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
@@ -41,15 +41,16 @@ const (
 var defaultLarkNotifyDropLineRules = session.LarkNotifyDropLineRules{
 	{Title: "空行", Pattern: `^\s*$`},
 	{Title: "横线", Pattern: `^\s*[-‐-‒–—―─━═]{3,}\s*$`},
-	{Pattern: `^(• Ran|• Explored|• Edit|• Edited).*`, Kind: "block_head", Action: "keep_head"},
+	{Title: "Codex 工具执行过程", Pattern: `^\s*[•⏺]\s+(?:Ran|Waited|Explored|Edited?|Wrote|Read|Searched|Listed|Fetched|Viewed|Inspected|Created|Deleted|Moved|Copied|Executed|Called|Opened|Downloaded|Uploaded|Patched|Applied|Bash)\b.*`, Kind: "block_head", Action: "drop_block"},
 	{Pattern: `^(.*)Worked for.*?(─+)$`},
 	{Pattern: `^─{1,}.*`},
-	{Pattern: `^(⏺ Ran|⏺ Explored|⏺ Edit|⏺ Edited|⏺ Wri|⏺ Bash|✶ Generating).*`, Kind: "block_head", Action: "keep_head"},
+	{Pattern: `^\s*✶\s+Generating\b.*`, Kind: "block_head", Action: "drop_block"},
 	{Pattern: `^[╭╮╰╯│─▐▛▜▝▘ ]+$`},
 	{Pattern: `^\s*[▐▛▜▝▘█▙▟▚▞]+\s*$`},
 	{Pattern: `[╭╮╰╯│─]`},
 	{Pattern: `^\s*$`},
 	{Pattern: `^(Welcome back|Tips|What's new|Run |\/usage|\/diff|\/release-notes|deepseek-v4-pro|~\/)`},
+	{Title: "Codex 启动提示与 MCP 错误", Pattern: `^\s*(?:Tip:|⚠ MCP (?:client.*failed to start|startup incomplete)).*`, Kind: "block_head", Action: "drop_block"},
 }
 
 type Config struct {
@@ -140,6 +141,7 @@ func run() error {
 		session.WithBrowserStopped(headless.Stop),
 		session.WithPreStartCommand(cfg.SessionPreStartCommand),
 		session.WithRecoveryBaseDir(filepath.Join(dataDir, "data", "sessions")),
+		session.WithAgentTurnHookURL("http://127.0.0.1:"+cfg.Port),
 		session.WithSessionEnded(func(sessionID string) {
 			headless.Stop(sessionID)
 			_ = os.RemoveAll(filepath.Join(uploadsDir, sessionID))
@@ -256,6 +258,7 @@ func loadConfig(path string) Config {
 	if strings.TrimSpace(cfg.LarkAutoSummaryPrompt) == "" {
 		cfg.LarkAutoSummaryPrompt = defaultLarkAutoSummaryPrompt
 	}
+	cfg.LarkNotifyDropLineRules = mergeRequiredLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules)
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(cfg.LarkSessionChatPrefix)
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
 	session.SetLarkNotifyMergeWrappedLines(cfg.LarkNotifyMergeWrappedLines)
@@ -263,6 +266,44 @@ func loadConfig(path string) Config {
 		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
 	}
 	return cfg
+}
+
+// mergeRequiredLarkNotifyDropLineRules keeps existing user rules while making
+// the Codex tool-output filters available to installations that already had a
+// config.local.json before those defaults were introduced. Required rules are
+// prepended so obsolete keep_head variants cannot override them.
+func mergeRequiredLarkNotifyDropLineRules(current session.LarkNotifyDropLineRules) session.LarkNotifyDropLineRules {
+	required := []session.LarkNotifyDropLineRule{
+		defaultLarkNotifyDropLineRules[2],
+		defaultLarkNotifyDropLineRules[5],
+		defaultLarkNotifyDropLineRules[11],
+	}
+	merged := make([]session.LarkNotifyDropLineRule, 0, len(current)+len(required))
+	existing := current.Rules()
+	for _, requiredRule := range required {
+		found := false
+		for _, rule := range existing {
+			if sameLarkNotifyDropLineRule(rule, requiredRule) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, requiredRule)
+		}
+	}
+	merged = append(merged, existing...)
+	return session.LarkNotifyDropLineRules(merged)
+}
+
+func sameLarkNotifyDropLineRule(left, right session.LarkNotifyDropLineRule) bool {
+	leftRules := session.NormalizeLarkNotifyDropLineRules([]session.LarkNotifyDropLineRule{left})
+	rightRules := session.NormalizeLarkNotifyDropLineRules([]session.LarkNotifyDropLineRule{right})
+	if len(leftRules) != 1 || len(rightRules) != 1 {
+		return false
+	}
+	left, right = leftRules[0], rightRules[0]
+	return left.Pattern == right.Pattern && left.Kind == right.Kind && left.Action == right.Action
 }
 
 func defaultConfig() Config {

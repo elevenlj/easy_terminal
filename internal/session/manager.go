@@ -21,8 +21,8 @@ import (
 const (
 	maxOutputBytes                       = 512 * 1024
 	maxRoundBytes                        = 64 * 1024
-	defaultFastWaitingTransition         = 300 * time.Millisecond
-	defaultConservativeWaitingTransition = 700 * time.Millisecond
+	defaultFastWaitingTransition         = 500 * time.Millisecond
+	defaultConservativeWaitingTransition = 500 * time.Millisecond
 	defaultAutoRefreshInterval           = 5 * time.Second
 	defaultNotificationUpdateCoalesce    = 0
 	defaultNotifyRetryDelay              = time.Second
@@ -72,6 +72,7 @@ type Manager struct {
 	updateCoalesce      time.Duration
 	preStartCommand     string
 	recoveryBaseDir     string
+	agentTurnHookURL    string
 	sessions            map[string]*RuntimeSession
 	onBrowserNeeded     func(string)
 	onBrowserActive     func(string)
@@ -168,6 +169,21 @@ func WithRecoveryBaseDir(dir string) ManagerOption {
 		}
 		m.recoveryBaseDir = dir
 	}
+}
+
+// WithAgentTurnHookURL configures the loopback callback URL inherited by
+// agent processes. Their turn-ended hook uses it to complete a round without
+// relying on terminal output silence.
+func WithAgentTurnHookURL(url string) ManagerOption {
+	return func(m *Manager) {
+		m.agentTurnHookURL = strings.TrimRight(strings.TrimSpace(url), "/")
+	}
+}
+
+func (m *Manager) AgentTurnHookURL() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.agentTurnHookURL
 }
 
 func (m *Manager) SetWaitingTransitionDelays(fast, conservative time.Duration) {
@@ -702,51 +718,55 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 }
 
 type RuntimeSession struct {
-	mu                          sync.Mutex
-	notificationPatchMu         sync.Mutex
-	manager                     *Manager
-	session                     Session
-	terminal                    Terminal
-	process                     Waiter
-	output                      []byte
-	roundReply                  []byte
-	visibleSnapshot             string
-	visibleSnapshotSource       string
-	visibleSnapshotVersion      int64
-	terminalCols                uint16
-	terminalRows                uint16
-	snapshotAtRoundStart        string
-	snapshotAtRoundVersion      int64
-	snapshotAtRoundStartSet     bool
-	lastInputText               string
-	inputLineBuffer             string
-	lastNotifiedRoundHash       string
-	lastNotifiedMessageID       string
-	lastNotifiedContent         string
-	lastNotifiedVisibleSnapshot string
-	notificationMentionOpenID   string
-	notificationUpdateNo        int
-	notificationRunning         bool
-	notificationWindowInputText string
-	frozenNotificationMessages  map[string]struct{}
-	suppressRunningMarker       bool
-	requireLarkChat             bool
-	notificationPatchVersion    int64
-	autoRefreshEnabled          bool
-	autoRefreshMessageID        string
-	autoRefreshStop             chan struct{}
-	autoSummaryEnabled          bool
-	startupNotifyMode           startupNotifyMode
-	inputQueueUntil             time.Time
-	subscribers                 map[chan RuntimeEvent]runtimeSubscriber
-	snapshotWaiters             []chan struct{}
-	pendingHeadlessSnapshots    int
-	nextSeq                     int64
-	stateVersion                int64
-	notifyVersion               int64
-	notifyRetryTimer            *time.Timer
-	notifyStableTimer           *time.Timer
-	startupNotifyTimer          *time.Timer
+	mu                                sync.Mutex
+	notificationPatchMu               sync.Mutex
+	manager                           *Manager
+	session                           Session
+	terminal                          Terminal
+	process                           Waiter
+	output                            []byte
+	roundReply                        []byte
+	visibleSnapshot                   string
+	visibleSnapshotSource             string
+	visibleSnapshotVersion            int64
+	terminalCols                      uint16
+	terminalRows                      uint16
+	snapshotAtRoundStart              string
+	snapshotAtRoundVersion            int64
+	snapshotAtRoundStartSet           bool
+	lastInputText                     string
+	inputLineBuffer                   string
+	lastNotifiedRoundHash             string
+	lastNotifiedMessageID             string
+	lastNotifiedContent               string
+	lastNotifiedVisibleSnapshot       string
+	notificationMentionOpenID         string
+	notificationUpdateNo              int
+	notificationRunning               bool
+	notificationWindowInputText       string
+	frozenNotificationMessages        map[string]struct{}
+	pendingTerminalInteraction        *TerminalInteraction
+	lastConsumedTerminalInteractionID string
+	lastTerminalAgentContext          *TerminalAgentContext
+	agentTurnHookVerified             bool
+	suppressRunningMarker             bool
+	requireLarkChat                   bool
+	notificationPatchVersion          int64
+	autoRefreshEnabled                bool
+	autoRefreshMessageID              string
+	autoRefreshStop                   chan struct{}
+	autoSummaryEnabled                bool
+	startupNotifyMode                 startupNotifyMode
+	inputQueueUntil                   time.Time
+	subscribers                       map[chan RuntimeEvent]runtimeSubscriber
+	snapshotWaiters                   []chan struct{}
+	pendingHeadlessSnapshots          int
+	nextSeq                           int64
+	stateVersion                      int64
+	notifyVersion                     int64
+	notifyRetryTimer                  *time.Timer
+	notifyStableTimer                 *time.Timer
+	startupNotifyTimer                *time.Timer
 }
 
 type RuntimeEvent struct {
@@ -755,6 +775,10 @@ type RuntimeEvent struct {
 	Cols uint16
 	Rows uint16
 }
+
+// agentIdleCompletionFallback is a safety net for turns that cannot invoke
+// their completion hook (for example, when the user interrupts Codex).
+const agentIdleCompletionFallback = 5 * time.Second
 
 type runtimeSubscriber struct {
 	Headless bool
@@ -918,6 +942,13 @@ func (rt *RuntimeSession) runRecoveryEnvironmentSetup() {
 		}
 		exports = append(exports, "CLAUDE_CONFIG_DIR="+shellQuote(claudeHome))
 	}
+	if hookURL := rt.manager.AgentTurnHookURL(); hookURL != "" && strings.TrimSpace(sess.RecoveryKey) != "" {
+		exports = append(exports,
+			"EASY_TERMINAL_HOOK_URL="+shellQuote(hookURL),
+			"EASY_TERMINAL_SESSION_ID="+shellQuote(sess.ID),
+			"EASY_TERMINAL_HOOK_TOKEN="+shellQuote(sess.RecoveryKey),
+		)
+	}
 	if len(exports) == 0 {
 		return
 	}
@@ -1004,6 +1035,18 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 	rt.visibleSnapshot = data
 	rt.visibleSnapshotSource = source
 	rt.visibleSnapshotVersion++
+	var interactionNotifyVersion int64
+	var interactionSession Session
+	if rt.manager != nil && rt.session.Status == StatusRunning && rt.hasPendingCodexInteractionLocked() {
+		rt.stopNotifyTimerLocked()
+		rt.stopNotifyStableTimerLocked()
+		rt.session.Status = StatusWaiting
+		rt.session.UpdatedAt = time.Now().UTC()
+		rt.stateVersion++
+		rt.notifyVersion++
+		interactionNotifyVersion = rt.notifyVersion
+		interactionSession = rt.session
+	}
 	version := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
 	waiters := rt.snapshotWaiters
@@ -1012,6 +1055,10 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 	log.Printf("visible snapshot updated session=%s source=%s version=%d len=%d lines=%d waiters=%d", sessionID, source, version, len(data), countLogLines(data), len(waiters))
 	for _, ch := range waiters {
 		close(ch)
+	}
+	if interactionNotifyVersion != 0 {
+		_ = rt.manager.persist(context.Background(), interactionSession)
+		go rt.notifyIfStillWaitingForInteraction(interactionNotifyVersion)
 	}
 }
 
@@ -1192,6 +1239,7 @@ func (rt *RuntimeSession) disabledNotificationLocked(messageID string) (WaitingN
 		AutoSummaryEnabled: false,
 		MentionModeEnabled: rt.session.LarkMentionModeEnabled,
 		SuppressUpdateTip:  true,
+		AgentContext:       cloneTerminalAgentContext(rt.lastTerminalAgentContext),
 	}, true
 }
 
@@ -1380,6 +1428,7 @@ func minDuration(a, b time.Duration) time.Duration {
 func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput string) (WaitingNotification, bool) {
 	var disabledNote WaitingNotification
 	disabledOK := false
+	rt.pendingTerminalInteraction = nil
 	if submitted {
 		overlapRunningCard := rt.notificationRunning && rt.lastNotifiedMessageID != ""
 		if overlapRunningCard {
@@ -1475,6 +1524,7 @@ func (rt *RuntimeSession) NotifyInputRunningOnMessage(messageID string) {
 		AutoSummaryEnabled:  rt.autoSummaryEnabled,
 		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: patchVersion,
+		AgentContext:        cloneTerminalAgentContext(rt.lastTerminalAgentContext),
 	}
 	rt.notificationRunning = true
 	rt.mu.Unlock()
@@ -1601,6 +1651,10 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		SuppressUpdateTip:   suppressUpdateTip,
 		NotificationVersion: patchVersion,
 	}
+	if !running {
+		n.Interaction = rt.notificationInteractionLocked(messageID)
+	}
+	n.AgentContext = rt.notificationAgentContextLocked()
 	rt.notificationRunning = n.Running
 	rt.mu.Unlock()
 	source := "auto_refresh"
@@ -1640,6 +1694,11 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 			rt.notificationUpdateNo = n.UpdateNo
 		}
 		rt.notificationRunning = n.Running
+		boundMessageID := messageID
+		if result.MessageID != "" {
+			boundMessageID = result.MessageID
+		}
+		rt.bindTerminalInteractionMessageLocked(n.Interaction, boundMessageID)
 	}
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.remember(rt.session.ID, messageID)
@@ -1902,7 +1961,11 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 		if rt.startupNotifyMode == startupNotifySettling {
 			rt.scheduleStartupNotifyFinalLocked(defaultStartupPresetSettleDelay)
 		}
-		rt.resetNotifyStableTimerLocked()
+		if rt.agentTurnHookVerified {
+			rt.resetAgentIdleCompletionTimerLocked()
+		} else {
+			rt.resetNotifyStableTimerLocked()
+		}
 	}
 	for ch := range rt.subscribers {
 		select {
@@ -1921,6 +1984,56 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	if markRunning {
 		go rt.updateNotificationRunning(runningNote, true)
 	}
+}
+
+// CompleteAgentTurn marks the current Codex round as complete after a local
+// hook callback. The recovery key is a per-session bearer credential injected
+// only into that session's shell environment.
+func (m *Manager) CompleteAgentTurn(ctx context.Context, sessionID, token string) (Session, bool, error) {
+	rt, ok := m.GetRuntime(strings.TrimSpace(sessionID))
+	if !ok {
+		return Session{}, false, nil
+	}
+	return rt.completeAgentTurn(ctx, token)
+}
+
+func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token string) (Session, bool, error) {
+	if rt == nil || rt.manager == nil {
+		return Session{}, false, nil
+	}
+	rt.mu.Lock()
+	if strings.TrimSpace(token) == "" || strings.TrimSpace(token) != strings.TrimSpace(rt.session.RecoveryKey) {
+		rt.mu.Unlock()
+		return Session{}, false, errors.New("invalid agent hook token")
+	}
+	if !rt.session.Live || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
+		s := rt.session
+		rt.mu.Unlock()
+		return s, false, nil
+	}
+	if strings.TrimSpace(rt.session.LastMode) != SessionModeAgent || strings.TrimSpace(rt.session.LastAgentKind) != "codex" {
+		s := rt.session
+		rt.mu.Unlock()
+		return s, false, nil
+	}
+	if rt.session.Status == StatusWaiting {
+		s := rt.session
+		rt.mu.Unlock()
+		return s, false, nil
+	}
+	rt.agentTurnHookVerified = true
+	rt.stopNotifyTimerLocked()
+	rt.stopNotifyStableTimerLocked()
+	rt.session.Status = StatusWaiting
+	rt.session.UpdatedAt = time.Now().UTC()
+	rt.stateVersion++
+	rt.notifyVersion++
+	version := rt.notifyVersion
+	s := rt.session
+	rt.mu.Unlock()
+	_ = rt.manager.persist(ctx, s)
+	go rt.notifyIfStillWaitingImmediately(version)
+	return s, true, nil
 }
 
 func (rt *RuntimeSession) Close() {
@@ -2013,6 +2126,28 @@ func (rt *RuntimeSession) resetNotifyStableTimerLocked() {
 	})
 }
 
+func (rt *RuntimeSession) resetAgentIdleCompletionTimerLocked() {
+	rt.stopNotifyStableTimerLocked()
+	if !rt.session.Live || rt.session.Status != StatusRunning {
+		return
+	}
+	version := rt.stateVersion
+	rt.notifyStableTimer = time.AfterFunc(agentIdleCompletionFallback, func() {
+		rt.notifyAfterStable(version)
+	})
+}
+
+func (rt *RuntimeSession) hasPendingCodexInteractionLocked() bool {
+	body, _ := selectNotifyBodyWithWindow(
+		rt.visibleSnapshot,
+		rt.previousNotifySnapshotLocked(),
+		rt.roundReply,
+		rt.lastInputText,
+		rt.notificationWindowInputText,
+	)
+	return DetectCodexTerminalInteraction(body, rt.session.ID, rt.lastInputText, rt.notifyVersion, rt.visibleSnapshotVersion) != nil
+}
+
 func (rt *RuntimeSession) notifyAfterStable(version int64) {
 	rt.mu.Lock()
 	if !rt.session.Live || rt.stateVersion != version || rt.session.Status == StatusExited || rt.session.Status == StatusFailed {
@@ -2036,17 +2171,36 @@ func (rt *RuntimeSession) notifyAfterStable(version int64) {
 }
 
 func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
-	time.Sleep(100 * time.Millisecond)
+	rt.notifyIfStillWaitingWithMode(version, false, true)
+}
+
+func (rt *RuntimeSession) notifyIfStillWaitingImmediately(version int64) {
+	rt.notifyIfStillWaitingWithMode(version, true, true)
+}
+
+func (rt *RuntimeSession) notifyIfStillWaitingForInteraction(version int64) {
+	rt.notifyIfStillWaitingWithMode(version, true, false)
+}
+
+func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate, requestFreshSnapshot bool) {
+	if !immediate {
+		time.Sleep(100 * time.Millisecond)
+	}
 	rt.mu.Lock()
 	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version || rt.manager.notifier == nil || !rt.manager.notifier.Available() {
 		rt.mu.Unlock()
 		return
 	}
 	rt.mu.Unlock()
-	rt.RequestFreshSnapshot(defaultNotifySnapshotTimeout)
-	rt.mu.Lock()
-	idealContentDeadline := time.Now().Add(rt.notifyStableDelayLocked())
-	rt.mu.Unlock()
+	if requestFreshSnapshot {
+		rt.RequestFreshSnapshot(defaultNotifySnapshotTimeout)
+	}
+	idealContentDeadline := time.Now()
+	if !immediate {
+		rt.mu.Lock()
+		idealContentDeadline = time.Now().Add(rt.notifyStableDelayLocked())
+		rt.mu.Unlock()
+	}
 	for time.Now().Before(idealContentDeadline) {
 		rt.mu.Lock()
 		needsMoreSnapshot := rt.notifyContentNeedsMoreSnapshotLocked()
@@ -2164,6 +2318,11 @@ func (rt *RuntimeSession) notifyIfStillWaiting(version int64) {
 	}
 	log.Printf("waiting notification sent session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
 	rt.mu.Lock()
+	boundInteractionMessageID := n.MessageID
+	if result.MessageID != "" {
+		boundInteractionMessageID = result.MessageID
+	}
+	rt.bindTerminalInteractionMessageLocked(n.Interaction, boundInteractionMessageID)
 	sameRound := rt.lastInputText == roundInput && rt.snapshotAtRoundVersion == roundSnapshotVersion
 	if rt.session.Status == StatusWaiting && rt.session.Live && rt.session.NotifyOnWaiting && rt.notifyVersion == version {
 		if rt.notificationPatchVersion == n.NotificationVersion {
@@ -2248,6 +2407,7 @@ func (rt *RuntimeSession) markNotificationRunningLocked() (WaitingNotification, 
 		AutoSummaryEnabled:  rt.autoSummaryEnabled,
 		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
+		AgentContext:        cloneTerminalAgentContext(rt.lastTerminalAgentContext),
 	}, true
 }
 
@@ -2278,6 +2438,8 @@ func (rt *RuntimeSession) markNotificationWaitingLocked() (WaitingNotification, 
 		AutoSummaryEnabled:  rt.autoSummaryEnabled,
 		MentionModeEnabled:  rt.session.LarkMentionModeEnabled,
 		NotificationVersion: rt.notificationPatchVersion,
+		Interaction:         cloneTerminalInteraction(rt.pendingTerminalInteraction),
+		AgentContext:        cloneTerminalAgentContext(rt.lastTerminalAgentContext),
 	}, true
 }
 
@@ -2405,7 +2567,9 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if contentHash == rt.lastNotifiedRoundHash {
 		return WaitingNotification{}, "", false, "duplicate_hash"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: rt.visibleSnapshotSource}, contentHash, true, "ready"
+	interaction := rt.notificationInteractionLocked(rt.lastNotifiedMessageID)
+	agentContext := rt.notificationAgentContextLocked()
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: rt.visibleSnapshotSource, Interaction: interaction, AgentContext: agentContext}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
@@ -2434,7 +2598,9 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 	} else {
 		source += ":fallback"
 	}
-	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: source}, contentHash, true, "ready"
+	interaction := rt.notificationInteractionLocked(rt.lastNotifiedMessageID)
+	agentContext := rt.notificationAgentContextLocked()
+	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: source, Interaction: interaction, AgentContext: agentContext}, contentHash, true, "ready"
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

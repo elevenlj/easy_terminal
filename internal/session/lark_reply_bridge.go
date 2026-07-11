@@ -266,38 +266,47 @@ func (b *LarkReplyBridge) handleCardActionPayload(ctx context.Context, payload [
 	if err := json.Unmarshal(payload, &event); err == nil && event.Event != nil {
 		return b.HandleCardActionTrigger(ctx, &event)
 	}
-	var action struct {
-		OpenMessageID string `json:"open_message_id"`
-		OpenChatID    string `json:"open_chat_id"`
-		Action        *struct {
-			Value map[string]interface{} `json:"value"`
-		} `json:"action"`
+	var legacy struct {
+		OpenMessageID string                   `json:"open_message_id"`
+		OpenChatID    string                   `json:"open_chat_id"`
+		Operator      *callback.Operator       `json:"operator"`
+		Action        *callback.CallBackAction `json:"action"`
 	}
-	if err := json.Unmarshal(payload, &action); err != nil {
+	if err := json.Unmarshal(payload, &legacy); err != nil {
 		return larkCardToast("warning", "无效操作"), nil
 	}
-	value := map[string]interface{}{}
-	if action.Action != nil {
-		value = action.Action.Value
+	operatorOpenID := ""
+	if legacy.Operator != nil {
+		operatorOpenID = legacy.Operator.OpenID
 	}
-	return b.handleCardAction(ctx, value, action.OpenMessageID, action.OpenChatID)
+	return b.handleCardAction(ctx, legacy.Action, legacy.OpenMessageID, legacy.OpenChatID, operatorOpenID)
 }
 
 func (b *LarkReplyBridge) HandleCardActionTrigger(ctx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
 	if event == nil || event.Event == nil || event.Event.Action == nil {
 		return larkCardToast("warning", "无效操作"), nil
 	}
-	value := event.Event.Action.Value
 	openMessageID := ""
 	openChatID := ""
 	if event.Event.Context != nil {
 		openMessageID = event.Event.Context.OpenMessageID
 		openChatID = event.Event.Context.OpenChatID
 	}
-	return b.handleCardAction(ctx, value, openMessageID, openChatID)
+	operatorOpenID := ""
+	if event.Event.Operator != nil {
+		operatorOpenID = event.Event.Operator.OpenID
+	}
+	return b.handleCardAction(ctx, event.Event.Action, openMessageID, openChatID, operatorOpenID)
 }
 
-func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string]interface{}, openMessageID string, openChatID string) (*callback.CardActionTriggerResponse, error) {
+func (b *LarkReplyBridge) handleCardAction(ctx context.Context, action *callback.CallBackAction, openMessageID string, openChatID string, operatorOpenID string) (*callback.CardActionTriggerResponse, error) {
+	if action == nil {
+		return larkCardToast("warning", "无效操作"), nil
+	}
+	value := action.Value
+	if value == nil {
+		value = map[string]interface{}{}
+	}
 	switch fmt.Sprint(value["easy_terminal_action"]) {
 	case "shortcut":
 		return b.handleCardShortcut(ctx, value, openMessageID)
@@ -313,9 +322,46 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, value map[string
 		return b.handleCardToggleMentionMode(ctx, value, openMessageID)
 	case "delete_session":
 		return b.handleCardDeleteSession(ctx, value, openMessageID, openChatID)
+	case "terminal_select":
+		return b.handleCardTerminalSelect(ctx, value, action.Option, openMessageID, openChatID, operatorOpenID)
 	default:
 		return larkCardToast("warning", "未知操作"), nil
 	}
+}
+
+func (b *LarkReplyBridge) handleCardTerminalSelect(ctx context.Context, value map[string]interface{}, optionID string, openMessageID string, openChatID string, operatorOpenID string) (*callback.CardActionTriggerResponse, error) {
+	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
+	if blocked != nil {
+		return blocked, nil
+	}
+	sess := rt.Snapshot()
+	if expectedChatID := strings.TrimSpace(sess.LarkChatID); expectedChatID != "" && strings.TrimSpace(openChatID) != "" && expectedChatID != strings.TrimSpace(openChatID) {
+		return larkCardToast("warning", "该选择不属于当前群聊"), nil
+	}
+	interactionID := strings.TrimSpace(fmt.Sprint(value["interaction_id"]))
+	selected, err := rt.consumeTerminalInteraction(interactionID, optionID, openMessageID)
+	if err != nil {
+		return larkCardToast("warning", err.Error()), nil
+	}
+	b.manager.EnsureBrowser(sessionID)
+	mentionOpenID := strings.TrimSpace(operatorOpenID)
+	if mentionOpenID == "" {
+		mentionOpenID = rt.NotificationMentionOpenID()
+	}
+	if err := SubmitTerminalInteractionInputWithMention(rt, selected.Input, mentionOpenID); err != nil {
+		return nil, err
+	}
+	if selected.SubmitWithEnter {
+		if err := rt.WriteInput("\r"); err != nil {
+			return nil, err
+		}
+	}
+	if openMessageID != "" {
+		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
+	}
+	rt.NotifyInputRunningOnMessage(openMessageID)
+	log.Printf("lark card terminal selection session=%s message=%s interaction=%s option=%s input_len=%d", sessionID, openMessageID, interactionID, selected.ID, len(selected.Input))
+	return larkCardToast("info", "已选择 "+truncateLarkInteractionText(selected.Label, 60)), nil
 }
 
 func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map[string]interface{}, openMessageID string, openChatID string) (*callback.CardActionTriggerResponse, error) {
@@ -2026,13 +2072,25 @@ func SubmitSilentStructuredInput(rt *RuntimeSession, text string) error {
 	return submitStructuredInputWithMention(rt, text, "", false)
 }
 
+func SubmitTerminalInteractionInputWithMention(rt *RuntimeSession, text string, mentionOpenID string) error {
+	return submitStructuredInputWithMode(rt, text, mentionOpenID, true, false)
+}
+
 func submitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool) error {
 	if rt == nil {
 		return fmt.Errorf("runtime not found")
 	}
 	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
-	sessionID := rt.Snapshot().ID
 	pressEnter := structuredInputShouldPressEnter(rt, text)
+	return submitStructuredInputWithMode(rt, text, mentionOpenID, trackActivity, pressEnter)
+}
+
+func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool, pressEnter bool) error {
+	if rt == nil {
+		return fmt.Errorf("runtime not found")
+	}
+	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	sessionID := rt.Snapshot().ID
 	enterLen := 0
 	if pressEnter {
 		enterLen = len(structuredInputEnterSequence)

@@ -108,7 +108,7 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("LARK_NOTIFY_MERGE_WRAPPED_LINES", "")
 
 	cfg := loadConfig(filepath.Join(t.TempDir(), "config.local.json"))
-	if cfg.FastWaitingTransitionMs != 1000 || cfg.ConservativeWaitingTransitionMs != 3000 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 200 {
+	if cfg.FastWaitingTransitionMs != 500 || cfg.ConservativeWaitingTransitionMs != 500 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 200 {
 		t.Fatalf("numeric defaults = %d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines)
 	}
 	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
@@ -119,6 +119,25 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	}
 	if !cfg.LarkNotifyMergeWrappedLines {
 		t.Fatalf("merge wrapped lines should default to true")
+	}
+}
+
+func TestLoadConfigPrependsRequiredToolFiltersToExistingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.local.json")
+	if err := os.WriteFile(path, []byte(`{
+  "lark_notify_drop_line_patterns": [
+    {"pattern":"^(• Ran|• Explored).*", "kind":"block_head", "action":"keep_head"}
+  ]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := loadConfig(path)
+	if len(cfg.LarkNotifyDropLineRules) < 4 {
+		t.Fatalf("required filters were not merged: %#v", cfg.LarkNotifyDropLineRules)
+	}
+	first := cfg.LarkNotifyDropLineRules[0]
+	if first.Title != "Codex 工具执行过程" || first.Action != "drop_block" {
+		t.Fatalf("required tool filter must precede obsolete local rules: %#v", cfg.LarkNotifyDropLineRules)
 	}
 }
 

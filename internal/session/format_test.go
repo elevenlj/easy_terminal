@@ -320,6 +320,24 @@ func TestPickNotifyContentSanitizesEmail(t *testing.T) {
 	}
 }
 
+func TestPickNotifyContentKeepsRawOutputForCodexCCommand(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{{
+		Kind: "block_head", Pattern: `^\s*[•⏺]\s+Ran\b.*`, Action: "drop_block",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetLarkNotifyDropLineRules(nil) })
+
+	visible := strings.Join([]string{
+		"• Ran go test ./...",
+		"tool output me@example.com",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	if got := PickNotifyContent(visible, "", nil, "/c"); got != visible {
+		t.Fatalf("/c must bypass every notification filter:\n%q\nwant:\n%q", got, visible)
+	}
+}
+
 func TestPickNotifyContentAppliesDropLinePatterns(t *testing.T) {
 	if err := SetLarkNotifyDropLinePatterns([]string{`^noise:`, `secret`}); err != nil {
 		t.Fatal(err)
@@ -358,10 +376,67 @@ func TestPickNotifyContentAppliesBlockHeadDropRule(t *testing.T) {
 		"• 已完成发布。",
 		"  发布结果：",
 		"  - GitHub Release 已生成",
-		"下一段保留",
+		"• 下一段保留",
 	}, "\n"), "", nil, "")
-	if got != "下一段保留" {
+	if got != "• 下一段保留" {
 		t.Fatalf("block should be dropped:\n%q", got)
+	}
+}
+
+func TestPickNotifyContentDropsCodexToolBlocksAndFooterStatus(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{
+			Kind:    "block_head",
+			Pattern: `^\s*[•⏺]\s+(?:Ran|Waited|Explored|Edited?|Read|Searched|Viewed)\b.*`,
+			Action:  "drop_block",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent(strings.Join([]string{
+		"› 修复问题",
+		"• Viewed Image",
+		"└ conf_8081/data/uploads/example.png",
+		"• Ran go test ./...",
+		"wrapped command argument without indentation",
+		"ok easy_terminal/internal/session",
+		"• Waited for background terminal · go test ./...",
+		"PASS",
+		"• Explored",
+		"  Read manager.go",
+		"• 已完成修复并通过全部测试。",
+		"gpt-5.6-terra high fast · ~/project/easy_terminal",
+	}, "\n"), "", nil, "修复问题")
+	if got != "• 已完成修复并通过全部测试。" {
+		t.Fatalf("Codex process output should be hidden from the final notification:\n%q", got)
+	}
+}
+
+func TestToolMarkerBlockEndsOnlyAtNextMarker(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{{
+		Kind: "block_head", Pattern: `^\s*[•⏺]\s+Ran\b.*`, Action: "drop_block",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetLarkNotifyDropLineRules(nil) })
+
+	got := PickNotifyContent(strings.Join([]string{
+		"• 准备查询天气。",
+		"• Ran curl --max-time 15",
+		"https://wttr.in/Chengdu?format=j1",
+		"command output without indentation",
+		"• 成都目前 31°C，多云。",
+		"- 体感 36°C",
+	}, "\n"), "", nil, "")
+	want := "• 准备查询天气。\n• 成都目前 31°C，多云。\n- 体感 36°C"
+	if got != want {
+		t.Fatalf("tool marker block should be dropped through the next marker:\n%q\nwant:\n%q", got, want)
 	}
 }
 
@@ -381,11 +456,41 @@ func TestPickNotifyContentAppliesBlockHeadKeepRule(t *testing.T) {
 		"• 已完成发布。",
 		"  发布结果：",
 		"  - GitHub Release 已生成",
-		"下一段保留",
+		"• 下一段保留",
 	}, "\n"), "", nil, "")
-	want := "• 已完成发布。\n下一段保留"
+	want := "• 已完成发布。\n• 下一段保留"
 	if got != want {
 		t.Fatalf("block body should be dropped:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentDropsCodexStartupTipAndMCPErrors(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{
+			Kind:    "block_head",
+			Pattern: `^\s*(?:Tip:|⚠ MCP (?:client.*failed to start|startup incomplete)).*`,
+			Action:  "drop_block",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := PickNotifyContent(strings.Join([]string{
+		"Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/codex",
+		"  This promotional message is terminal-wrapped.",
+		"⚠ MCP client for `codex_apps` failed to start: MCP startup failed",
+		"  [rmcp::transport::worker::WorkerTransport] error: Transport channel closed",
+		"  send initialize request",
+		"⚠ MCP startup incomplete (failed: codex_apps)",
+		"真正需要推送的结果",
+	}, "\n"), "", nil, "")
+	if got != "真正需要推送的结果" {
+		t.Fatalf("Codex startup noise should be dropped:\n%q", got)
 	}
 }
 

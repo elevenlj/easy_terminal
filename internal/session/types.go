@@ -66,6 +66,8 @@ type WaitingNotification struct {
 	SuppressUpdateTip   bool
 	NotificationVersion int64
 	SnapshotSource      string
+	Interaction         *TerminalInteraction
+	AgentContext        *TerminalAgentContext
 }
 
 const DefaultLarkAutoSummaryPrompt = "请用对用户阅读友好的方式，总结上一轮输出内容。要求精简但不要遗漏主要结论、已完成事项、关键文件或下一步动作。不要复述无关日志。"
