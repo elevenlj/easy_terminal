@@ -158,11 +158,8 @@ func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomSh
 
 func larkTerminalTextElement(content string) map[string]any {
 	return map[string]any{
-		"tag": "div",
-		"text": map[string]any{
-			"tag":     "plain_text",
-			"content": larkTerminalPlainText(content),
-		},
+		"tag":     "markdown",
+		"content": larkTerminalPlainText(content),
 	}
 }
 

@@ -1611,23 +1611,20 @@ func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
 	var card struct {
 		Body struct {
 			Elements []struct {
-				Tag  string `json:"tag"`
-				Text struct {
-					Tag     string `json:"tag"`
-					Content string `json:"content"`
-				} `json:"text"`
+				Tag     string `json:"tag"`
+				Content string `json:"content"`
 			} `json:"elements"`
 		} `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(content), &card); err != nil {
 		t.Fatal(err)
 	}
-	if len(card.Body.Elements) < 1 || card.Body.Elements[0].Tag != "div" || card.Body.Elements[0].Text.Tag != "plain_text" {
-		t.Fatalf("card should put terminal output in an expanded plain text element, got %#v", card.Body.Elements)
+	if len(card.Body.Elements) < 1 || card.Body.Elements[0].Tag != "markdown" {
+		t.Fatalf("card should put terminal output in a markdown element, got %#v", card.Body.Elements)
 	}
 	want := "Select Model and Effort\n› 1. gpt-5.5 (current)\n  2. gpt-5.4\n  3. gpt-5.4-mini"
-	if card.Body.Elements[0].Text.Content != want {
-		t.Fatalf("terminal output should keep visible line breaks, got %q", card.Body.Elements[0].Text.Content)
+	if card.Body.Elements[0].Content != want {
+		t.Fatalf("terminal output should keep visible line breaks, got %q", card.Body.Elements[0].Content)
 	}
 }
 
