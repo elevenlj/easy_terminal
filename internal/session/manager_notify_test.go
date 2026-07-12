@@ -1622,9 +1622,36 @@ func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
 	if len(card.Body.Elements) < 1 || card.Body.Elements[0].Tag != "markdown" {
 		t.Fatalf("card should put terminal output in a markdown element, got %#v", card.Body.Elements)
 	}
-	want := "Select Model and Effort\n› 1. gpt-5.5 (current)\n  2. gpt-5.4\n  3. gpt-5.4-mini"
+	want := "Select Model and Effort  \n› 1. gpt-5.5 (current)  \n  2. gpt-5.4  \n  3. gpt-5.4-mini"
 	if card.Body.Elements[0].Content != want {
 		t.Fatalf("terminal output should keep visible line breaks, got %q", card.Body.Elements[0].Content)
+	}
+}
+
+func TestLarkTerminalMarkdownTextUsesHardBreaksOutsideCodeFences(t *testing.T) {
+	got := larkTerminalMarkdownText(strings.Join([]string{
+		"- 列表项",
+		"    • 第二块",
+		"",
+		"```sh",
+		"    • code content",
+		"echo two",
+		"```",
+		"最后一行",
+	}, "\n"))
+	want := strings.Join([]string{
+		"- 列表项  ",
+		"",
+		"• 第二块  ",
+		"",
+		"```sh",
+		"    • code content",
+		"echo two",
+		"```",
+		"最后一行",
+	}, "\n")
+	if got != want {
+		t.Fatalf("markdown hard breaks = %q, want %q", got, want)
 	}
 }
 

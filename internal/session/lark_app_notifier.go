@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
@@ -159,8 +160,40 @@ func normalizeLarkCustomShortcuts(shortcuts []LarkCustomShortcut) []LarkCustomSh
 func larkTerminalTextElement(content string) map[string]any {
 	return map[string]any{
 		"tag":     "markdown",
-		"content": larkTerminalPlainText(content),
+		"content": larkTerminalMarkdownText(content),
 	}
+}
+
+func larkTerminalMarkdownText(content string) string {
+	sourceLines := strings.Split(larkTerminalPlainText(content), "\n")
+	lines := make([]string, 0, len(sourceLines))
+	inCodeFence := false
+	for _, line := range sourceLines {
+		if !inCodeFence && startsLarkNotifyMarkerBlock(line) {
+			line = strings.TrimLeftFunc(line, unicode.IsSpace)
+			if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
+				lines = append(lines, "")
+			}
+		}
+		lines = append(lines, line)
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeFence = !inCodeFence
+		}
+	}
+
+	inCodeFence = false
+	for i := range lines {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "```") {
+			inCodeFence = !inCodeFence
+			continue
+		}
+		if i < len(lines)-1 && !inCodeFence && trimmed != "" && !strings.HasSuffix(lines[i], "  ") {
+			lines[i] += "  "
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func larkTerminalAgentContextElement(context *TerminalAgentContext) map[string]any {

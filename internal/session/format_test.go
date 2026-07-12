@@ -552,6 +552,27 @@ func TestLarkTerminalPlainTextKeepsWrappedLinesByDefault(t *testing.T) {
 	}
 }
 
+func TestLarkTerminalPlainTextKeepsNumberedDiffLinesWhenMergingWraps(t *testing.T) {
+	SetLarkNotifyMergeWrappedLines(true)
+	t.Cleanup(func() { SetLarkNotifyMergeWrappedLines(false) })
+
+	got := larkTerminalPlainText(strings.Join([]string{
+		"• Added scripts/build.sh (+3 -0)",
+		"  1 +#!/bin/zsh",
+		"  2 +set -euo pipefail",
+		"  3 +ROOT=/tmp/project",
+	}, "\n"))
+	want := strings.Join([]string{
+		"• Added scripts/build.sh (+3 -0)",
+		"  1 +#!/bin/zsh",
+		"  2 +set -euo pipefail",
+		"  3 +ROOT=/tmp/project",
+	}, "\n")
+	if got != want {
+		t.Fatalf("numbered diff lines should keep real line breaks:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 func TestTruncateForLarkKeepsTailLinesWithoutPrefix(t *testing.T) {
 	SetLarkNotifyMaxLines(3)
 	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })

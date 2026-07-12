@@ -309,7 +309,24 @@ func shouldMergeTerminalWrappedLineBreak(left, right string) bool {
 	if startsWithOrderedListMarker(strings.TrimSpace(right)) {
 		return false
 	}
+	if startsWithNumberedDiffLine(strings.TrimSpace(right)) {
+		return false
+	}
 	return true
+}
+
+func startsWithNumberedDiffLine(text string) bool {
+	i := 0
+	for i < len(text) && text[i] >= '0' && text[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(text) || (text[i] != ' ' && text[i] != '\t') {
+		return false
+	}
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	return i < len(text) && (text[i] == '+' || text[i] == '-')
 }
 
 func lastBoundaryRune(text string) (rune, bool) {
