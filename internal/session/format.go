@@ -872,7 +872,7 @@ func wrappedInputEchoEndAt(lines []string, i int, lastInputText string) (int, bo
 	if target == "" || current == "" || !strings.HasPrefix(target, current) {
 		return i, false
 	}
-	for j := i + 1; j < len(lines) && j <= i+6; j++ {
+	for j := i + 1; j < len(lines) && j <= i+32; j++ {
 		trimmed := strings.TrimSpace(lines[j])
 		if trimmed == "" {
 			continue
@@ -1017,6 +1017,9 @@ func trimPromptPrefix(line string, prompt string) (string, bool) {
 	if strings.HasPrefix(line, prefix) {
 		return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
 	}
+	if prompt == "›" && strings.HasPrefix(line, prompt) {
+		return strings.TrimSpace(strings.TrimPrefix(line, prompt)), true
+	}
 	return "", false
 }
 
@@ -1027,6 +1030,9 @@ func trimPromptPrefixRaw(line string, prompt string) (string, bool) {
 	prefix := prompt + " "
 	if strings.HasPrefix(line, prefix) {
 		return strings.TrimRight(strings.TrimPrefix(line, prefix), "\r\n"), true
+	}
+	if prompt == "›" && strings.HasPrefix(line, prompt) {
+		return strings.TrimRight(strings.TrimPrefix(line, prompt), "\r\n"), true
 	}
 	return "", false
 }
@@ -1096,7 +1102,7 @@ func restoredWrappedInputEchoAt(lines []string, i int, input string) (string, in
 	if target == "" || current == "" || current == target || !strings.HasPrefix(target, current) {
 		return "", i, false
 	}
-	for j := i + 1; j < len(lines) && j <= i+6; j++ {
+	for j := i + 1; j < len(lines) && j <= i+32; j++ {
 		trimmed := strings.TrimSpace(lines[j])
 		if trimmed == "" {
 			continue

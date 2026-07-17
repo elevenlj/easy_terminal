@@ -140,6 +140,23 @@ func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
 	}
 }
 
+func TestPickNotifyContentFindsIndentedRichTextInputAnchorWithoutPromptSpace(t *testing.T) {
+	input := "关于PE的维护不对啊，你应该用V1、V2、V3、V4这种来。F4是什么版本啊？你要按照这个逻辑来。"
+	visible := strings.Join([]string{
+		"上一轮有缩进的最终输出。",
+		"    Worked for 8m 30s",
+		"    ›关于PE的维护不对啊，你应该用V1、V2、V3、V4这种来。",
+		"      F4是什么版本啊？你要按照这个逻辑来。",
+		"    • 这是当前轮回复。",
+	}, "\n")
+
+	got := PickNotifyContent(visible, "", nil, input)
+	want := "• 这是当前轮回复。"
+	if got != want {
+		t.Fatalf("indented rich-text input anchor should exclude prior output:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
 	previous := strings.Join([]string{
 		"old output",
