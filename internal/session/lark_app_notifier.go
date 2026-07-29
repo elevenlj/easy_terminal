@@ -169,7 +169,8 @@ func larkTerminalMarkdownText(content string) string {
 	lines := make([]string, 0, len(sourceLines))
 	inCodeFence := false
 	for _, line := range sourceLines {
-		if !inCodeFence && startsLarkNotifyMarkerBlock(line) {
+		startsTopLevelBlock := !inCodeFence && (startsLarkNotifyMarkerBlock(line) || startsLarkNotifyInputPrompt(line))
+		if startsTopLevelBlock {
 			line = strings.TrimLeftFunc(line, unicode.IsSpace)
 			if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) != "" {
 				lines = append(lines, "")
@@ -194,6 +195,11 @@ func larkTerminalMarkdownText(content string) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func startsLarkNotifyInputPrompt(line string) bool {
+	line = strings.TrimLeftFunc(line, unicode.IsSpace)
+	return strings.HasPrefix(line, "›")
 }
 
 func larkTerminalAgentContextElement(context *TerminalAgentContext) map[string]any {

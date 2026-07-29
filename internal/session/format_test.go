@@ -157,6 +157,39 @@ func TestPickNotifyContentFindsIndentedRichTextInputAnchorWithoutPromptSpace(t *
 	}
 }
 
+func TestPickNotifyContentFindsIndentedCodexFileMentionAnchor(t *testing.T) {
+	input := "@v2/framework/session/player/audio/audio.go这个的改动中，你看一下，因为线上他用的可能是没有文本的TTS。不会有问题吧？"
+	visible := strings.Join([]string{
+		"• 已修改并推送，提交：cf9cab20。",
+		"  - 删除通用 InitEnabledComponents/IsEnabled。",
+		"    › v2/framework/session/player/audio/audio.go这个的改动中，你看一下，因为线上他用",
+		"      的可能是没有文本的TTS。不会有问题吧？",
+		"    • 我按代码审查方式看这个文件。",
+	}, "\n")
+
+	got := PickNotifyContent(visible, "", nil, input)
+	want := "• 我按代码审查方式看这个文件。"
+	if got != want {
+		t.Fatalf("Codex file mention anchor should ignore hidden @ marker and indentation:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentFallsBackToLastIndentedPromptAfterRichTextRewrite(t *testing.T) {
+	visible := strings.Join([]string{
+		"上一轮完整输出。",
+		"  - 上一轮列表项。",
+		"    › rich-text-file-chip 请检查这个改动",
+		"      以及所有兼容情况。",
+		"    • 只保留当前轮回复。",
+	}, "\n")
+
+	got := PickNotifyContent(visible, "", nil, "@完全不同的原始富文本引用 请检查这个改动以及所有兼容情况。")
+	want := "• 只保留当前轮回复。"
+	if got != want {
+		t.Fatalf("last indented prompt should prevent full-history fallback after rich-text rewrite:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
 	previous := strings.Join([]string{
 		"old output",

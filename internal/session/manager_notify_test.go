@@ -1622,7 +1622,7 @@ func TestLarkNotificationCardContentPreservesTerminalLineBreaks(t *testing.T) {
 	if len(card.Body.Elements) < 1 || card.Body.Elements[0].Tag != "markdown" {
 		t.Fatalf("card should put terminal output in a markdown element, got %#v", card.Body.Elements)
 	}
-	want := "Select Model and Effort  \n› 1. gpt-5.5 (current)  \n  2. gpt-5.4  \n  3. gpt-5.4-mini"
+	want := "Select Model and Effort  \n\n› 1. gpt-5.5 (current)  \n  2. gpt-5.4  \n  3. gpt-5.4-mini"
 	if card.Body.Elements[0].Content != want {
 		t.Fatalf("terminal output should keep visible line breaks, got %q", card.Body.Elements[0].Content)
 	}

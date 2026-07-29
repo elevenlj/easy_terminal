@@ -626,6 +626,9 @@ func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot str
 		if body := visibleTextFromLastInput(visibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
 			return trimVisibleText(body), true
 		}
+		if body := visibleTextAfterLastInputPrompt(visibleSnapshot); strings.TrimSpace(body) != "" {
+			return trimVisibleText(body), true
+		}
 	}
 	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok {
 		return trimVisibleText(body), true
@@ -857,6 +860,44 @@ func visibleTextFromLastAnyInput(visibleSnapshot string) string {
 	return ""
 }
 
+func visibleTextAfterLastInputPrompt(visibleSnapshot string) string {
+	lines := strings.Split(visibleSnapshot, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		text, ok := trimPromptPrefix(trimmed, "›")
+		if !ok || strings.TrimSpace(text) == "" || isCodexSuggestionLine(trimmed) {
+			continue
+		}
+		for j := i + 1; j < len(lines); j++ {
+			candidate := strings.TrimSpace(lines[j])
+			if candidate == "" {
+				continue
+			}
+			if _, nextPrompt := trimPromptPrefix(candidate, "›"); nextPrompt {
+				break
+			}
+			if startsCodexResponseBlock(candidate) {
+				return strings.TrimSpace(strings.Join(lines[j:], "\n"))
+			}
+		}
+	}
+	return ""
+}
+
+func startsCodexResponseBlock(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(line)
+	switch r {
+	case '•', '⏺', '■', '⚠', '✦':
+		return true
+	default:
+		return false
+	}
+}
+
 func isWrappedInputEchoAt(lines []string, i int, lastInputText string) bool {
 	_, ok := wrappedInputEchoEndAt(lines, i, lastInputText)
 	return ok
@@ -871,6 +912,9 @@ func wrappedInputEchoEndAt(lines []string, i int, lastInputText string) (int, bo
 	current := compactAnchorText(text)
 	if target == "" || current == "" || !strings.HasPrefix(target, current) {
 		return i, false
+	}
+	if current == target {
+		return i, true
 	}
 	for j := i + 1; j < len(lines) && j <= i+32; j++ {
 		trimmed := strings.TrimSpace(lines[j])
@@ -895,7 +939,14 @@ func wrappedInputEchoEndAt(lines []string, i int, lastInputText string) (int, bo
 }
 
 func compactAnchorText(text string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(text)), "")
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(text) {
+		if unicode.IsSpace(r) || r == '@' || r == '＠' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func visibleTextFromLastShellInput(visibleSnapshot string) string {
