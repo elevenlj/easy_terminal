@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
@@ -27,6 +28,11 @@ type LarkAppNotifier struct {
 	appID            string
 	appSecret        string
 	client           *lark.Client
+	uncachedClient   *lark.Client
+	tokenMu          sync.RWMutex
+	tokenRefreshMu   sync.Mutex
+	tenantToken      string
+	tokenFetcher     func(context.Context) (string, error)
 	receiveID        string
 	mention          bool
 	customShortcutMu sync.RWMutex
@@ -41,17 +47,64 @@ func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkA
 		return &LarkAppNotifier{receiveID: receiveID, mention: mention}
 	}
 	return &LarkAppNotifier{
-		appID:     appID,
-		appSecret: appSecret,
-		client:    lark.NewClient(appID, appSecret),
-		receiveID: receiveID,
-		mention:   mention,
-		tipSent:   make(map[string]map[int]bool),
+		appID:          appID,
+		appSecret:      appSecret,
+		client:         lark.NewClient(appID, appSecret),
+		uncachedClient: lark.NewClient(appID, appSecret, lark.WithEnableTokenCache(false)),
+		receiveID:      receiveID,
+		mention:        mention,
+		tipSent:        make(map[string]map[int]bool),
 	}
 }
 
 func (n *LarkAppNotifier) Available() bool {
 	return n != nil && n.client != nil
+}
+
+func (n *LarkAppNotifier) tenantTokenSnapshot() string {
+	if n == nil {
+		return ""
+	}
+	n.tokenMu.RLock()
+	defer n.tokenMu.RUnlock()
+	return n.tenantToken
+}
+
+func (n *LarkAppNotifier) rememberTenantToken(token string) {
+	if n == nil || strings.TrimSpace(token) == "" {
+		return
+	}
+	n.tokenMu.Lock()
+	n.tenantToken = strings.TrimSpace(token)
+	n.tokenMu.Unlock()
+}
+
+// refreshTenantToken explicitly fetches a token instead of relying on the SDK's
+// process-wide cache. That cache can retain an invalid token after macOS wakes
+// from sleep. Concurrent failed requests share the first newly fetched token.
+func (n *LarkAppNotifier) refreshTenantToken(stale string) (string, error) {
+	if n == nil {
+		return "", errors.New("lark notifier is not configured")
+	}
+	n.tokenRefreshMu.Lock()
+	defer n.tokenRefreshMu.Unlock()
+	if current := n.tenantTokenSnapshot(); current != "" && current != stale {
+		return current, nil
+	}
+	fetch := n.tenantAccessToken
+	if n.tokenFetcher != nil {
+		fetch = n.tokenFetcher
+	}
+	token, err := fetch(context.Background())
+	if err != nil {
+		return "", err
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", errors.New("lark tenant access token is empty")
+	}
+	n.rememberTenantToken(token)
+	return token, nil
 }
 
 func (n *LarkAppNotifier) SetCustomShortcuts(shortcuts []LarkCustomShortcut) {
@@ -592,6 +645,9 @@ func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
+	// Card creation already obtains a fresh token directly. Reuse it for later
+	// PATCH requests so they do not fall back to the SDK's stale global cache.
+	n.rememberTenantToken(token)
 	receiveID := n.receiveID
 	receiveIDType := "open_id"
 	if note.ChatID != "" {
@@ -648,9 +704,7 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 			Content(content).
 			Build()).
 		Build()
-	resp, err := retryLarkPatchMessage(func() (*larkim.PatchMessageResp, error) {
-		return n.client.Im.V1.Message.Patch(context.Background(), req)
-	})
+	resp, err := n.patchMessage(req)
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}
@@ -682,9 +736,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 			Content(content).
 			Build()).
 		Build()
-	resp, err := retryLarkPatchMessage(func() (*larkim.PatchMessageResp, error) {
-		return n.client.Im.V1.Message.Patch(context.Background(), req)
-	})
+	resp, err := n.patchMessage(req)
 	if err != nil {
 		return err
 	}
@@ -750,9 +802,7 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 	req := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(
 		larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType("interactive").Content(content).Build(),
 	).Build()
-	resp, err := retryLarkCreateMessage(func() (*larkim.CreateMessageResp, error) {
-		return n.client.Im.V1.Message.Create(context.Background(), req)
-	})
+	resp, err := n.createMessage(req)
 	if err != nil {
 		return err
 	}
@@ -760,6 +810,76 @@ func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateN
 		return fmt.Errorf("lark completion tip message API returned code %d: %s", resp.Code, resp.Msg)
 	}
 	return nil
+}
+
+func (n *LarkAppNotifier) patchMessage(req *larkim.PatchMessageReq) (*larkim.PatchMessageResp, error) {
+	return retryLarkPatchMessage(func() (*larkim.PatchMessageResp, error) {
+		if n == nil || n.client == nil {
+			return nil, errors.New("lark notifier is not configured")
+		}
+		staleToken := n.tenantTokenSnapshot()
+		resp, err := n.patchLarkMessageWithToken(req, staleToken)
+		if err != nil || !larkAccessTokenInvalid(resp) {
+			return resp, err
+		}
+
+		freshToken, refreshErr := n.refreshTenantToken(staleToken)
+		if refreshErr != nil {
+			return resp, fmt.Errorf("refresh lark tenant access token: %w", refreshErr)
+		}
+		return n.patchLarkMessageWithToken(req, freshToken)
+	})
+}
+
+func (n *LarkAppNotifier) createMessage(req *larkim.CreateMessageReq) (*larkim.CreateMessageResp, error) {
+	return retryLarkCreateMessage(func() (*larkim.CreateMessageResp, error) {
+		if n == nil || n.client == nil {
+			return nil, errors.New("lark notifier is not configured")
+		}
+		staleToken := n.tenantTokenSnapshot()
+		resp, err := n.createLarkMessageWithToken(req, staleToken)
+		if err != nil || !larkCreateAccessTokenInvalid(resp) {
+			return resp, err
+		}
+
+		freshToken, refreshErr := n.refreshTenantToken(staleToken)
+		if refreshErr != nil {
+			return resp, fmt.Errorf("refresh lark tenant access token: %w", refreshErr)
+		}
+		return n.createLarkMessageWithToken(req, freshToken)
+	})
+}
+
+func (n *LarkAppNotifier) patchLarkMessageWithToken(req *larkim.PatchMessageReq, token string) (*larkim.PatchMessageResp, error) {
+	if token == "" {
+		return n.client.Im.V1.Message.Patch(context.Background(), req)
+	}
+	if n.uncachedClient == nil {
+		return nil, errors.New("lark uncached client is not configured")
+	}
+	return n.uncachedClient.Im.V1.Message.Patch(context.Background(), req, larkcore.WithTenantAccessToken(token))
+}
+
+func (n *LarkAppNotifier) createLarkMessageWithToken(req *larkim.CreateMessageReq, token string) (*larkim.CreateMessageResp, error) {
+	if token == "" {
+		return n.client.Im.V1.Message.Create(context.Background(), req)
+	}
+	if n.uncachedClient == nil {
+		return nil, errors.New("lark uncached client is not configured")
+	}
+	return n.uncachedClient.Im.V1.Message.Create(context.Background(), req, larkcore.WithTenantAccessToken(token))
+}
+
+func larkAccessTokenInvalid(resp *larkim.PatchMessageResp) bool {
+	return resp != nil && invalidLarkAccessTokenCode(resp.Code)
+}
+
+func larkCreateAccessTokenInvalid(resp *larkim.CreateMessageResp) bool {
+	return resp != nil && invalidLarkAccessTokenCode(resp.Code)
+}
+
+func invalidLarkAccessTokenCode(code int) bool {
+	return code == 99991663
 }
 
 func larkUpdateTipCardContent(_ int, receiveID string, mention bool) (string, error) {

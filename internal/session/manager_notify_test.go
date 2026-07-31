@@ -2054,6 +2054,74 @@ func fakeLarkSuccessClient(t *testing.T) *lark.Client {
 	return lark.NewClient("app", "secret", lark.WithHttpClient(fakeLarkHTTPClient{}))
 }
 
+type tokenRecoveryLarkHTTPClient struct {
+	state *tokenRecoveryLarkHTTPState
+}
+
+type tokenRecoveryLarkHTTPState struct {
+	mu         sync.Mutex
+	patchCalls int
+}
+
+func (c *tokenRecoveryLarkHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	c.state.mu.Lock()
+	defer c.state.mu.Unlock()
+	body := `{"code":0,"msg":"success","data":{}}`
+	if strings.Contains(req.URL.Path, "tenant_access_token") {
+		body = `{"code":0,"msg":"success","tenant_access_token":"stale-token","expire":7200}`
+	} else if req.Method == http.MethodPatch {
+		c.state.patchCalls++
+		if req.Header.Get("Authorization") != "Bearer fresh-token" {
+			body = `{"code":99991663,"msg":"Invalid access token for authorization."}`
+		}
+	}
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json; charset=utf-8")
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func TestLarkPatchRefreshesClientAfterAccessTokenExpires(t *testing.T) {
+	state := &tokenRecoveryLarkHTTPState{}
+	tokenFetches := 0
+	httpClient := &tokenRecoveryLarkHTTPClient{state: state}
+	notifier := &LarkAppNotifier{
+		appID:     "token-recovery-test-app",
+		appSecret: "secret",
+		client:    lark.NewClient("token-recovery-test-app", "secret", lark.WithHttpClient(httpClient)),
+		uncachedClient: lark.NewClient("token-recovery-test-app", "secret",
+			lark.WithHttpClient(httpClient), lark.WithEnableTokenCache(false)),
+		tipSent: make(map[string]map[int]bool),
+	}
+	notifier.tokenFetcher = func(context.Context) (string, error) {
+		tokenFetches++
+		return "fresh-token", nil
+	}
+
+	result, err := notifier.updateWaiting(WaitingNotification{
+		SessionID: "sess-1",
+		MessageID: "msg-1",
+	}, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Updated {
+		t.Fatalf("card should be updated after refreshing the expired token: %#v", result)
+	}
+	if tokenFetches != 1 {
+		t.Fatalf("token fetches = %d, want one explicit refresh", tokenFetches)
+	}
+	if state.patchCalls != 3 {
+		t.Fatalf("patch calls = %d, want SDK retry with stale cache plus immediate retry with explicit fresh token", state.patchCalls)
+	}
+	if got := notifier.tenantTokenSnapshot(); got != "fresh-token" {
+		t.Fatalf("remembered tenant token = %q, want fresh token", got)
+	}
+}
+
 func TestNotifyAfterStableDoesNotSendWhenNotificationDisabled(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier))
