@@ -43,12 +43,12 @@ try {
     "--no-default-browser-check",
     `--remote-debugging-port=${chromePort}`,
     `--user-data-dir=${path.join(tmp, "chrome-profile")}`,
-    `http://localhost:${port}`,
+    "about:blank",
   ], { stdio: ["ignore", "pipe", "pipe"] });
   pipeLogs(chrome, "chrome");
   await waitForHTTP(`http://localhost:${chromePort}/json/version`);
 
-  const pageInfo = await newPage(`http://localhost:${port}`);
+  const pageInfo = await singlePageTarget();
   cdp = await CDPClient.connect(pageInfo.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
@@ -111,6 +111,10 @@ try {
   await runTUILikeSnapshotE2E();
 
   await pasteImageIntoTerminal();
+  // The paste handler intentionally inserts the uploaded path without
+  // submitting it. Execute the pending shell line so the assertion observes
+  // deterministic PTY output instead of depending on terminal-driver echo.
+  await evalExpr("window.easyTerminalApp.queueTerminalInput('\\r').then(() => true)");
   await waitForOutput("/data/uploads/");
   await waitForOutput(".png");
 
@@ -309,8 +313,18 @@ async function evalExpr(expression) {
   return result.result?.value;
 }
 
-async function newPage(url) {
-  return fetchJSON(`http://localhost:${chromePort}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
+async function singlePageTarget() {
+  let pages = [];
+  await waitFor(async () => {
+    const targets = await fetchJSON(`http://localhost:${chromePort}/json/list`);
+    pages = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    return pages.length > 0;
+  });
+  const [primary, ...extras] = pages;
+  for (const extra of extras) {
+    await fetch(`http://localhost:${chromePort}/json/close/${encodeURIComponent(extra.id)}`, { method: "PUT" }).catch(() => {});
+  }
+  return primary;
 }
 
 async function fetchJSON(url, options) {

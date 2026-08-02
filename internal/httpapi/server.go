@@ -75,6 +75,13 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Static assets are embedded in the executable and keep stable URLs across
+	// upgrades. Do not let a browser reuse an older frontend against a newer
+	// server protocol (for example, an app.js that cannot echo snapshot request
+	// IDs yet).
+	w.Header().Set("Cache-Control", "no-store, max-age=0, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
 	if ct := mime.TypeByExtension(filepath.Ext(path)); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}

@@ -24,6 +24,10 @@ func (rt *RuntimeSession) MarkAgentExitActivity() {
 		return
 	}
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
 	rt.session.LastMode = SessionModeShell
 	rt.session.UpdatedAt = time.Now().UTC()
 	s := rt.session
@@ -38,6 +42,10 @@ func (rt *RuntimeSession) RecordShellCommandForRecovery(command string) {
 		return
 	}
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
 	rt.updateRecoveryFromSubmittedInputLocked(command)
 	s := rt.session
 	rt.mu.Unlock()

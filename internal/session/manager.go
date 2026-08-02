@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -720,6 +721,9 @@ func (m *Manager) persist(ctx context.Context, sess Session) error {
 type RuntimeSession struct {
 	mu                                sync.Mutex
 	notificationPatchMu               sync.Mutex
+	terminalCloseOnce                 sync.Once
+	sessionEndedOnce                  sync.Once
+	closed                            bool
 	manager                           *Manager
 	session                           Session
 	terminal                          Terminal
@@ -728,18 +732,31 @@ type RuntimeSession struct {
 	roundReply                        []byte
 	visibleSnapshot                   string
 	visibleSnapshotSource             string
+	visibleSnapshotResponder          chan RuntimeEvent
+	visibleSnapshotCols               uint16
 	visibleSnapshotVersion            int64
 	terminalCols                      uint16
 	terminalRows                      uint16
 	snapshotAtRoundStart              string
+	snapshotAtRoundSource             string
+	snapshotAtRoundResponder          chan RuntimeEvent
+	snapshotAtRoundCols               uint16
 	snapshotAtRoundVersion            int64
 	snapshotAtRoundStartSet           bool
+	capturedInputBaselineResponder    chan RuntimeEvent
+	capturedInputBaselineHeadless     bool
 	lastInputText                     string
 	inputLineBuffer                   string
+	inputCursor                       int
+	inputRecordUnreliable             bool
+	inputBracketedPaste               bool
 	lastNotifiedRoundHash             string
 	lastNotifiedMessageID             string
 	lastNotifiedContent               string
 	lastNotifiedVisibleSnapshot       string
+	lastNotifiedVisibleSnapshotSource string
+	lastNotifiedVisibleResponder      chan RuntimeEvent
+	lastNotifiedVisibleCols           uint16
 	notificationMentionOpenID         string
 	notificationUpdateNo              int
 	notificationRunning               bool
@@ -759,7 +776,12 @@ type RuntimeSession struct {
 	startupNotifyMode                 startupNotifyMode
 	inputQueueUntil                   time.Time
 	subscribers                       map[chan RuntimeEvent]runtimeSubscriber
-	snapshotWaiters                   []chan struct{}
+	snapshotRequests                  map[string]*pendingSnapshotRequest
+	nextSnapshotRequestID             int64
+	latestAppliedSnapshotRequestID    int64
+	snapshotRoundGeneration           int64
+	preferredBrowserSnapshotSource    chan RuntimeEvent
+	preferredHeadlessSnapshotSource   chan RuntimeEvent
 	pendingHeadlessSnapshots          int
 	nextSeq                           int64
 	stateVersion                      int64
@@ -770,10 +792,12 @@ type RuntimeSession struct {
 }
 
 type RuntimeEvent struct {
-	Type string
-	Data []byte
-	Cols uint16
-	Rows uint16
+	Type      string
+	Data      []byte
+	Cols      uint16
+	Rows      uint16
+	RequestID string
+	Purpose   string
 }
 
 // agentIdleCompletionFallback is a safety net for turns that cannot invoke
@@ -784,10 +808,22 @@ type runtimeSubscriber struct {
 	Headless bool
 }
 
+type pendingSnapshotRequest struct {
+	waiter         chan struct{}
+	headless       bool
+	seq            int64
+	round          int64
+	target         chan RuntimeEvent
+	requiredTarget chan RuntimeEvent
+	purpose        string
+	applied        bool
+}
+
 const (
-	RuntimeEventOutput          = "output"
-	RuntimeEventSnapshotRequest = "snapshot_request"
-	RuntimeEventTerminalResize  = "terminal_resize"
+	RuntimeEventOutput           = "output"
+	RuntimeEventSnapshotRequest  = "snapshot_request"
+	RuntimeEventTerminalResize   = "terminal_resize"
+	SnapshotPurposeInputBaseline = "input_baseline"
 )
 
 func (rt *RuntimeSession) Snapshot() Session {
@@ -845,27 +881,60 @@ func (rt *RuntimeSession) Subscribe() (chan RuntimeEvent, func()) {
 func (rt *RuntimeSession) SubscribeWithMode(headless bool) (chan RuntimeEvent, func()) {
 	ch := make(chan RuntimeEvent, 64)
 	rt.mu.Lock()
+	if rt.closed {
+		close(ch)
+		rt.mu.Unlock()
+		return ch, func() {}
+	}
 	if rt.subscribers == nil {
 		rt.subscribers = make(map[chan RuntimeEvent]runtimeSubscriber)
 	}
 	rt.subscribers[ch] = runtimeSubscriber{Headless: headless}
-	needsSnapshot := len(rt.snapshotWaiters) > 0
-	headlessOnly := rt.pendingHeadlessSnapshots > 0
-	sessionID := rt.session.ID
-	rt.mu.Unlock()
-	if !headless && rt.manager != nil {
-		rt.manager.BrowserActive(sessionID)
-	}
-	if needsSnapshot && (headless || !headlessOnly) {
-		select {
-		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
-		default:
+	// A headless renderer is commonly started after the request that needs it.
+	// Dispatch still happens while holding rt.mu so cancel/terminal shutdown
+	// cannot close the channel between the membership check and the send.
+	for requestID, request := range rt.snapshotRequests {
+		if request == nil || request.headless != headless || request.target != nil {
+			continue
 		}
+		// Central dispatch enforces requiredTarget. A renderer that happens to
+		// subscribe while an owner-bound request is pending must not steal it.
+		rt.dispatchSnapshotRequestLocked(requestID, request)
+	}
+	sessionID := rt.session.ID
+	reportBrowserActive := !headless && !rt.headlessRendererOwnsRoundLocked()
+	rt.mu.Unlock()
+	if reportBrowserActive && rt.manager != nil {
+		rt.manager.BrowserActive(sessionID)
 	}
 	cancel := func() {
 		rt.mu.Lock()
 		if _, ok := rt.subscribers[ch]; ok {
 			delete(rt.subscribers, ch)
+			if rt.preferredBrowserSnapshotSource == ch {
+				rt.preferredBrowserSnapshotSource = nil
+			}
+			if rt.preferredHeadlessSnapshotSource == ch {
+				rt.preferredHeadlessSnapshotSource = nil
+			}
+			for requestID, request := range rt.snapshotRequests {
+				if request == nil {
+					continue
+				}
+				if request.requiredTarget == ch {
+					// A round-owner request must never move to another renderer.
+					// Removing it while holding rt.mu makes a simultaneous late
+					// response fail closed and avoids racing channel closure.
+					delete(rt.snapshotRequests, requestID)
+					close(request.waiter)
+					continue
+				}
+				if request.target != ch {
+					continue
+				}
+				request.target = nil
+				rt.dispatchSnapshotRequestLocked(requestID, request)
+			}
 			close(ch)
 		}
 		rt.mu.Unlock()
@@ -873,15 +942,117 @@ func (rt *RuntimeSession) SubscribeWithMode(headless bool) (chan RuntimeEvent, f
 	return ch, cancel
 }
 
+// headlessRendererOwnsRoundLocked protects the renderer identity used by the
+// current round boundary. Opening the same session on another computer must
+// not stop that headless renderer until a browser has successfully captured
+// and committed the next round's input baseline.
+func (rt *RuntimeSession) headlessRendererOwnsRoundLocked() bool {
+	if rt.capturedInputBaselineHeadless {
+		return true
+	}
+	if rt.snapshotAtRoundStartSet {
+		if isHeadlessSnapshotSource(rt.snapshotAtRoundSource) {
+			return true
+		}
+		if sub, ok := rt.subscribers[rt.snapshotAtRoundResponder]; ok && sub.Headless {
+			return true
+		}
+	}
+	for _, request := range rt.snapshotRequests {
+		if request != nil && request.headless && request.purpose == SnapshotPurposeInputBaseline {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *RuntimeSession) dispatchSnapshotRequestLocked(requestID string, request *pendingSnapshotRequest) bool {
+	if request == nil || request.target != nil {
+		return request != nil && request.target != nil
+	}
+	if request.requiredTarget != nil {
+		target := request.requiredTarget
+		sub, ok := rt.subscribers[target]
+		if !ok || sub.Headless != request.headless {
+			return false
+		}
+		select {
+		case target <- RuntimeEvent{Type: RuntimeEventSnapshotRequest, RequestID: requestID, Purpose: request.purpose}:
+			request.target = target
+			return true
+		default:
+			return false
+		}
+	}
+	preferred := rt.preferredBrowserSnapshotSource
+	if request.headless {
+		preferred = rt.preferredHeadlessSnapshotSource
+	}
+	if preferred != nil {
+		if sub, ok := rt.subscribers[preferred]; ok && sub.Headless == request.headless {
+			select {
+			case preferred <- RuntimeEvent{Type: RuntimeEventSnapshotRequest, RequestID: requestID, Purpose: request.purpose}:
+				request.target = preferred
+				return true
+			default:
+			}
+		}
+	}
+	for ch, sub := range rt.subscribers {
+		if sub.Headless != request.headless || ch == preferred {
+			continue
+		}
+		select {
+		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest, RequestID: requestID, Purpose: request.purpose}:
+			request.target = ch
+			return true
+		default:
+		}
+	}
+	return false
+}
+
 func (rt *RuntimeSession) WriteInput(data string) error {
+	return rt.writeInput(data, nil, nil)
+}
+
+// WriteInputFrom binds subsequent browser snapshots and resize ownership to
+// the WebSocket that is actively typing. With two computers connected, an
+// idle renderer must not randomly become the source of this round's boundary.
+func (rt *RuntimeSession) WriteInputFrom(data string, responder chan RuntimeEvent) error {
+	return rt.writeInput(data, nil, responder)
+}
+
+type inputSnapshotBaseline struct {
+	data      string
+	source    string
+	responder chan RuntimeEvent
+}
+
+// WriteInputWithSnapshotBaseline atomically binds the browser-rendered screen
+// to the Enter that starts a new round. A snapshot response from another
+// WebSocket cannot slip between the baseline update and the round-generation
+// change and replace the boundary with a stale screen.
+func (rt *RuntimeSession) WriteInputWithSnapshotBaseline(data string, snapshot string, source string) error {
+	return rt.writeInput(data, &inputSnapshotBaseline{data: snapshot, source: source}, nil)
+}
+
+func (rt *RuntimeSession) WriteInputWithSnapshotBaselineFrom(data string, snapshot string, source string, responder chan RuntimeEvent) error {
+	return rt.writeInput(data, &inputSnapshotBaseline{data: snapshot, source: source, responder: responder}, responder)
+}
+
+func (rt *RuntimeSession) writeInput(data string, baseline *inputSnapshotBaseline, responder chan RuntimeEvent) error {
 	if data == "" {
 		return nil
+	}
+	if !rt.recordInputActivityWithBaseline(data, inputChangesSessionState(data), baseline, responder) {
+		return io.ErrClosedPipe
 	}
 	if strings.Contains(data, "\x03\x03") {
 		rt.MarkAgentExitActivity()
 	}
-	if inputChangesSessionState(data) {
-		rt.MarkInputActivity(data)
+	if rt.terminal == nil {
+		return io.ErrClosedPipe
 	}
 	_, err := rt.terminal.Write([]byte(data))
 	return err
@@ -983,10 +1154,25 @@ func (rt *RuntimeSession) runRecoveryCommand() {
 }
 
 func (rt *RuntimeSession) Resize(cols, rows uint16) error {
+	return rt.ResizeFrom(cols, rows, nil)
+}
+
+func (rt *RuntimeSession) ResizeFrom(cols, rows uint16, responder chan RuntimeEvent) error {
 	if cols < 80 || rows < 20 {
 		return nil
 	}
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return io.ErrClosedPipe
+	}
+	if responder != nil {
+		sub, ok := rt.subscribers[responder]
+		if !ok || sub.Headless || (rt.preferredBrowserSnapshotSource != nil && rt.preferredBrowserSnapshotSource != responder) {
+			rt.mu.Unlock()
+			return nil
+		}
+	}
 	currentCols, currentRows := rt.terminalSizeLocked()
 	terminal := rt.terminal
 	if currentCols == cols && currentRows == rows {
@@ -1020,21 +1206,129 @@ func (rt *RuntimeSession) SetVisibleSnapshot(data string) {
 	rt.SetVisibleSnapshotWithSource(data, "legacy")
 }
 
+func (rt *RuntimeSession) applyInputSnapshotBaselineLocked(data string, source string, responder chan RuntimeEvent) (string, int64) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		source = "browser:input-baseline"
+	}
+	rt.visibleSnapshot = data
+	rt.visibleSnapshotSource = source
+	rt.visibleSnapshotResponder = responder
+	rt.visibleSnapshotCols = rt.terminalCols
+	rt.visibleSnapshotVersion++
+	return source, rt.visibleSnapshotVersion
+}
+
 func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source string) {
+	rt.setVisibleSnapshot(data, source, "", nil, true)
+}
+
+// SetVisibleSnapshotResponse applies a snapshot returned for a specific
+// request. Late or unrelated responses must not overwrite the canonical
+// snapshot used as the current round boundary.
+func (rt *RuntimeSession) SetVisibleSnapshotResponse(data string, source string, requestID string) {
+	rt.SetVisibleSnapshotResponseFrom(data, source, requestID, nil)
+}
+
+// SetVisibleSnapshotResponseFrom additionally binds the response to the
+// subscriber that received the request. A disconnected renderer cannot race
+// its late response against a request that has already been reassigned.
+func (rt *RuntimeSession) SetVisibleSnapshotResponseFrom(data string, source string, requestID string, responder chan RuntimeEvent) {
+	rt.setVisibleSnapshot(data, source, strings.TrimSpace(requestID), responder, false)
+}
+
+func (rt *RuntimeSession) setVisibleSnapshot(data string, source string, requestID string, responder chan RuntimeEvent, legacy bool) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		source = "unknown"
 	}
 	rt.mu.Lock()
-	if isBrowserSnapshotSource(source) && (rt.pendingHeadlessSnapshots > 0 || (rt.hasHeadlessSubscriberLocked() && !rt.hasRealSubscriberLocked())) {
+	if rt.closed {
 		sessionID := rt.session.ID
 		rt.mu.Unlock()
-		log.Printf("visible snapshot ignored session=%s source=%s reason=headless_snapshot_active len=%d", sessionID, source, len(data))
+		log.Printf("visible snapshot ignored session=%s source=%s request_id=%s reason=session_closed len=%d", sessionID, source, requestID, len(data))
 		return
+	}
+	var acceptedRequest *pendingSnapshotRequest
+	waiters := make([]chan struct{}, 0, 1)
+	if !legacy {
+		if requestID == "" && responder != nil {
+			requestID = rt.uniqueLegacySnapshotRequestIDLocked(source, responder)
+		}
+		if rt.closed || !rt.session.Live || requestID == "" {
+			sessionID := rt.session.ID
+			rt.mu.Unlock()
+			reason := "missing_request_id"
+			if requestID != "" {
+				reason = "session_not_live"
+			}
+			log.Printf("visible snapshot ignored session=%s source=%s request_id=%s reason=%s len=%d", sessionID, source, requestID, reason, len(data))
+			return
+		}
+		acceptedRequest = rt.snapshotRequests[requestID]
+		wrongResponder := responder != nil && acceptedRequest != nil && acceptedRequest.target != responder
+		if acceptedRequest == nil || wrongResponder || acceptedRequest.round != rt.snapshotRoundGeneration || acceptedRequest.headless != isHeadlessSnapshotSource(source) {
+			sessionID := rt.session.ID
+			rt.mu.Unlock()
+			log.Printf("visible snapshot ignored session=%s source=%s request_id=%s reason=stale_wrong_source_or_responder len=%d", sessionID, source, requestID, len(data))
+			return
+		}
+		delete(rt.snapshotRequests, requestID)
+		waiters = append(waiters, acceptedRequest.waiter)
+		if acceptedRequest.seq < rt.latestAppliedSnapshotRequestID {
+			// A newer correlated request has already produced the canonical
+			// snapshot. Wake this caller as satisfied so it does not launch a
+			// redundant headless fallback that could replace the newer view.
+			acceptedRequest.applied = true
+			sessionID := rt.session.ID
+			latest := rt.latestAppliedSnapshotRequestID
+			rt.mu.Unlock()
+			close(acceptedRequest.waiter)
+			log.Printf("visible snapshot ignored session=%s source=%s request_id=%s reason=older_than_applied request_seq=%d latest_seq=%d len=%d", sessionID, source, requestID, acceptedRequest.seq, latest, len(data))
+			return
+		}
+		rt.latestAppliedSnapshotRequestID = acceptedRequest.seq
+		acceptedRequest.applied = true
+		if acceptedRequest.target != nil {
+			if acceptedRequest.headless {
+				rt.preferredHeadlessSnapshotSource = acceptedRequest.target
+			} else {
+				rt.preferredBrowserSnapshotSource = acceptedRequest.target
+			}
+		}
+	} else {
+		// Preserve the direct API used by tests and internal callers. Production
+		// WebSocket responses always take the correlated path above.
+		if isBrowserSnapshotSource(source) && (rt.pendingHeadlessSnapshots > 0 || (rt.hasHeadlessSubscriberLocked() && !rt.hasRealSubscriberLocked())) {
+			sessionID := rt.session.ID
+			rt.mu.Unlock()
+			log.Printf("visible snapshot ignored session=%s source=%s reason=headless_snapshot_active len=%d", sessionID, source, len(data))
+			return
+		}
+		for pendingID, request := range rt.snapshotRequests {
+			if request == nil {
+				continue
+			}
+			delete(rt.snapshotRequests, pendingID)
+			request.applied = true
+			if request.seq > rt.latestAppliedSnapshotRequestID {
+				rt.latestAppliedSnapshotRequestID = request.seq
+			}
+			waiters = append(waiters, request.waiter)
+		}
 	}
 	rt.visibleSnapshot = data
 	rt.visibleSnapshotSource = source
+	if responder == nil && acceptedRequest != nil {
+		responder = acceptedRequest.target
+	}
+	rt.visibleSnapshotResponder = responder
+	rt.visibleSnapshotCols = rt.terminalCols
 	rt.visibleSnapshotVersion++
+	if acceptedRequest != nil && acceptedRequest.purpose == SnapshotPurposeInputBaseline {
+		rt.capturedInputBaselineResponder = responder
+		rt.capturedInputBaselineHeadless = acceptedRequest.headless
+	}
 	var interactionNotifyVersion int64
 	var interactionSession Session
 	if rt.manager != nil && rt.session.Status == StatusRunning && rt.hasPendingCodexInteractionLocked() {
@@ -1049,10 +1343,8 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 	}
 	version := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
-	waiters := rt.snapshotWaiters
-	rt.snapshotWaiters = nil
 	rt.mu.Unlock()
-	log.Printf("visible snapshot updated session=%s source=%s version=%d len=%d lines=%d waiters=%d", sessionID, source, version, len(data), countLogLines(data), len(waiters))
+	log.Printf("visible snapshot updated session=%s source=%s request_id=%s version=%d len=%d lines=%d waiters=%d", sessionID, source, requestID, version, len(data), countLogLines(data), len(waiters))
 	for _, ch := range waiters {
 		close(ch)
 	}
@@ -1060,6 +1352,25 @@ func (rt *RuntimeSession) SetVisibleSnapshotWithSource(data string, source strin
 		_ = rt.manager.persist(context.Background(), interactionSession)
 		go rt.notifyIfStillWaitingForInteraction(interactionNotifyVersion)
 	}
+}
+
+// uniqueLegacySnapshotRequestIDLocked keeps one release of compatibility with
+// pages that were already open before request IDs were introduced. The
+// response is accepted only when its exact WebSocket subscriber owns one
+// unambiguous request in the current round; otherwise it remains fail-closed.
+func (rt *RuntimeSession) uniqueLegacySnapshotRequestIDLocked(source string, responder chan RuntimeEvent) string {
+	wantHeadless := isHeadlessSnapshotSource(source)
+	candidate := ""
+	for requestID, request := range rt.snapshotRequests {
+		if request == nil || request.target != responder || request.round != rt.snapshotRoundGeneration || request.headless != wantHeadless {
+			continue
+		}
+		if candidate != "" {
+			return ""
+		}
+		candidate = requestID
+	}
+	return candidate
 }
 
 func isHeadlessSnapshotSource(source string) bool {
@@ -1102,6 +1413,13 @@ func (rt *RuntimeSession) CurrentRoundContent() string {
 	return content
 }
 
+func (rt *RuntimeSession) CurrentRoundRawContent() string {
+	rt.RequestFreshSnapshot(800 * time.Millisecond)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return pickRawNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+}
+
 func (rt *RuntimeSession) CachedCurrentRoundContent() string {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -1112,7 +1430,7 @@ func (rt *RuntimeSession) CurrentVisibleContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return pickNotifyContentWithWindow(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+	return pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
 }
 
 func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
@@ -1123,7 +1441,150 @@ func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
 }
 
 func (rt *RuntimeSession) currentNotifyContentLocked() string {
-	return pickNotifyContentWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+	return pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+}
+
+// previousTextAnchorsAllowedLocked limits input/tail occurrence matching to
+// snapshots captured by the same renderer at the same terminal width. Strict
+// append diffs may still succeed across a reconnect, but a short text sequence
+// from another computer or DOM mode is not allowed to identify this round.
+func (rt *RuntimeSession) previousTextAnchorsAllowedLocked() bool {
+	return rt.notifyTextAnchorPolicyLocked().allowed
+}
+
+func (rt *RuntimeSession) notifyTextAnchorPolicyLocked() notifyTextAnchorPolicy {
+	policy := notifyTextAnchorPolicy{
+		previousGuardLine:  -1,
+		currentGuardLine:   -1,
+		previousCursorLine: -1,
+	}
+	previousSource := rt.lastNotifiedVisibleSnapshotSource
+	previousResponder := rt.lastNotifiedVisibleResponder
+	previousCols := rt.lastNotifiedVisibleCols
+	if rt.snapshotAtRoundStartSet {
+		previousSource = rt.snapshotAtRoundSource
+		previousResponder = rt.snapshotAtRoundResponder
+		previousCols = rt.snapshotAtRoundCols
+	}
+	if previousResponder != rt.visibleSnapshotResponder {
+		return policy
+	}
+	previousMetadata := parseSnapshotSourceContinuity(previousSource)
+	currentMetadata := parseSnapshotSourceContinuity(rt.visibleSnapshotSource)
+	if previousMetadata.present || currentMetadata.present {
+		if !previousMetadata.valid || !currentMetadata.valid ||
+			previousMetadata.continuityVersion != 2 || currentMetadata.continuityVersion != 2 ||
+			previousMetadata.base != currentMetadata.base ||
+			!isBufferSnapshotContinuityBase(previousMetadata.base) ||
+			previousMetadata.renderEpoch != currentMetadata.renderEpoch ||
+			previousCols != rt.visibleSnapshotCols ||
+			previousMetadata.bufferType != "normal" || currentMetadata.bufferType != "normal" ||
+			!previousMetadata.anchorGuardActive || !currentMetadata.anchorGuardActive ||
+			previousMetadata.anchorGuardLine < 0 || currentMetadata.anchorGuardLine < 0 {
+			return policy
+		}
+		// Capacity may legitimately change from false to true during one long
+		// reply. The baseline marker makes that transition safe as long as it is
+		// alive in both snapshots. Capacity cannot decrease within one epoch.
+		if previousMetadata.bufferAtCapacity && !currentMetadata.bufferAtCapacity {
+			return policy
+		}
+		policy.allowed = true
+		policy.enforceIdentity = true
+		policy.previousGuardLine = previousMetadata.anchorGuardLine
+		policy.currentGuardLine = currentMetadata.anchorGuardLine
+		policy.previousCursorLine = previousMetadata.cursorLine
+		return policy
+	}
+	if previousCols != 0 && rt.visibleSnapshotCols != 0 && previousCols != rt.visibleSnapshotCols {
+		return policy
+	}
+	// Direct in-process callers and older unit fixtures have no WebSocket
+	// responder and retain their legacy behavior. A real renderer without the
+	// continuity metadata is not allowed to identify a round by text: an old
+	// page, alternate buffer, or trimmed scrollback could otherwise make a
+	// historical occurrence look like the current boundary.
+	policy.allowed = previousSource == rt.visibleSnapshotSource && previousResponder == nil && rt.visibleSnapshotResponder == nil
+	return policy
+}
+
+type snapshotSourceContinuity struct {
+	base              string
+	continuityVersion uint64
+	renderEpoch       uint64
+	bufferType        string
+	bufferAtCapacity  bool
+	anchorGuardActive bool
+	anchorGuardLine   int
+	cursorLine        int
+	present           bool
+	valid             bool
+}
+
+func isBufferSnapshotContinuityBase(base string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(base)), ":buffer")
+}
+
+// parseSnapshotSourceContinuity decodes renderer continuity metadata appended
+// by the WebSocket bridge. The capture source remains separate so a buffer
+// snapshot can never be matched against a DOM fallback, even within one epoch.
+func parseSnapshotSourceContinuity(source string) snapshotSourceContinuity {
+	parts := strings.Split(source, ";")
+	metadata := snapshotSourceContinuity{base: strings.TrimSpace(parts[0]), anchorGuardLine: -1, cursorLine: -1}
+	values := make(map[string]string, 7)
+	for _, part := range parts[1:] {
+		key, value, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		switch key {
+		case "continuity_version", "render_epoch", "buffer_type", "buffer_at_capacity", "anchor_guard_active", "anchor_guard_line", "cursor_line":
+			metadata.present = true
+			if _, duplicate := values[key]; duplicate {
+				return metadata
+			}
+			values[key] = strings.TrimSpace(strings.ToLower(value))
+		}
+	}
+	if !metadata.present {
+		return metadata
+	}
+	metadata.bufferType = values["buffer_type"]
+	continuityVersion, err := strconv.ParseUint(values["continuity_version"], 10, 64)
+	if err != nil || continuityVersion != 2 {
+		return metadata
+	}
+	epoch, err := strconv.ParseUint(values["render_epoch"], 10, 64)
+	if err != nil || epoch == 0 || metadata.base == "" || metadata.bufferType == "" {
+		return metadata
+	}
+	metadata.continuityVersion = continuityVersion
+	metadata.renderEpoch = epoch
+	capacity, capacityKnown := values["buffer_at_capacity"]
+	if !capacityKnown || (capacity != "true" && capacity != "false") {
+		return metadata
+	}
+	guard, guardKnown := values["anchor_guard_active"]
+	if !guardKnown || (guard != "true" && guard != "false") {
+		return metadata
+	}
+	guardLine, err := strconv.Atoi(values["anchor_guard_line"])
+	if err != nil || guardLine < 0 {
+		return metadata
+	}
+	metadata.bufferAtCapacity = capacity == "true"
+	metadata.anchorGuardActive = guard == "true"
+	metadata.anchorGuardLine = guardLine
+	if cursorValue, ok := values["cursor_line"]; ok {
+		cursorLine, err := strconv.Atoi(cursorValue)
+		if err != nil || cursorLine < -1 {
+			return metadata
+		}
+		metadata.cursorLine = cursorLine
+	}
+	metadata.valid = true
+	return metadata
 }
 
 func (rt *RuntimeSession) currentRoundContentWithFreshSnapshot(timeout time.Duration) (string, bool) {
@@ -1244,20 +1705,47 @@ func (rt *RuntimeSession) disabledNotificationLocked(messageID string) (WaitingN
 }
 
 func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
+	return rt.requestFreshSnapshotFrom(timeout, "", nil)
+}
+
+func (rt *RuntimeSession) requestFreshSnapshot(timeout time.Duration, purpose string) bool {
+	return rt.requestFreshSnapshotFrom(timeout, purpose, nil)
+}
+
+func (rt *RuntimeSession) requestFreshSnapshotFrom(timeout time.Duration, purpose string, origin chan RuntimeEvent) bool {
 	if timeout <= 0 {
 		return false
 	}
+	purpose = strings.TrimSpace(purpose)
 	primaryTimeout := timeout
 	allowHeadlessFallback := false
+	primaryHeadless := false
+	requiredTarget := origin
+	roundOwnerPinned := false
 	rt.mu.Lock()
-	if rt.session.Live && rt.realSubscriberCountLocked() > 0 && rt.manager != nil && rt.manager.onBrowserNeeded != nil {
+	if purpose != SnapshotPurposeInputBaseline && rt.snapshotAtRoundStartSet && rt.snapshotAtRoundResponder != nil {
+		requiredTarget = rt.snapshotAtRoundResponder
+		roundOwnerPinned = true
+	}
+	if requiredTarget != nil {
+		if sub, ok := rt.subscribers[requiredTarget]; ok {
+			primaryHeadless = sub.Headless
+		}
+	}
+	canStartHeadless := rt.manager != nil && rt.manager.onBrowserNeeded != nil
+	canUseHeadless := rt.headlessSubscriberCountLocked() > 0 || canStartHeadless
+	if !roundOwnerPinned && rt.session.Live && canUseHeadless &&
+		(rt.realSubscriberCountLocked() > 0 || (purpose == SnapshotPurposeInputBaseline && origin != nil)) {
 		allowHeadlessFallback = true
 		if timeout >= 300*time.Millisecond {
 			primaryTimeout = minDuration(timeout/2, 500*time.Millisecond)
 		}
 	}
 	rt.mu.Unlock()
-	fresh, attempted := rt.requestFreshSnapshotAttempt(primaryTimeout, false)
+	fresh, attempted := rt.requestFreshSnapshotAttempt(primaryTimeout, primaryHeadless, purpose, requiredTarget)
+	if roundOwnerPinned {
+		return fresh
+	}
 	if fresh || !attempted || !allowHeadlessFallback {
 		return fresh
 	}
@@ -1269,11 +1757,11 @@ func (rt *RuntimeSession) RequestFreshSnapshot(timeout time.Duration) bool {
 	if fallbackTimeout <= 0 {
 		return false
 	}
-	fresh, _ = rt.requestFreshSnapshotAttempt(fallbackTimeout, true)
+	fresh, _ = rt.requestFreshSnapshotAttempt(fallbackTimeout, true, purpose, nil)
 	return fresh
 }
 
-func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, forceHeadless bool) (bool, bool) {
+func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, forceHeadless bool, purpose string, requiredTarget chan RuntimeEvent) (bool, bool) {
 	if timeout <= 0 {
 		return false, false
 	}
@@ -1283,35 +1771,48 @@ func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, for
 		rt.mu.Unlock()
 		return false, false
 	}
-	before := rt.visibleSnapshotVersion
 	sessionID := rt.session.ID
 	hasSubscribers := len(rt.subscribers) > 0
 	headlessSubscribers := rt.headlessSubscriberCountLocked()
 	realSubscribers := rt.realSubscriberCountLocked()
 	canStartHeadless := rt.manager != nil && rt.manager.onBrowserNeeded != nil
-	useHeadless := (forceHeadless && (headlessSubscribers > 0 || canStartHeadless)) || (realSubscribers == 0 && (headlessSubscribers > 0 || canStartHeadless))
+	useHeadless := false
+	if requiredTarget != nil {
+		sub, ok := rt.subscribers[requiredTarget]
+		if !ok {
+			rt.mu.Unlock()
+			return false, true
+		}
+		useHeadless = sub.Headless
+	} else {
+		useHeadless = (forceHeadless && (headlessSubscribers > 0 || canStartHeadless)) || (realSubscribers == 0 && (headlessSubscribers > 0 || canStartHeadless))
+	}
 	needsBrowser := useHeadless && headlessSubscribers == 0 && canStartHeadless
 	if !hasSubscribers && !needsBrowser {
 		rt.mu.Unlock()
 		return false, false
 	}
+	if rt.snapshotRequests == nil {
+		rt.snapshotRequests = make(map[string]*pendingSnapshotRequest)
+	}
+	rt.nextSnapshotRequestID++
+	requestSeq := rt.nextSnapshotRequestID
+	requestID := fmt.Sprintf("snapshot-%s-%d", sessionID, requestSeq)
 	waiter := make(chan struct{})
-	rt.snapshotWaiters = append(rt.snapshotWaiters, waiter)
+	request := &pendingSnapshotRequest{waiter: waiter, headless: useHeadless, seq: requestSeq, round: rt.snapshotRoundGeneration, requiredTarget: requiredTarget, purpose: purpose}
+	rt.snapshotRequests[requestID] = request
 	if useHeadless {
 		rt.pendingHeadlessSnapshots++
 		headlessRequest = true
 	}
-	for ch, sub := range rt.subscribers {
-		if useHeadless && !sub.Headless {
-			continue
+	dispatched := rt.dispatchSnapshotRequestLocked(requestID, request)
+	if requiredTarget != nil && !dispatched {
+		delete(rt.snapshotRequests, requestID)
+		if headlessRequest && rt.pendingHeadlessSnapshots > 0 {
+			rt.pendingHeadlessSnapshots--
 		}
-		if !useHeadless && sub.Headless {
-			continue
-		}
-		select {
-		case ch <- RuntimeEvent{Type: RuntimeEventSnapshotRequest}:
-		default:
-		}
+		rt.mu.Unlock()
+		return false, true
 	}
 	rt.mu.Unlock()
 	if needsBrowser {
@@ -1324,15 +1825,21 @@ func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, for
 	case <-timer.C:
 	}
 	rt.mu.Lock()
+	applied := request.applied
+	if request.requiredTarget == nil {
+		applied = applied ||
+			(request.round == rt.snapshotRoundGeneration && rt.latestAppliedSnapshotRequestID > request.seq)
+	}
+	delete(rt.snapshotRequests, requestID)
 	if headlessRequest && rt.pendingHeadlessSnapshots > 0 {
 		rt.pendingHeadlessSnapshots--
 	}
-	fresh := rt.visibleSnapshotVersion > before
+	fresh := applied
 	subscriberCount := len(rt.subscribers)
 	realSubscriberCount := rt.realSubscriberCountLocked()
 	headlessSubscriberCount := rt.headlessSubscriberCountLocked()
 	rt.mu.Unlock()
-	log.Printf("snapshot request finished session=%s fresh=%v subscribers=%d real_subscribers=%d headless_subscribers=%d needed_browser=%v headless_request=%v timeout=%s", sessionID, fresh, subscriberCount, realSubscriberCount, headlessSubscriberCount, needsBrowser, useHeadless, timeout)
+	log.Printf("snapshot request finished session=%s request_id=%s purpose=%s fresh=%v dispatched=%v subscribers=%d real_subscribers=%d headless_subscribers=%d needed_browser=%v headless_request=%v timeout=%s", sessionID, requestID, purpose, fresh, dispatched, subscriberCount, realSubscriberCount, headlessSubscriberCount, needsBrowser, useHeadless, timeout)
 	return fresh, true
 }
 
@@ -1365,54 +1872,128 @@ func (rt *RuntimeSession) headlessSubscriberCountLocked() int {
 }
 
 func (rt *RuntimeSession) MarkInputActivity(data string) {
+	rt.recordInputActivity(data, true)
+}
+
+func (rt *RuntimeSession) recordInputActivity(data string, changeSessionState bool) {
+	rt.recordInputActivityWithBaseline(data, changeSessionState, nil, nil)
+}
+
+func (rt *RuntimeSession) recordInputActivityWithBaseline(data string, changeSessionState bool, baseline *inputSnapshotBaseline, responder chan RuntimeEvent) bool {
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return false
+	}
+	rt.preferBrowserSnapshotSourceLocked(responder)
+	baselineSource := ""
+	baselineVersion := int64(0)
+	if baseline != nil && rt.session.Live {
+		rt.preferBrowserSnapshotSourceLocked(baseline.responder)
+		baselineSource, baselineVersion = rt.applyInputSnapshotBaselineLocked(baseline.data, baseline.source, baseline.responder)
+	}
 	previousInput := rt.lastInputText
 	submitted := rt.recordInputLocked(data)
 	if submitted {
 		rt.updateRecoveryFromSubmittedInputLocked(rt.lastInputText)
 	}
-	disabledNote, disabledOK := rt.markInputActivityLocked(submitted, previousInput)
+	var disabledNote WaitingNotification
+	disabledOK := false
+	if changeSessionState {
+		disabledNote, disabledOK = rt.markInputActivityLocked(submitted, previousInput)
+	}
 	s := rt.session
+	sessionID := rt.session.ID
+	reportBrowserActive := submitted && rt.browserOwnsCurrentRoundLocked()
 	rt.mu.Unlock()
+	if baselineVersion > 0 {
+		log.Printf("input snapshot baseline updated session=%s source=%s version=%d len=%d lines=%d", sessionID, baselineSource, baselineVersion, len(baseline.data), countLogLines(baseline.data))
+	}
 	if disabledOK {
 		go rt.updateDisabledNotification(disabledNote)
 	}
-	_ = rt.manager.persist(context.Background(), s)
+	if changeSessionState {
+		_ = rt.manager.persist(context.Background(), s)
+	}
+	if reportBrowserActive && rt.manager != nil {
+		rt.manager.BrowserActive(sessionID)
+	}
+	return true
+}
+
+func (rt *RuntimeSession) preferBrowserSnapshotSourceLocked(responder chan RuntimeEvent) {
+	if responder == nil {
+		return
+	}
+	if sub, ok := rt.subscribers[responder]; ok && !sub.Headless {
+		rt.preferredBrowserSnapshotSource = responder
+	}
 }
 
 func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
 	previousInput := rt.lastInputText
 	if cleaned := strings.TrimSpace(cleanInputForRecord(text)); cleaned != "" {
 		rt.lastInputText = cleaned
 	}
 	rt.inputLineBuffer = ""
+	rt.inputCursor = 0
+	rt.inputRecordUnreliable = false
+	rt.inputBracketedPaste = false
 	rt.updateRecoveryFromSubmittedInputLocked(rt.lastInputText)
 	disabledNote, disabledOK := rt.markInputActivityLocked(true, previousInput)
 	s := rt.session
+	sessionID := rt.session.ID
+	reportBrowserActive := rt.browserOwnsCurrentRoundLocked()
 	rt.mu.Unlock()
 	if disabledOK {
 		go rt.updateDisabledNotification(disabledNote)
 	}
 	_ = rt.manager.persist(context.Background(), s)
+	if reportBrowserActive && rt.manager != nil {
+		rt.manager.BrowserActive(sessionID)
+	}
+}
+
+func (rt *RuntimeSession) browserOwnsCurrentRoundLocked() bool {
+	if !rt.snapshotAtRoundStartSet || rt.snapshotAtRoundResponder == nil || !isBrowserSnapshotSource(rt.snapshotAtRoundSource) {
+		return false
+	}
+	sub, ok := rt.subscribers[rt.snapshotAtRoundResponder]
+	return ok && !sub.Headless
 }
 
 func (rt *RuntimeSession) PrepareInputSnapshotBaseline() bool {
-	return rt.prepareInputSnapshotBaseline(defaultInputBaselineSnapshotDeadline)
+	return rt.PrepareInputSnapshotBaselineFrom(nil)
+}
+
+func (rt *RuntimeSession) PrepareInputSnapshotBaselineFrom(responder chan RuntimeEvent) bool {
+	return rt.prepareInputSnapshotBaselineFrom(defaultInputBaselineSnapshotDeadline, responder)
 }
 
 func (rt *RuntimeSession) prepareInputSnapshotBaseline(deadline time.Duration) bool {
+	return rt.prepareInputSnapshotBaselineFrom(deadline, nil)
+}
+
+func (rt *RuntimeSession) prepareInputSnapshotBaselineFrom(deadline time.Duration, responder chan RuntimeEvent) bool {
 	if deadline <= 0 {
 		return false
 	}
 	expires := time.Now().Add(deadline)
-	fresh := rt.RequestFreshSnapshot(minDuration(defaultNotifySnapshotTimeout, deadline))
+	fresh := rt.requestFreshSnapshotFrom(minDuration(defaultNotifySnapshotTimeout, deadline), SnapshotPurposeInputBaseline, responder)
+	if fresh {
+		return true
+	}
 	remaining := time.Until(expires)
 	if remaining <= 0 {
 		return fresh
 	}
 	secondTimeout := minDuration(600*time.Millisecond, remaining)
-	if secondTimeout > 0 && rt.RequestFreshSnapshot(secondTimeout) {
+	if secondTimeout > 0 && rt.requestFreshSnapshotFrom(secondTimeout, SnapshotPurposeInputBaseline, responder) {
 		fresh = true
 	}
 	return fresh
@@ -1430,12 +2011,15 @@ func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput 
 	disabledOK := false
 	rt.pendingTerminalInteraction = nil
 	if submitted {
+		rt.snapshotRoundGeneration++
+		rt.cancelSnapshotRequestsLocked(false)
 		overlapRunningCard := rt.notificationRunning && rt.lastNotifiedMessageID != ""
 		if overlapRunningCard {
 			disabledNote, disabledOK = rt.disabledNotificationLocked(rt.lastNotifiedMessageID)
 			rt.freezeNotificationMessageLocked(rt.lastNotifiedMessageID)
 		}
-		if overlapRunningCard && rt.snapshotAtRoundStartSet {
+		carryNotificationWindow := overlapRunningCard && rt.snapshotAtRoundStartSet && rt.notifyTextAnchorPolicyLocked().allowed
+		if carryNotificationWindow {
 			if strings.TrimSpace(rt.notificationWindowInputText) == "" {
 				rt.notificationWindowInputText = strings.TrimSpace(previousInput)
 			}
@@ -1444,11 +2028,16 @@ func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput 
 			}
 		} else {
 			rt.snapshotAtRoundStart = rt.visibleSnapshot
+			rt.snapshotAtRoundSource = rt.visibleSnapshotSource
+			rt.snapshotAtRoundResponder = rt.visibleSnapshotResponder
+			rt.snapshotAtRoundCols = rt.visibleSnapshotCols
 			rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
 			rt.snapshotAtRoundStartSet = true
 			rt.notificationWindowInputText = ""
 		}
 		rt.roundReply = nil
+		rt.capturedInputBaselineResponder = nil
+		rt.capturedInputBaselineHeadless = false
 		rt.lastNotifiedRoundHash = ""
 		rt.lastNotifiedMessageID = ""
 		rt.lastNotifiedContent = ""
@@ -1689,6 +2278,9 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		rt.lastNotifiedRoundHash = contentHash
 		if hasSnapshotContent {
 			rt.lastNotifiedVisibleSnapshot = rt.visibleSnapshot
+			rt.lastNotifiedVisibleSnapshotSource = rt.visibleSnapshotSource
+			rt.lastNotifiedVisibleResponder = rt.visibleSnapshotResponder
+			rt.lastNotifiedVisibleCols = rt.visibleSnapshotCols
 		}
 		if result.Updated {
 			rt.notificationUpdateNo = n.UpdateNo
@@ -1843,33 +2435,153 @@ func (rt *RuntimeSession) scheduleAutoRefreshOnce(messageID string) {
 }
 
 func (rt *RuntimeSession) recordInputLocked(data string) bool {
-	cleaned := cleanInputForRecord(data)
+	runes := []rune(data)
 	submitted := false
-	for _, r := range cleaned {
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == 0x1b {
+			end := skipInputEscape(runes, i)
+			sequence := string(runes[i : end+1])
+			rt.applyInputEscapeLocked(sequence)
+			i = end
+			continue
+		}
+		if rt.inputBracketedPaste {
+			rt.insertInputRuneLocked(r)
+			continue
+		}
 		switch r {
 		case '\r', '\n':
 			submitted = true
-			if text := strings.TrimSpace(rt.inputLineBuffer); text != "" {
+			if text := strings.TrimSpace(rt.inputLineBuffer); text != "" && !rt.inputRecordUnreliable {
 				rt.lastInputText = text
+			} else if rt.inputRecordUnreliable {
+				rt.lastInputText = ""
 			}
 			rt.inputLineBuffer = ""
+			rt.inputCursor = 0
+			rt.inputRecordUnreliable = false
 		case '\b', 0x7f:
+			rt.deleteInputRuneBeforeCursorLocked()
+		case 0x01: // Ctrl-A / Home
+			rt.inputCursor = 0
+		case 0x05: // Ctrl-E / End
+			rt.inputCursor = len([]rune(rt.inputLineBuffer))
+		case 0x03: // Ctrl-C cancels the current editor line.
+			rt.inputLineBuffer = ""
+			rt.inputCursor = 0
+			rt.inputRecordUnreliable = false
+			rt.lastInputText = ""
+		case 0x04: // Ctrl-D / Delete
+			rt.deleteInputRuneAtCursorLocked()
+		case 0x0b: // Ctrl-K
 			rs := []rune(rt.inputLineBuffer)
-			if len(rs) > 0 {
-				rt.inputLineBuffer = string(rs[:len(rs)-1])
+			if rt.inputCursor < len(rs) {
+				rt.inputLineBuffer = string(rs[:rt.inputCursor])
 			}
+		case 0x15: // Ctrl-U
+			rs := []rune(rt.inputLineBuffer)
+			if rt.inputCursor > len(rs) {
+				rt.inputCursor = len(rs)
+			}
+			rt.inputLineBuffer = string(rs[rt.inputCursor:])
+			rt.inputCursor = 0
+		case 0x17: // Ctrl-W
+			rt.deleteInputWordBeforeCursorLocked()
+		case '\t', 0x12: // Completion/history search changes text outside our view.
+			rt.inputRecordUnreliable = true
 		default:
-			if r >= 0x20 && r != 0x1b {
-				rt.inputLineBuffer += string(r)
+			if r >= 0x20 {
+				rt.insertInputRuneLocked(r)
 			}
 		}
 	}
 	if !submitted {
-		if text := strings.TrimSpace(rt.inputLineBuffer); text != "" {
+		if text := strings.TrimSpace(rt.inputLineBuffer); text != "" && !rt.inputRecordUnreliable {
 			rt.lastInputText = text
 		}
 	}
 	return submitted
+}
+
+func (rt *RuntimeSession) applyInputEscapeLocked(sequence string) {
+	switch sequence {
+	case "\x1b[200~":
+		rt.inputBracketedPaste = true
+	case "\x1b[201~":
+		rt.inputBracketedPaste = false
+	case "\x1b[D", "\x1bOD":
+		if rt.inputCursor > 0 {
+			rt.inputCursor--
+		}
+	case "\x1b[C", "\x1bOC":
+		if rt.inputCursor < len([]rune(rt.inputLineBuffer)) {
+			rt.inputCursor++
+		}
+	case "\x1b[H", "\x1b[1~", "\x1b[7~", "\x1bOH":
+		rt.inputCursor = 0
+	case "\x1b[F", "\x1b[4~", "\x1b[8~", "\x1bOF":
+		rt.inputCursor = len([]rune(rt.inputLineBuffer))
+	case "\x1b[3~":
+		rt.deleteInputRuneAtCursorLocked()
+	case "\x1b[A", "\x1b[B", "\x1bOA", "\x1bOB":
+		// History navigation replaces the line with text the backend does not
+		// know. Clear the anchor rather than guessing and selecting old output.
+		rt.inputRecordUnreliable = true
+	default:
+		rt.inputRecordUnreliable = true
+	}
+}
+
+func (rt *RuntimeSession) insertInputRuneLocked(r rune) {
+	rs := []rune(rt.inputLineBuffer)
+	if rt.inputCursor < 0 || rt.inputCursor > len(rs) {
+		rt.inputCursor = len(rs)
+	}
+	rs = append(rs, 0)
+	copy(rs[rt.inputCursor+1:], rs[rt.inputCursor:])
+	rs[rt.inputCursor] = r
+	rt.inputCursor++
+	rt.inputLineBuffer = string(rs)
+}
+
+func (rt *RuntimeSession) deleteInputRuneBeforeCursorLocked() {
+	rs := []rune(rt.inputLineBuffer)
+	if rt.inputCursor <= 0 || len(rs) == 0 {
+		return
+	}
+	if rt.inputCursor > len(rs) {
+		rt.inputCursor = len(rs)
+	}
+	rs = append(rs[:rt.inputCursor-1], rs[rt.inputCursor:]...)
+	rt.inputCursor--
+	rt.inputLineBuffer = string(rs)
+}
+
+func (rt *RuntimeSession) deleteInputRuneAtCursorLocked() {
+	rs := []rune(rt.inputLineBuffer)
+	if rt.inputCursor < 0 || rt.inputCursor >= len(rs) {
+		return
+	}
+	rs = append(rs[:rt.inputCursor], rs[rt.inputCursor+1:]...)
+	rt.inputLineBuffer = string(rs)
+}
+
+func (rt *RuntimeSession) deleteInputWordBeforeCursorLocked() {
+	rs := []rune(rt.inputLineBuffer)
+	if rt.inputCursor > len(rs) {
+		rt.inputCursor = len(rs)
+	}
+	start := rt.inputCursor
+	for start > 0 && unicode.IsSpace(rs[start-1]) {
+		start--
+	}
+	for start > 0 && !unicode.IsSpace(rs[start-1]) {
+		start--
+	}
+	rs = append(rs[:start], rs[rt.inputCursor:]...)
+	rt.inputCursor = start
+	rt.inputLineBuffer = string(rs)
 }
 
 func inputChangesSessionState(data string) bool {
@@ -1934,6 +2646,10 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 	cp := append([]byte(nil), chunk...)
 	renderable := HasRenderableContent(cp)
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		return
+	}
 	rt.output = append(rt.output, cp...)
 	if len(rt.output) > maxOutputBytes {
 		rt.output = rt.output[len(rt.output)-maxOutputBytes:]
@@ -2038,16 +2754,45 @@ func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token string) (
 
 func (rt *RuntimeSession) Close() {
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		rt.signalSessionEnded()
+		return
+	}
+	rt.closed = true
+	rt.session.Live = false
+	rt.snapshotRoundGeneration++
+	rt.stateVersion++
+	rt.notifyVersion++
 	rt.stopAutoRefreshLocked()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.stopStartupNotifyTimerLocked()
+	rt.cancelPendingSnapshotRequestsLocked()
 	for ch := range rt.subscribers {
 		close(ch)
 		delete(rt.subscribers, ch)
 	}
 	rt.mu.Unlock()
-	_ = rt.terminal.Close()
+	rt.closeTerminal()
+	rt.signalSessionEnded()
+}
+
+func (rt *RuntimeSession) closeTerminal() {
+	rt.terminalCloseOnce.Do(func() {
+		if rt.terminal != nil {
+			_ = rt.terminal.Close()
+		}
+	})
+}
+
+func (rt *RuntimeSession) signalSessionEnded() {
+	if rt == nil || rt.manager == nil {
+		return
+	}
+	rt.sessionEndedOnce.Do(func() {
+		rt.manager.sessionEnded(rt.session.ID)
+	})
 }
 
 func (rt *RuntimeSession) streamOutput() {
@@ -2083,6 +2828,14 @@ func (rt *RuntimeSession) waitForExit() {
 
 func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.mu.Lock()
+	if rt.closed {
+		rt.mu.Unlock()
+		rt.closeTerminal()
+		rt.signalSessionEnded()
+		return
+	}
+	rt.closed = true
+	rt.snapshotRoundGeneration++
 	rt.stopAutoRefreshLocked()
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
@@ -2092,6 +2845,7 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.session.ExitCode = &code
 	rt.session.UpdatedAt = time.Now().UTC()
 	s := rt.session
+	rt.cancelPendingSnapshotRequestsLocked()
 	for ch := range rt.subscribers {
 		close(ch)
 		delete(rt.subscribers, ch)
@@ -2100,15 +2854,33 @@ func (rt *RuntimeSession) markTerminal(status string, code int) {
 	rt.manager.mu.Lock()
 	delete(rt.manager.sessions, s.ID)
 	rt.manager.mu.Unlock()
-	_ = rt.terminal.Close()
+	rt.closeTerminal()
 	if rt.manager.store != nil {
 		_ = rt.manager.store.UpdateSession(context.Background(), s)
 	}
-	rt.manager.sessionEnded(s.ID)
+	rt.signalSessionEnded()
+}
+
+func (rt *RuntimeSession) cancelPendingSnapshotRequestsLocked() {
+	rt.cancelSnapshotRequestsLocked(true)
+}
+
+func (rt *RuntimeSession) cancelSnapshotRequestsLocked(clearPreferred bool) {
+	for requestID, request := range rt.snapshotRequests {
+		delete(rt.snapshotRequests, requestID)
+		if request != nil {
+			close(request.waiter)
+		}
+	}
+	rt.pendingHeadlessSnapshots = 0
+	if clearPreferred {
+		rt.preferredBrowserSnapshotSource = nil
+		rt.preferredHeadlessSnapshotSource = nil
+	}
 }
 
 func (rt *RuntimeSession) notifyStableDelayLocked() time.Duration {
-	if notifyContentNeedsConservativeDelayWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.lastInputText, rt.notificationWindowInputText) {
+	if notifyContentNeedsConservativeDelayWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked()) {
 		return rt.manager.conservativeWaiting
 	}
 	return rt.manager.fastWaiting
@@ -2138,12 +2910,13 @@ func (rt *RuntimeSession) resetAgentIdleCompletionTimerLocked() {
 }
 
 func (rt *RuntimeSession) hasPendingCodexInteractionLocked() bool {
-	body, _ := selectNotifyBodyWithWindow(
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(
 		rt.visibleSnapshot,
 		rt.previousNotifySnapshotLocked(),
 		rt.roundReply,
 		rt.lastInputText,
 		rt.notificationWindowInputText,
+		rt.notifyTextAnchorPolicyLocked(),
 	)
 	return DetectCodexTerminalInteraction(body, rt.session.ID, rt.lastInputText, rt.notifyVersion, rt.visibleSnapshotVersion) != nil
 }
@@ -2194,31 +2967,6 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 	rt.mu.Unlock()
 	if requestFreshSnapshot {
 		rt.RequestFreshSnapshot(defaultNotifySnapshotTimeout)
-	}
-	idealContentDeadline := time.Now()
-	if !immediate {
-		rt.mu.Lock()
-		idealContentDeadline = time.Now().Add(rt.notifyStableDelayLocked())
-		rt.mu.Unlock()
-	}
-	for time.Now().Before(idealContentDeadline) {
-		rt.mu.Lock()
-		needsMoreSnapshot := rt.notifyContentNeedsMoreSnapshotLocked()
-		done := rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version
-		rt.mu.Unlock()
-		if done {
-			return
-		}
-		if !needsMoreSnapshot {
-			break
-		}
-		sleep := time.Until(idealContentDeadline)
-		if sleep > 250*time.Millisecond {
-			sleep = 250 * time.Millisecond
-		}
-		if sleep > 0 {
-			time.Sleep(sleep)
-		}
 	}
 	rt.mu.Lock()
 	if rt.session.Status != StatusWaiting || !rt.session.Live || !rt.session.NotifyOnWaiting || rt.notifyVersion != version {
@@ -2272,6 +3020,9 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 	rt.notificationPatchVersion++
 	n.NotificationVersion = rt.notificationPatchVersion
 	notifiedVisibleSnapshot := rt.visibleSnapshot
+	notifiedVisibleSnapshotSource := rt.visibleSnapshotSource
+	notifiedVisibleResponder := rt.visibleSnapshotResponder
+	notifiedVisibleCols := rt.visibleSnapshotCols
 	roundInput := rt.lastInputText
 	roundSnapshotVersion := rt.snapshotAtRoundVersion
 	updateCoalesce := time.Duration(0)
@@ -2333,6 +3084,9 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 			}
 			rt.lastNotifiedContent = n.Content
 			rt.lastNotifiedVisibleSnapshot = notifiedVisibleSnapshot
+			rt.lastNotifiedVisibleSnapshotSource = notifiedVisibleSnapshotSource
+			rt.lastNotifiedVisibleResponder = notifiedVisibleResponder
+			rt.lastNotifiedVisibleCols = notifiedVisibleCols
 			if result.Updated {
 				rt.notificationUpdateNo = n.UpdateNo
 			}
@@ -2343,6 +3097,9 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 		rt.bindAutoRefreshMessageLocked(result.MessageID)
 		rt.lastNotifiedContent = n.Content
 		rt.lastNotifiedVisibleSnapshot = notifiedVisibleSnapshot
+		rt.lastNotifiedVisibleSnapshotSource = notifiedVisibleSnapshotSource
+		rt.lastNotifiedVisibleResponder = notifiedVisibleResponder
+		rt.lastNotifiedVisibleCols = notifiedVisibleCols
 		rt.notificationUpdateNo = n.UpdateNo
 		rt.notificationRunning = n.Running
 	}
@@ -2554,7 +3311,7 @@ func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotificat
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
-	if notifyContentNeedsMoreSnapshotWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText) {
+	if notifyContentNeedsMoreSnapshotWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked()) {
 		return WaitingNotification{}, "", false, "needs_more_snapshot"
 	}
 	content := rt.currentNotifyContentLocked()
@@ -2579,7 +3336,7 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
-	content := pickNotifyContentWithWindow(rt.visibleSnapshot, "", rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+	content := pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
@@ -2607,7 +3364,7 @@ func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return true
 	}
-	return notifyContentNeedsMoreSnapshotWithWindow(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText)
+	return notifyContentNeedsMoreSnapshotWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
 }
 
 func (rt *RuntimeSession) visibleSnapshotStaleForCurrentRoundLocked() bool {

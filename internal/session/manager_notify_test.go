@@ -16,6 +16,12 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
 
+func setTrustedLegacyRoundFixture(rt *RuntimeSession, baseline string, input string, current string) {
+	rt.SetVisibleSnapshot(baseline)
+	rt.MarkInputActivity(input)
+	rt.SetVisibleSnapshot(current)
+}
+
 func TestWaitingNotificationRequiresReplyContent(t *testing.T) {
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil),
@@ -139,8 +145,7 @@ func TestWaitingNotificationDedupesButRepushesFullRoundWhenMoreOutputArrives(t *
 		manager: NewManager(nil, nil),
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
 	}
-	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？")
+	setTrustedLegacyRoundFixture(rt, "›", "今天天气怎么样\r", "> 今天天气怎么样\n• 你想查哪个城市的天气？")
 
 	rt.mu.Lock()
 	first, firstHash, ok := rt.waitingNotificationLocked()
@@ -314,7 +319,7 @@ func TestNotifyAfterStableDoesNotSendRoundReplyWhenSnapshotDoesNotShowInput(t *t
 	}
 }
 
-func TestNotifyIfStillWaitingFallsBackToVisibleSnapshotWhenIdealContentNeverReady(t *testing.T) {
+func TestNotifyIfStillWaitingDoesNotPatchWithUnanchoredInputOnlySnapshot(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -342,20 +347,11 @@ func TestNotifyIfStillWaitingFallsBackToVisibleSnapshotWhenIdealContentNeverRead
 	rt.notifyIfStillWaiting(version)
 
 	notes := notifier.notes()
-	if len(notes) != 1 {
-		t.Fatalf("expected fallback notification update, got %#v", notes)
+	if len(notes) != 0 {
+		t.Fatalf("input-only snapshot must not replace the card or leak terminal history, got %#v", notes)
 	}
-	if notes[0].MessageID != "running-card" || notes[0].Running {
-		t.Fatalf("fallback should patch the running card as waiting, got %#v", notes[0])
-	}
-	if notes[0].Content != "eleven ~/project > cdx_d" {
-		t.Fatalf("fallback should use the visible snapshot, got %q", notes[0].Content)
-	}
-	if !strings.HasSuffix(notes[0].SnapshotSource, ":fallback") {
-		t.Fatalf("fallback snapshot source should be marked, got %q", notes[0].SnapshotSource)
-	}
-	if rt.notificationRunning {
-		t.Fatal("fallback notification should clear runtime running state")
+	if !rt.notificationRunning {
+		t.Fatal("untrusted fallback must leave the existing running card unchanged")
 	}
 }
 
@@ -484,6 +480,7 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 	notifier := &recordingNotifier{}
 	launcher := &recordingLauncher{}
 	browserRequested := make(chan struct{})
+	var browserRequestedOnce sync.Once
 	var m *Manager
 	m = NewManager(
 		nil,
@@ -492,11 +489,7 @@ func TestNotifyEndToEndRequestsFrontendSnapshotWhenNoBrowserIsOpen(t *testing.T)
 		WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond),
 		WithNotificationUpdateCoalesce(0),
 		WithBrowserNeeded(func(sessionID string) {
-			select {
-			case <-browserRequested:
-			default:
-				close(browserRequested)
-			}
+			browserRequestedOnce.Do(func() { close(browserRequested) })
 			if rt, ok := m.GetRuntime(sessionID); ok {
 				rt.mu.Lock()
 				currentInput := rt.lastInputText
@@ -546,8 +539,7 @@ func TestNotifyStableDelayFastForPlainOutputAndConservativeForCodex(t *testing.T
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true},
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\nhello\n$")
 	rt.mu.Lock()
 	fast := rt.notifyStableDelayLocked()
 	rt.mu.Unlock()
@@ -572,8 +564,7 @@ func TestNotifyAfterStableTransitionsWaitingAndSends(t *testing.T) {
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\nhello\n$")
 	version := rt.stateVersion
 
 	rt.notifyAfterStable(version)
@@ -596,8 +587,7 @@ func TestNotifyIfStillWaitingUpdatesSameRoundMessage(t *testing.T) {
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？")
+	setTrustedLegacyRoundFixture(rt, "›", "今天天气怎么样\r", "> 今天天气怎么样\n• 你想查哪个城市的天气？")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	version := rt.notifyVersion
@@ -659,8 +649,7 @@ func TestNotifyPreservesCreatedMessageIDWhenSameRoundAdvancesDuringSend(t *testi
 		rt.session.Status = StatusWaiting
 		rt.mu.Unlock()
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("> echo hello\npartial")
+	setTrustedLegacyRoundFixture(rt, ">", "echo hello\r", "> echo hello\npartial")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	version := rt.notifyVersion
@@ -732,11 +721,13 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 		lastNotifiedVisibleSnapshot: "stale previous round\nold footer",
 		snapshotAtRoundStart: strings.Join([]string{
 			"old output",
+			"› 关闭 8083",
 			"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 		}, "\n"),
 		snapshotAtRoundStartSet: true,
 		visibleSnapshot: strings.Join([]string{
 			"old output",
+			"› 关闭 8083",
 			"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
 			"  (no output)",
 			"已关闭 8083 接口。",
@@ -763,7 +754,7 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 	}
 }
 
-func TestWaitingNotificationTreatsEmptyRoundStartAsCurrentRoundBaseline(t *testing.T) {
+func TestWaitingNotificationFailsClosedWhenRoundBaselineIsEmpty(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:                     NewManager(nil, nil),
 		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -779,12 +770,8 @@ func TestWaitingNotificationTreatsEmptyRoundStartAsCurrentRoundBaseline(t *testi
 	rt.mu.Lock()
 	n, _, ok := rt.waitingNotificationLocked()
 	rt.mu.Unlock()
-	if !ok {
-		t.Fatal("expected notification to be ready")
-	}
-	want := "first\nsecond"
-	if n.Content != want {
-		t.Fatalf("empty round baseline should not diff from last pushed snapshot:\n%q\nwant:\n%q", n.Content, want)
+	if ok || n.Content != "" {
+		t.Fatalf("empty round baseline must not recover terminal history: ok=%v content=%q", ok, n.Content)
 	}
 }
 
@@ -795,8 +782,7 @@ func TestOutputAfterNotificationPatchesRunningTitleOnWaitingToRunning(t *testing
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot("> 今天天气怎么样\n• 你想查哪个城市的天气？")
+	setTrustedLegacyRoundFixture(rt, "›", "今天天气怎么样\r", "> 今天天气怎么样\n• 你想查哪个城市的天气？")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	version := rt.notifyVersion
@@ -838,6 +824,7 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 		session:              Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 		notificationUpdateNo: 2,
 	}
+	rt.SetVisibleSnapshot("$ echo hello")
 	rt.MarkInputActivity("echo hello\r")
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
 	rt.mu.Lock()
@@ -863,7 +850,7 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationMessageUsesFullCurrentRoundWhenRoundBaselineIsEmpty(t *testing.T) {
+func TestRefreshNotificationMessageFailsClosedWhenRoundBaselineIsEmpty(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -887,9 +874,9 @@ func TestRefreshNotificationMessageUsesFullCurrentRoundWhenRoundBaselineIsEmpty(
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	want := "first\nsecond"
+	want := "当前轮暂无内容"
 	if notes[0].Content != want {
-		t.Fatalf("manual refresh should use full current round content:\n%q\nwant:\n%q", notes[0].Content, want)
+		t.Fatalf("manual refresh must not recover terminal history without a round baseline:\n%q\nwant:\n%q", notes[0].Content, want)
 	}
 }
 
@@ -951,7 +938,7 @@ func TestRefreshNotificationMessageRejectsStaleSnapshot(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t *testing.T) {
+func TestRefreshNotificationMessageDoesNotFallBackToUnchangedVisibleHistory(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	visible := "$ echo hello\nhello\n$"
@@ -971,8 +958,173 @@ func TestRefreshNotificationMessageFallsBackToVisibleTailWhenRoundDiffIsEmpty(t 
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	if notes[0].Content != visible {
-		t.Fatalf("empty diff should fall back to current visible content, got %#v", notes[0])
+	if notes[0].Content != "当前轮暂无内容" {
+		t.Fatalf("empty diff should fail closed instead of leaking visible history, got %#v", notes[0])
+	}
+	if strings.Contains(notes[0].Content, "echo hello") || strings.Contains(notes[0].Content, "hello") {
+		t.Fatalf("unchanged visible history leaked into the refreshed card: %#v", notes[0])
+	}
+}
+
+func TestRefreshNotificationMessageShowsNoCurrentContentForUnbaselinedOrdinaryRound(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:                m,
+		session:                Session{ID: "sess-unbaselined", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:          "this is a unique current question with enough detail",
+		lastNotifiedMessageID:  "bot-card",
+		visibleSnapshot:        "OLD_HISTORY_MUST_NOT_LEAK\n› this is a unique current question with enough detail\n• untrusted reply",
+		visibleSnapshotVersion: 1,
+		visibleSnapshotSource:  "browser:buffer",
+	}
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one manual refresh update, got %#v", notes)
+	}
+	if notes[0].Content != "当前轮暂无内容" {
+		t.Fatalf("an unbaselined manual refresh must show the empty-round placeholder, got %#v", notes[0])
+	}
+	if strings.Contains(notes[0].Content, "OLD_HISTORY_MUST_NOT_LEAK") || strings.Contains(notes[0].Content, "untrusted reply") {
+		t.Fatalf("unbaselined terminal history leaked into the refreshed card: %#v", notes[0])
+	}
+}
+
+func TestTailAnchorRequiresSameRendererSourceAndWidth(t *testing.T) {
+	const normalSource = "browser:buffer;continuity_version=2;render_epoch=31;buffer_type=normal;buffer_at_capacity=false;anchor_guard_active=true;anchor_guard_line=0"
+	const domSource = "browser:dom;continuity_version=2;render_epoch=31;buffer_type=normal;buffer_at_capacity=false;anchor_guard_active=true;anchor_guard_line=0"
+	baseline := strings.Join([]string{
+		"renderer-specific historical header",
+		"distinctive previous conclusion alpha",
+		"distinctive previous detail beta",
+		"distinctive previous detail gamma",
+		"distinctive previous detail delta",
+		"distinctive previous detail epsilon",
+	}, "\n")
+	visible := strings.Join([]string{
+		"different renderer historical header",
+		"distinctive previous conclusion alpha",
+		"distinctive previous detail beta",
+		"distinctive previous detail gamma",
+		"distinctive previous detail delta",
+		"distinctive previous detail epsilon",
+		"CURRENT_REPLY_ONLY",
+	}, "\n")
+	firstRenderer := make(chan RuntimeEvent)
+	secondRenderer := make(chan RuntimeEvent)
+
+	tests := []struct {
+		name             string
+		baselineSource   string
+		currentSource    string
+		baselineRenderer chan RuntimeEvent
+		currentRenderer  chan RuntimeEvent
+		baselineCols     uint16
+		currentCols      uint16
+		want             string
+	}{
+		{
+			name:             "same renderer",
+			baselineSource:   normalSource,
+			currentSource:    normalSource,
+			baselineRenderer: firstRenderer,
+			currentRenderer:  firstRenderer,
+			baselineCols:     120,
+			currentCols:      120,
+			want:             "CURRENT_REPLY_ONLY",
+		},
+		{
+			name:             "different browser",
+			baselineSource:   normalSource,
+			currentSource:    normalSource,
+			baselineRenderer: firstRenderer,
+			currentRenderer:  secondRenderer,
+			baselineCols:     120,
+			currentCols:      120,
+		},
+		{
+			name:             "buffer to DOM fallback",
+			baselineSource:   normalSource,
+			currentSource:    domSource,
+			baselineRenderer: firstRenderer,
+			currentRenderer:  firstRenderer,
+			baselineCols:     120,
+			currentCols:      120,
+		},
+		{
+			name:             "terminal width changed",
+			baselineSource:   normalSource,
+			currentSource:    normalSource,
+			baselineRenderer: firstRenderer,
+			currentRenderer:  firstRenderer,
+			baselineCols:     120,
+			currentCols:      90,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := &RuntimeSession{
+				lastInputText:            "input missing from snapshot",
+				snapshotAtRoundStart:     baseline,
+				snapshotAtRoundStartSet:  true,
+				snapshotAtRoundSource:    tt.baselineSource,
+				snapshotAtRoundResponder: tt.baselineRenderer,
+				snapshotAtRoundCols:      tt.baselineCols,
+				visibleSnapshot:          visible,
+				visibleSnapshotSource:    tt.currentSource,
+				visibleSnapshotResponder: tt.currentRenderer,
+				visibleSnapshotCols:      tt.currentCols,
+			}
+			if got := rt.currentNotifyContentLocked(); got != tt.want {
+				t.Fatalf("content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInputAnchorDoesNotCrossRendererWhenBaselineChanged(t *testing.T) {
+	const normalSource = "browser:buffer;continuity_version=2;render_epoch=41;buffer_type=normal;buffer_at_capacity=false;anchor_guard_active=true;anchor_guard_line=0"
+	baseline := strings.Join([]string{
+		"OLD_BASELINE_CONTEXT",
+		"old answer",
+		"› 请检查这一次跨浏览器锚点",
+	}, "\n")
+	visible := strings.Join([]string{
+		"OLD_BASELINE_CONTEXT",
+		"old answer",
+		"› 请检查这一次跨浏览器锚点",
+		"• CURRENT_REPLY_ONLY",
+	}, "\n")
+	firstRenderer := make(chan RuntimeEvent)
+	secondRenderer := make(chan RuntimeEvent)
+
+	content := func(currentRenderer chan RuntimeEvent) string {
+		rt := &RuntimeSession{
+			lastInputText:            "请检查这一次跨浏览器锚点",
+			snapshotAtRoundStart:     baseline,
+			snapshotAtRoundStartSet:  true,
+			snapshotAtRoundSource:    normalSource,
+			snapshotAtRoundResponder: firstRenderer,
+			snapshotAtRoundCols:      120,
+			visibleSnapshot:          visible,
+			visibleSnapshotSource:    normalSource,
+			visibleSnapshotResponder: currentRenderer,
+			visibleSnapshotCols:      120,
+		}
+		return rt.currentNotifyContentLocked()
+	}
+
+	if got := content(firstRenderer); got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("same-renderer input anchor should remain available, got %q", got)
+	}
+	if got := content(secondRenderer); got != "" {
+		t.Fatalf("a different renderer cannot prove that an input occurrence is new: %q", got)
 	}
 }
 
@@ -1125,8 +1277,7 @@ func TestRefreshNotificationMessagePreventsStaleRunningPlaceholderOverwrite(t *t
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\nhello\n$")
 
 	rt.notificationPatchMu.Lock()
 	runningDone := make(chan struct{})
@@ -1210,6 +1361,7 @@ func TestOutputPatchesRunningTitleFromCurrentRoundOnWaitingToRunning(t *testing.
 		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 		lastNotifiedMessageID: "bot-card",
 	}
+	rt.SetVisibleSnapshot("$")
 	rt.MarkInputActivity("echo hello\r")
 	rt.lastNotifiedMessageID = "bot-card"
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
@@ -1259,6 +1411,7 @@ func TestManualRefreshAllowsWaitingToRunningTitleMarker(t *testing.T) {
 		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 		lastNotifiedMessageID: "bot-card",
 	}
+	rt.SetVisibleSnapshot("$")
 	rt.MarkInputActivity("echo hello\r")
 	rt.lastNotifiedMessageID = "bot-card"
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
@@ -1289,6 +1442,7 @@ func TestManualRefreshWithConcurrentOutputPatchesRunningTitleAfterRefresh(t *tes
 		lastNotifiedMessageID: "bot-card",
 		lastNotifiedContent:   "$ echo hello\nhello\n$",
 	}
+	rt.SetVisibleSnapshot("$")
 	rt.MarkInputActivity("echo hello\r")
 	rt.lastNotifiedMessageID = "bot-card"
 	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
@@ -1357,16 +1511,22 @@ func TestWaitingTransitionKeepsRunningTitleUntilFinalNotification(t *testing.T) 
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
-		manager:                m,
-		session:                Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
-		lastNotifiedMessageID:  "msg-1",
-		lastNotifiedContent:    "> echo hello\nhello",
-		notificationUpdateNo:   1,
-		notificationRunning:    true,
-		visibleSnapshot:        "> echo hello\nhello",
-		visibleSnapshotVersion: 1,
-		stateVersion:           7,
-		notifyVersion:          3,
+		manager:                 m,
+		session:                 Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID:   "msg-1",
+		lastNotifiedContent:     "> echo hello\nhello",
+		notificationUpdateNo:    1,
+		notificationRunning:     true,
+		visibleSnapshot:         "> echo hello\nhello",
+		visibleSnapshotSource:   "legacy",
+		visibleSnapshotVersion:  1,
+		snapshotAtRoundStart:    "> echo hello",
+		snapshotAtRoundSource:   "legacy",
+		snapshotAtRoundVersion:  0,
+		snapshotAtRoundStartSet: true,
+		lastInputText:           "echo hello",
+		stateVersion:            7,
+		notifyVersion:           3,
 	}
 
 	rt.notifyAfterStable(7)
@@ -1503,8 +1663,7 @@ func TestNotifyIfStillWaitingCoalescesSameRoundUpdate(t *testing.T) {
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\npartial")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\npartial")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	version := rt.notifyVersion
@@ -1938,8 +2097,7 @@ func TestRefreshNotificationMessageRetriesNotifierFailures(t *testing.T) {
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\nhello\n$")
 
 	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
 		t.Fatal(err)
@@ -2231,6 +2389,500 @@ func TestRequestFreshSnapshotRefreshesExistingSnapshot(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestRequestFreshSnapshotCorrelatesOneSourceAndRejectsLateResponses(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-correlated", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	first, cancelFirst := rt.Subscribe()
+	defer cancelFirst()
+	second, cancelSecond := rt.Subscribe()
+	defer cancelSecond()
+
+	done := make(chan bool, 1)
+	go func() { done <- rt.RequestFreshSnapshot(time.Second) }()
+
+	var event RuntimeEvent
+	var other <-chan RuntimeEvent
+	select {
+	case event = <-first:
+		other = second
+	case event = <-second:
+		other = first
+	case <-time.After(time.Second):
+		t.Fatal("expected a correlated snapshot request")
+	}
+	if event.Type != RuntimeEventSnapshotRequest || event.RequestID == "" {
+		t.Fatalf("snapshot event = %#v, want request id", event)
+	}
+	select {
+	case duplicate := <-other:
+		t.Fatalf("snapshot request should select one rendering source, duplicate=%#v", duplicate)
+	default:
+	}
+
+	rt.SetVisibleSnapshotResponse("wrong request", "browser:buffer", "snapshot-wrong")
+	rt.SetVisibleSnapshotResponse("wrong source", "headless:buffer", event.RequestID)
+	select {
+	case <-done:
+		t.Fatal("wrong request/source must not satisfy the snapshot waiter")
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	rt.SetVisibleSnapshotResponse("fresh correlated snapshot", "browser:buffer", event.RequestID)
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("correlated response should be fresh")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("correlated snapshot request did not finish")
+	}
+
+	rt.SetVisibleSnapshotResponse("late stale overwrite", "browser:buffer", event.RequestID)
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "fresh correlated snapshot" {
+		t.Fatalf("late response overwrote the accepted snapshot: %q", visible)
+	}
+}
+
+func TestConcurrentSnapshotResponsesCannotOverwriteNewerRequest(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-snapshot-order", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+
+	results := make(chan bool, 2)
+	go func() { results <- rt.RequestFreshSnapshot(time.Second) }()
+	go func() { results <- rt.RequestFreshSnapshot(time.Second) }()
+
+	events := make([]RuntimeEvent, 0, 2)
+	for len(events) < 2 {
+		select {
+		case event := <-subscriber:
+			if event.Type == RuntimeEventSnapshotRequest {
+				events = append(events, event)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected two concurrent snapshot requests")
+		}
+	}
+	seq := func(event RuntimeEvent) int64 {
+		var value int64
+		_, _ = fmt.Sscanf(event.RequestID[strings.LastIndex(event.RequestID, "-")+1:], "%d", &value)
+		return value
+	}
+	older, newer := events[0], events[1]
+	if seq(older) > seq(newer) {
+		older, newer = newer, older
+	}
+
+	// A faster response for the newer request becomes canonical. The older
+	// request must be completed without being allowed to overwrite it later.
+	rt.SetVisibleSnapshotResponseFrom("newer snapshot", "browser:buffer", newer.RequestID, subscriber)
+	rt.SetVisibleSnapshotResponseFrom("older late snapshot", "browser:buffer", older.RequestID, subscriber)
+	first, second := <-results, <-results
+	if !first || !second {
+		t.Fatalf("the newer canonical snapshot should satisfy both callers, got %v and %v", first, second)
+	}
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "newer snapshot" {
+		t.Fatalf("older request overwrote the canonical snapshot: %q", visible)
+	}
+}
+
+func TestCanceledSnapshotRequestDoesNotUseNewRoundAppliedSequence(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-snapshot-new-round", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+
+	result := make(chan bool, 1)
+	go func() { result <- rt.RequestFreshSnapshot(time.Second) }()
+
+	var request RuntimeEvent
+	select {
+	case request = <-subscriber:
+		if request.Type != RuntimeEventSnapshotRequest || request.RequestID == "" {
+			t.Fatalf("snapshot event = %#v, want correlated request", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected snapshot request")
+	}
+
+	// Submitting input cancels the old round's request. Before its waiter gets
+	// the lock again, a newer round may already have applied a higher request
+	// sequence. That newer sequence must not make the canceled request report
+	// success.
+	rt.mu.Lock()
+	rt.snapshotRoundGeneration++
+	rt.cancelSnapshotRequestsLocked(false)
+	rt.latestAppliedSnapshotRequestID = rt.nextSnapshotRequestID + 1
+	rt.mu.Unlock()
+
+	select {
+	case fresh := <-result:
+		if fresh {
+			t.Fatal("a newer round's applied sequence must not satisfy the canceled snapshot request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled snapshot request did not finish promptly")
+	}
+}
+
+func TestSnapshotRequestReassignsWhenSelectedSubscriberDisconnects(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-snapshot-reassign", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	first, cancelFirst := rt.Subscribe()
+	second, cancelSecond := rt.Subscribe()
+	defer cancelFirst()
+	defer cancelSecond()
+
+	done := make(chan bool, 1)
+	go func() { done <- rt.RequestFreshSnapshot(time.Second) }()
+
+	var selected, replacement chan RuntimeEvent
+	var cancelSelected func()
+	var event RuntimeEvent
+	select {
+	case event = <-first:
+		selected, replacement, cancelSelected = first, second, cancelFirst
+	case event = <-second:
+		selected, replacement, cancelSelected = second, first, cancelSecond
+	case <-time.After(time.Second):
+		t.Fatal("expected initial snapshot request")
+	}
+	_ = selected
+	cancelSelected()
+
+	select {
+	case reassigned := <-replacement:
+		if reassigned.RequestID != event.RequestID {
+			t.Fatalf("reassigned request id = %q, want %q", reassigned.RequestID, event.RequestID)
+		}
+		rt.SetVisibleSnapshotResponseFrom("replacement snapshot", "browser:buffer", reassigned.RequestID, replacement)
+	case <-time.After(time.Second):
+		t.Fatal("disconnected snapshot request was not reassigned")
+	}
+	select {
+	case fresh := <-done:
+		if !fresh {
+			t.Fatal("replacement renderer response should satisfy the request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reassigned request did not finish")
+	}
+}
+
+func TestSnapshotResponsesRequireRequestIDAndLiveSession(t *testing.T) {
+	terminal := &recordingTerminal{readCh: make(chan []byte)}
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-snapshot-close", Status: StatusWaiting, Live: true},
+		terminal:    terminal,
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	rt.SetVisibleSnapshot("trusted snapshot")
+	rt.SetVisibleSnapshotResponse("uncorrelated overwrite", "browser:buffer", "")
+	rt.mu.Lock()
+	if rt.visibleSnapshot != "trusted snapshot" {
+		t.Fatalf("missing request id overwrote snapshot: %q", rt.visibleSnapshot)
+	}
+	rt.mu.Unlock()
+
+	subscriber, _ := rt.Subscribe()
+	done := make(chan bool, 1)
+	go func() { done <- rt.RequestFreshSnapshot(5 * time.Second) }()
+	event := <-subscriber
+	rt.Close()
+	select {
+	case fresh := <-done:
+		if fresh {
+			t.Fatal("closing the session must cancel, not satisfy, a pending snapshot request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session close did not promptly cancel snapshot waiter")
+	}
+	rt.SetVisibleSnapshotResponseFrom("late closed-session overwrite", "browser:buffer", event.RequestID, subscriber)
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "trusted snapshot" {
+		t.Fatalf("late response updated a closed session: %q", visible)
+	}
+}
+
+func TestNewInputCancelsSnapshotRequestFromPreviousRound(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-snapshot-round", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	rt.SetVisibleSnapshot("trusted previous-round snapshot")
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+	done := make(chan bool, 1)
+	go func() { done <- rt.RequestFreshSnapshot(5 * time.Second) }()
+	event := <-subscriber
+
+	rt.MarkStructuredInputActivity("new round input")
+	select {
+	case fresh := <-done:
+		if fresh {
+			t.Fatal("a previous-round request must be cancelled, not treated as the new baseline")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new input did not promptly cancel the previous round snapshot request")
+	}
+	rt.SetVisibleSnapshotResponseFrom("late previous-round snapshot", "browser:buffer", event.RequestID, subscriber)
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "trusted previous-round snapshot" {
+		t.Fatalf("late previous-round response overwrote the new round boundary: %q", visible)
+	}
+}
+
+func TestWriteInputWithSnapshotBaselineBindsRoundBeforeCancelingOldRequests(t *testing.T) {
+	terminal := &lifecycleRecordingTerminal{}
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-atomic-baseline", Status: StatusWaiting, Live: true},
+		terminal:    terminal,
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	rt.SetVisibleSnapshot("old canonical snapshot")
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+
+	freshResult := make(chan bool, 1)
+	go func() { freshResult <- rt.RequestFreshSnapshot(time.Second) }()
+	event := <-subscriber
+	if event.Type != RuntimeEventSnapshotRequest || event.RequestID == "" {
+		t.Fatalf("snapshot event = %#v", event)
+	}
+
+	baseline := "old output\n› typed command\ngpt-5.6-sol high fast · ~/project"
+	if err := rt.WriteInputWithSnapshotBaseline("typed command\r", baseline, "browser:buffer"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case fresh := <-freshResult:
+		if fresh {
+			t.Fatal("the previous round's request must be canceled, not satisfied by the input baseline")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the previous round's request was not canceled")
+	}
+
+	rt.SetVisibleSnapshotResponseFrom("late stale screen", "browser:buffer", event.RequestID, subscriber)
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	roundStart := rt.snapshotAtRoundStart
+	lastInput := rt.lastInputText
+	rt.mu.Unlock()
+	if visible != baseline || roundStart != baseline || lastInput != "typed command" {
+		t.Fatalf("atomic baseline was overwritten: visible=%q round=%q input=%q", visible, roundStart, lastInput)
+	}
+	if got := terminal.writtenText(); got != "typed command\r" {
+		t.Fatalf("terminal input = %q", got)
+	}
+}
+
+func TestLegacySnapshotResponseUsesUniqueBoundSubscriberRequest(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-legacy-snapshot", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+	result := make(chan bool, 1)
+	go func() { result <- rt.RequestFreshSnapshot(time.Second) }()
+	event := <-subscriber
+	if event.RequestID == "" {
+		t.Fatal("expected a correlated server request")
+	}
+
+	// A page opened before request IDs were introduced responds on the exact
+	// WebSocket but omits request_id. One unambiguous pending request is safe.
+	rt.SetVisibleSnapshotResponseFrom("legacy compatible snapshot", "browser:buffer", "", subscriber)
+	select {
+	case fresh := <-result:
+		if !fresh {
+			t.Fatal("the uniquely bound legacy response should satisfy the request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy snapshot response did not wake its request")
+	}
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "legacy compatible snapshot" {
+		t.Fatalf("legacy snapshot was not applied: %q", visible)
+	}
+}
+
+func TestLegacySnapshotResponseRejectsAmbiguousRequests(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-legacy-ambiguous", Status: StatusWaiting, Live: true},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	rt.SetVisibleSnapshot("trusted snapshot")
+	subscriber, cancel := rt.Subscribe()
+	defer cancel()
+	results := make(chan bool, 2)
+	go func() { results <- rt.RequestFreshSnapshot(time.Second) }()
+	first := <-subscriber
+	go func() { results <- rt.RequestFreshSnapshot(time.Second) }()
+	second := <-subscriber
+
+	rt.SetVisibleSnapshotResponseFrom("ambiguous legacy overwrite", "browser:buffer", "", subscriber)
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	rt.mu.Unlock()
+	if visible != "trusted snapshot" {
+		t.Fatalf("an uncorrelated response with two candidates must be rejected: %q", visible)
+	}
+
+	rt.SetVisibleSnapshotResponseFrom("first correlated", "browser:buffer", first.RequestID, subscriber)
+	rt.SetVisibleSnapshotResponseFrom("second correlated", "browser:buffer", second.RequestID, subscriber)
+	for i := 0; i < 2; i++ {
+		select {
+		case fresh := <-results:
+			if !fresh {
+				t.Fatal("correlated cleanup response should satisfy both requests")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("correlated request did not finish")
+		}
+	}
+}
+
+func TestBrowserInputOwnsSnapshotAndResizeAcrossMultipleComputers(t *testing.T) {
+	terminal := &resizeRecordingTerminal{}
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-browser-owner", Status: StatusWaiting, Live: true},
+		terminal:    terminal,
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	idleBrowser, cancelIdle := rt.Subscribe()
+	defer cancelIdle()
+	activeBrowser, cancelActive := rt.Subscribe()
+	defer cancelActive()
+
+	if err := rt.WriteInputFrom("x", activeBrowser); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan bool, 1)
+	go func() { result <- rt.RequestFreshSnapshot(time.Second) }()
+	var request RuntimeEvent
+	select {
+	case request = <-activeBrowser:
+		if request.Type != RuntimeEventSnapshotRequest {
+			t.Fatalf("active browser event = %#v", request)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the browser that typed should receive the snapshot request")
+	}
+	select {
+	case event := <-idleBrowser:
+		t.Fatalf("idle browser unexpectedly received the active round request: %#v", event)
+	default:
+	}
+
+	if err := rt.ResizeFrom(90, 25, idleBrowser); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.cols != 0 || terminal.rows != 0 {
+		t.Fatalf("idle browser changed the shared PTY size to %dx%d", terminal.cols, terminal.rows)
+	}
+	if err := rt.ResizeFrom(132, 40, activeBrowser); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.cols != 132 || terminal.rows != 40 {
+		t.Fatalf("active browser resize = %dx%d", terminal.cols, terminal.rows)
+	}
+
+	rt.SetVisibleSnapshotResponseFrom("active browser snapshot", "browser:buffer", request.RequestID, activeBrowser)
+	select {
+	case fresh := <-result:
+		if !fresh {
+			t.Fatal("active browser response should satisfy the request")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request did not finish")
+	}
+}
+
+func TestRuntimeSessionCloseIsTerminalForSnapshotsInputAndOutput(t *testing.T) {
+	terminal := &lifecycleRecordingTerminal{}
+	ended := 0
+	rt := &RuntimeSession{
+		manager: NewManager(nil, nil, WithSessionEnded(func(sessionID string) {
+			if sessionID != "sess-closed-lifecycle" {
+				t.Errorf("ended session = %q", sessionID)
+			}
+			ended++
+		})),
+		session:     Session{ID: "sess-closed-lifecycle", Status: StatusWaiting, Live: true},
+		terminal:    terminal,
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	rt.SetVisibleSnapshot("trusted before close")
+	rt.Close()
+	rt.Close()
+
+	if snapshot := rt.Snapshot(); snapshot.Live {
+		t.Fatalf("closed session is still live: %#v", snapshot)
+	}
+	if err := rt.WriteInput("ignored\r"); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("closed input error = %v, want io.ErrClosedPipe", err)
+	}
+	rt.MarkInputActivity("ignored\r")
+	rt.MarkStructuredInputActivity("ignored structured")
+	rt.SetVisibleSnapshot("ignored snapshot")
+	rt.HandleOutput([]byte("ignored output"))
+
+	closedSubscriber, closedCancel := rt.Subscribe()
+	defer closedCancel()
+	if _, ok := <-closedSubscriber; ok {
+		t.Fatal("a subscriber created after Close must already be closed")
+	}
+	rt.mu.Lock()
+	visible := rt.visibleSnapshot
+	lastInput := rt.lastInputText
+	outputLen := len(rt.output)
+	subscriberCount := len(rt.subscribers)
+	rt.mu.Unlock()
+	if visible != "trusted before close" || lastInput != "" || outputLen != 0 || subscriberCount != 0 {
+		t.Fatalf("closed runtime mutated: visible=%q input=%q output=%d subscribers=%d", visible, lastInput, outputLen, subscriberCount)
+	}
+	if terminal.closeCalls() != 1 || terminal.writtenText() != "" {
+		t.Fatalf("terminal close/write state: closes=%d written=%q", terminal.closeCalls(), terminal.writtenText())
+	}
+	rt.markTerminal(StatusExited, 0)
+	if ended != 1 {
+		t.Fatalf("session-ended callback count = %d, want 1", ended)
 	}
 }
 
@@ -2555,8 +3207,7 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 		session: Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
 	}
 	rt.notifyVersion = 1
-	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot("> 今天天气怎么样\n• Working (8s • esc to interrupt)")
+	setTrustedLegacyRoundFixture(rt, "›", "今天天气怎么样\r", "> 今天天气怎么样\n• Working (8s • esc to interrupt)")
 	rt.mu.Lock()
 	rt.session.Status = StatusWaiting
 	rt.notifyVersion = 2
@@ -2604,11 +3255,15 @@ func TestManualRefreshSkipsCodexTUIStatusOnlySnapshot(t *testing.T) {
 		"gpt-5.5 xhigh fast · ~/Easy_Terminal_Workspace/减肥",
 	}, "\n"))
 
-	if err := rt.RefreshNotificationMessage("bot-card"); err == nil {
-		t.Fatal("manual refresh should reject status-only snapshot")
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
 	}
-	if got := notifier.count(); got != 0 {
-		t.Fatalf("status-only manual refresh should not send notification, got %d", got)
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("status-only manual refresh should update the card once, got %#v", notes)
+	}
+	if notes[0].Content != "当前轮暂无内容" {
+		t.Fatalf("status-only manual refresh should fail closed with the empty-round placeholder, got %#v", notes[0])
 	}
 }
 
@@ -2657,8 +3312,7 @@ func TestStartupPresetFinalNotificationSendsOnce(t *testing.T) {
 		manager: m,
 		session: Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true},
 	}
-	rt.MarkInputActivity("echo setup\r")
-	rt.SetVisibleSnapshot("$ echo setup\nsetup done\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo setup\r", "$ echo setup\nsetup done\n$")
 	rt.SuppressStartupNotifications()
 	rt.finishStartupNotificationsAfter(250 * time.Millisecond)
 	rt.mu.Lock()
@@ -2705,6 +3359,36 @@ type recordingNotifier struct {
 type resizeRecordingTerminal struct {
 	cols uint16
 	rows uint16
+}
+
+type lifecycleRecordingTerminal struct {
+	mu      sync.Mutex
+	written bytes.Buffer
+	closes  int
+}
+
+func (t *lifecycleRecordingTerminal) Read([]byte) (int, error) { return 0, io.EOF }
+func (t *lifecycleRecordingTerminal) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.written.Write(p)
+}
+func (t *lifecycleRecordingTerminal) Close() error {
+	t.mu.Lock()
+	t.closes++
+	t.mu.Unlock()
+	return nil
+}
+func (t *lifecycleRecordingTerminal) Resize(uint16, uint16) error { return nil }
+func (t *lifecycleRecordingTerminal) writtenText() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.written.String()
+}
+func (t *lifecycleRecordingTerminal) closeCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closes
 }
 
 func (t *resizeRecordingTerminal) Read([]byte) (int, error) { return 0, io.EOF }

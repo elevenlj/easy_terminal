@@ -787,7 +787,7 @@ func TestSubmitStructuredInputClearsPreviousNotificationBeforeEcho(t *testing.T)
 	}
 }
 
-func TestSubmitStructuredInputRefreshesBaselineBeforeWrite(t *testing.T) {
+func TestSubmitStructuredInputRefreshesComposerBaselineBeforeEnter(t *testing.T) {
 	previousDelay := structuredInputEnterDelay
 	structuredInputEnterDelay = 0
 	defer func() { structuredInputEnterDelay = previousDelay }()
@@ -803,27 +803,108 @@ func TestSubmitStructuredInputRefreshesBaselineBeforeWrite(t *testing.T) {
 	ch, cancel := rt.SubscribeWithMode(false)
 	defer cancel()
 	go func() {
-		for i := 0; i < 2; i++ {
-			if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
-				rt.SetVisibleSnapshotWithSource("fresh baseline", "browser:buffer")
-			}
+		if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
+			rt.SetVisibleSnapshotWithSource("fresh baseline\n> new input", "browser:buffer")
 		}
 	}()
 	term := &recordingTerminal{readCh: make(chan []byte)}
 	term.onWrite = func(data string) {
-		if data != "new input" {
+		if data != "\r" {
 			return
 		}
 		rt.mu.Lock()
 		defer rt.mu.Unlock()
-		if rt.snapshotAtRoundStart != "fresh baseline" {
-			t.Fatalf("input baseline = %q, want fresh baseline", rt.snapshotAtRoundStart)
+		if rt.snapshotAtRoundStart != "fresh baseline\n> new input" {
+			t.Fatalf("input baseline = %q, want rendered composer baseline", rt.snapshotAtRoundStart)
 		}
 	}
 	rt.terminal = term
 
 	if err := SubmitStructuredInput(rt, "new input"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSubmitStructuredInputFromTargetsOriginBaseline(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	rt := &RuntimeSession{
+		manager:     NewManager(nil, nil),
+		session:     Session{ID: "sess-origin-submit", Name: "TUI", Status: StatusWaiting, Live: true},
+		terminal:    &recordingTerminal{readCh: make(chan []byte)},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	idle, cancelIdle := rt.SubscribeWithMode(false)
+	defer cancelIdle()
+	origin, cancelOrigin := rt.SubscribeWithMode(false)
+	defer cancelOrigin()
+
+	done := make(chan error, 1)
+	go func() { done <- SubmitStructuredInputFrom(rt, "origin input", origin) }()
+	event := receiveSnapshotRequestEvent(t, origin)
+	if event.Purpose != SnapshotPurposeInputBaseline {
+		t.Fatalf("baseline request purpose = %q", event.Purpose)
+	}
+	assertNoSnapshotRequestEvent(t, idle, "idle renderer received web submit baseline")
+	rt.SetVisibleSnapshotResponseFrom("origin baseline", "browser:buffer", event.RequestID, origin)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("origin-bound structured submit did not finish")
+	}
+
+	rt.mu.Lock()
+	owner := rt.snapshotAtRoundResponder
+	baseline := rt.snapshotAtRoundStart
+	rt.mu.Unlock()
+	if owner != origin || baseline != "origin baseline" {
+		t.Fatalf("round baseline owner/content = %p/%q, want origin/%q", owner, baseline, "origin baseline")
+	}
+}
+
+func TestSubmitStructuredNumericInputKeepsPreInputMenuBaseline(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	const menu = "Select Model and Effort\n1. gpt-5.6-sol\n2. gpt-5.6-terra"
+	rt := &RuntimeSession{
+		manager:                NewManager(nil, nil),
+		session:                Session{ID: "sess-menu", Name: "TUI", Status: StatusWaiting, Live: true},
+		visibleSnapshot:        menu,
+		visibleSnapshotVersion: 1,
+		subscribers:            make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	ch, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+	go func() {
+		if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
+			rt.SetVisibleSnapshotWithSource(menu, "browser:buffer")
+		}
+	}()
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	term.onWrite = func(data string) {
+		if data != "1" {
+			return
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		if rt.snapshotAtRoundStart != menu {
+			t.Fatalf("numeric menu baseline = %q, want pre-selection menu", rt.snapshotAtRoundStart)
+		}
+	}
+	rt.terminal = term
+
+	if err := SubmitStructuredInput(rt, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := term.writes(); got != "1" {
+		t.Fatalf("numeric input must not append Enter, got %q", got)
 	}
 }
 
@@ -844,10 +925,8 @@ func TestSubmitStructuredInputFreshBaselineKeepsPreviousRoundsOutOfDiff(t *testi
 	ch, cancel := rt.SubscribeWithMode(false)
 	defer cancel()
 	go func() {
-		for i := 0; i < 2; i++ {
-			if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
-				rt.SetVisibleSnapshotWithSource("previous question\nprevious answer", "browser:buffer")
-			}
+		if ev := <-ch; ev.Type == RuntimeEventSnapshotRequest {
+			rt.SetVisibleSnapshotWithSource("previous question\nprevious answer\n› next question", "browser:buffer")
 		}
 	}()
 
@@ -1460,8 +1539,7 @@ func TestLarkReplyBridgeCardRefreshUpdatesClickedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt, _ := manager.GetRuntime(sess.ID)
-	rt.MarkInputActivity("echo hello\r")
-	rt.SetVisibleSnapshot("$ echo hello\nhello\n$")
+	setTrustedLegacyRoundFixture(rt, "$", "echo hello\r", "$ echo hello\nhello\n$")
 	event := &callback.CardActionTriggerEvent{Event: &callback.CardActionTriggerRequest{
 		Action: &callback.CallBackAction{Value: map[string]interface{}{
 			"easy_terminal_action": "refresh",
@@ -2620,8 +2698,7 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	if !ok {
 		t.Fatal("expected sess-1 runtime")
 	}
-	rt.MarkInputActivity("今天天气怎么样\r")
-	rt.SetVisibleSnapshot(strings.Join([]string{
+	setTrustedLegacyRoundFixture(rt, "›", "今天天气怎么样\r", strings.Join([]string{
 		"> 今天天气怎么样",
 		"• 你想查哪个城市的天气？",
 		"比如：上海、北京、纽约。",
@@ -2638,6 +2715,84 @@ func TestLarkReplyBridgeCurrentRoundCommandRepliesWithoutWritingTerminal(t *test
 	}
 	if strings.Contains(replies[0], "> 今天天气怎么样") || !strings.Contains(replies[0], "你想查哪个城市") {
 		t.Fatalf("reply did not include current round content: %#v", replies)
+	}
+}
+
+func TestLarkReplyBridgeCurrentRoundCommandKeepsRawFilteredAndToolContent(t *testing.T) {
+	resetLarkRegistryForTest()
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{
+		{Kind: "line", Pattern: `^FILTER_ME$`, Action: "drop_line"},
+		{Kind: "block_head", Pattern: `^• Ran\b.*`, Action: "drop_block"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	SetLarkNotifyMaxLines(1)
+	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
+
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-raw", "", "", "text", `{"text":"开始 Raw会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime("sess-1")
+	if !ok {
+		t.Fatal("expected sess-1 runtime")
+	}
+	want := strings.Join([]string{
+		"FILTER_ME",
+		"• Ran go test ./...",
+		"  tool output that configured block filtering would remove",
+		"contact dev@example.com",
+		"FINAL_RAW_LINE",
+	}, "\n")
+	setTrustedLegacyRoundFixture(rt, "$", "show raw\r", "$ show raw\n"+want)
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-current-raw", "m-start-raw", "", "text", `{"text":"/c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if reply != want {
+		t.Fatalf("/c must bypass configured filtering, tool-block removal, email sanitizing, and truncation:\n%q\nwant:\n%q", reply, want)
+	}
+}
+
+func TestLarkReplyBridgeCurrentRoundCommandFallsBackToRawVisibleSnapshotWithoutAnchor(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	var reply string
+	bridge.replyText = func(_ context.Context, _ string, text string) error {
+		reply = text
+		return nil
+	}
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-start-raw-full", "", "", "text", `{"text":"开始 RawFull会话"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime("sess-1")
+	if !ok {
+		t.Fatal("expected sess-1 runtime")
+	}
+	want := "OLD_HISTORY_IS_EXPLICITLY_REQUESTED\n› prompt without a trusted baseline\n• raw visible reply"
+	rt.SetVisibleSnapshot("\n" + want + "\n")
+
+	if err := bridge.HandleP2MessageReceive(context.Background(), p2Message("m-current-raw-full", "m-start-raw-full", "", "text", `{"text":"/c"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if reply != want {
+		t.Fatalf("unanchored /c must return the trimmed complete visible snapshot:\n%q\nwant:\n%q", reply, want)
 	}
 }
 
@@ -2705,14 +2860,12 @@ func TestLarkReplyBridgeCurrentRoundCommandUsesRepliedNotificationSession(t *tes
 	if !ok {
 		t.Fatal("expected sess-1 runtime")
 	}
-	rtA.MarkInputActivity("echo A\r")
-	rtA.SetVisibleSnapshot("eleven ~ > echo A\nA content\neleven ~ >")
+	setTrustedLegacyRoundFixture(rtA, "eleven ~ >", "echo A\r", "eleven ~ > echo A\nA content\neleven ~ >")
 	rtB, ok := manager.GetRuntime("sess-2")
 	if !ok {
 		t.Fatal("expected sess-2 runtime")
 	}
-	rtB.MarkInputActivity("echo B\r")
-	rtB.SetVisibleSnapshot("eleven ~ > echo B\nB content\neleven ~ >")
+	setTrustedLegacyRoundFixture(rtB, "eleven ~ >", "echo B\r", "eleven ~ > echo B\nB content\neleven ~ >")
 	defaultLarkMessageRegistry.remember("sess-1", "bot-notify-a")
 	defaultLarkMessageRegistry.rememberLatest("sess-2")
 

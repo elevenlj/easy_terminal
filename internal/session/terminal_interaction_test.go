@@ -116,6 +116,57 @@ func TestDetectCodexResumeInteraction(t *testing.T) {
 	}
 }
 
+func TestMenusRequireNovelFingerprintWhenTextAnchorsAreDisabled(t *testing.T) {
+	model := strings.Join([]string{
+		"Select Model and Effort",
+		"Access legacy models by running codex -m <model_name>",
+		"› 1. gpt-5.5 (current)   Frontier model",
+		"  2. gpt-5.4             Strong model",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	resume := strings.Join([]string{
+		"Resume a previous session",
+		"Type to search                    Filter: [Cwd] All",
+		"❯ now         当前会话",
+		"  12m         历史会话",
+		"enter resume   esc exit",
+	}, "\n")
+
+	for _, tt := range []struct {
+		name  string
+		menu  string
+		input string
+	}{
+		{name: "model", menu: model, input: "/model"},
+		{name: "resume", menu: resume, input: "/resume"},
+	} {
+		t.Run(tt.name+" stale tail", func(t *testing.T) {
+			if got := pickNotifyContentWithWindowPolicy(tt.menu, tt.menu, nil, tt.input, "", false); got != "" {
+				t.Fatalf("an unchanged historical %s menu must not render without anchor continuity: %q", tt.name, got)
+			}
+		})
+		t.Run(tt.name+" newly appeared", func(t *testing.T) {
+			if got := pickNotifyContentWithWindowPolicy(tt.menu, "ordinary baseline", nil, tt.input, "", false); !strings.Contains(got, strings.Split(tt.menu, "\n")[0]) {
+				t.Fatalf("a newly appeared %s menu must still render immediately: %q", tt.name, got)
+			}
+		})
+	}
+}
+
+func TestCodexInteractionStatusDoesNotHideOrdinaryBrowserText(t *testing.T) {
+	for _, line := range []string{
+		"The browser reconnect preserved the current reply.",
+		"请检查另一台电脑的 browser 快照。",
+	} {
+		if isCodexInteractionStatusLine(line) {
+			t.Fatalf("ordinary reply text was classified as TUI chrome: %q", line)
+		}
+	}
+	if !isCodexInteractionStatusLine("comfortable view   ctrl+t transcript   ctrl+e expand   ↑/↓ browse") {
+		t.Fatal("the actual Codex browse footer should remain classified as TUI chrome")
+	}
+}
+
 func TestDetectCodexResumeInteractionWithOneSession(t *testing.T) {
 	text := strings.Join([]string{
 		"Resume a previous session",
@@ -163,6 +214,59 @@ func TestDetectCodexReasoningWithoutFooterRejectsNewPromptAfterMenu(t *testing.T
 
 	if got := DetectCodexTerminalInteraction(text, "sess-1", "2", 10, 20); got != nil {
 		t.Fatalf("reasoning menu without footer must end at the active terminal tail: %#v", got)
+	}
+}
+
+func TestCodexReasoningMenuCannotAuthorizeAnotherReasoningMenu(t *testing.T) {
+	previous := strings.Join([]string{
+		"Select Reasoning Level for gpt-5.6-sol",
+		"1. Low",
+		"› 2. Medium (default)",
+		"3. High",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	current := strings.Join([]string{
+		"Select Reasoning Level for gpt-5.6-sol",
+		"1. Low",
+		"2. Medium (default)",
+		"› 3. High (current)",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+
+	if hasCodexModelInteractionContext(previous) {
+		t.Fatal("a previous Reasoning menu must not be treated as Model interaction context")
+	}
+	if got := codexTerminalInteractionVisibleBlock(current, previous, "3"); got != "" {
+		t.Fatalf("a Reasoning menu must not authorize another Reasoning selector, got %q", got)
+	}
+	if !codexTerminalInteractionContextRejected(current, previous, "3") {
+		t.Fatal("a repeated Reasoning menu should be rejected instead of falling through to generic notification diffing")
+	}
+}
+
+func TestCodexModelMenuAuthorizesReasoningMenu(t *testing.T) {
+	previous := strings.Join([]string{
+		"Select Model and Effort",
+		"› 1. gpt-5.6-sol (current)",
+		"2. gpt-5.6-terra",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	current := strings.Join([]string{
+		"Select Reasoning Level for gpt-5.6-sol",
+		"1. Low",
+		"› 2. Medium (default)",
+		"3. High",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+
+	if !hasCodexModelInteractionContext(previous) {
+		t.Fatal("a previous Model menu should authorize its following Reasoning menu")
+	}
+	if got := codexTerminalInteractionVisibleBlock(current, previous, "1"); got == "" {
+		t.Fatal("the Reasoning menu following a Model menu should remain visible")
+	}
+	if codexTerminalInteractionContextRejected(current, previous, "1") {
+		t.Fatal("the Reasoning menu following a Model menu should not be rejected")
 	}
 }
 
@@ -357,8 +461,16 @@ func TestLarkReplyBridgeTerminalSelectWritesOptionOnceWithoutEnter(t *testing.T)
 	rt.session.LarkChatID = "oc_chat"
 	rt.notifyVersion = 5
 	rt.lastNotifiedMessageID = "om_model"
+	rt.visibleSnapshot = strings.Join([]string{
+		"Select Model and Effort",
+		"1. gpt-5.5 (current)  Frontier model",
+		"2. gpt-5.4            Everyday coding model",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	rt.visibleSnapshotVersion = 1
 	rt.pendingTerminalInteraction = &TerminalInteraction{
 		ID:            "ti_model",
+		Kind:          TerminalInteractionCodexModel,
 		NotifyVersion: 5,
 		MessageID:     "om_model",
 		Options: []TerminalInteractionOption{

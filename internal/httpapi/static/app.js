@@ -12,7 +12,14 @@ const state = {
   editingStartPresetCommand: null,
   startupJSONDirty: false,
   pendingTerminalWrite: Promise.resolve(),
-  snapshotRequestSeq: 0,
+  terminalInputQueue: Promise.resolve(),
+  snapshotSyncQueue: Promise.resolve(),
+  snapshotSyncBatch: null,
+  snapshotSyncBatches: [],
+  terminalGeneration: 0,
+  snapshotRenderEpoch: 0,
+  snapshotRenderContinuity: null,
+  snapshotAnchorGuard: null,
   lastSentTerminalSize: null,
   terminalResizeObserver: null,
 };
@@ -25,6 +32,7 @@ const STANDARD_TERMINAL_ROWS = 36;
 const STANDARD_TERMINAL_FONT_FAMILY = "Menlo, Consolas, monospace";
 const STANDARD_TERMINAL_FONT_SIZE = 13;
 const STANDARD_TERMINAL_LINE_HEIGHT = 1.2;
+const SNAPSHOT_CONTINUITY_VERSION = 2;
 const DEFAULT_SESSION_NAME = "默认会话";
 const DEFAULT_AGENT_PRESET_CODE = "999999";
 const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
@@ -121,10 +129,16 @@ function currentSession() {
 }
 
 function initTerminal() {
+  disposeSnapshotAnchorGuard();
+  state.terminalGeneration++;
   if (state.term) state.term.dispose();
   state.terminalResizeObserver?.disconnect?.();
   window.removeEventListener("resize", resizeTerm);
   state.pendingTerminalWrite = Promise.resolve();
+  state.terminalInputQueue = Promise.resolve();
+  state.snapshotSyncQueue = Promise.resolve();
+  state.snapshotSyncBatch = null;
+  state.snapshotSyncBatches = [];
   state.lastSentTerminalSize = null;
   const headless = isHeadlessMode();
   state.term = new Terminal({
@@ -150,11 +164,44 @@ function initTerminal() {
   }
   if (!headless) {
     state.term.onData((data) => {
-      sendWS({ type: "input", data });
+      queueTerminalInput(data);
     });
     window.addEventListener("resize", resizeTerm);
     observeTerminalSize();
   }
+}
+
+function queueTerminalInput(data) {
+  const context = {
+    term: state.term,
+    socket: state.socket,
+    generation: state.terminalGeneration,
+    sessionID: state.active,
+  };
+  state.terminalInputQueue = state.terminalInputQueue
+    .catch(() => {})
+    .then(async () => {
+      if (!snapshotContextIsCurrent(context)) return;
+      const message = { type: "input", data };
+      if (data.includes("\r") || data.includes("\n")) {
+        await state.pendingTerminalWrite.catch(() => {});
+        await waitForNextPaint();
+        if (!snapshotContextIsCurrent(context)) return;
+        prepareSnapshotAnchorGuard(context.term, context.generation);
+        const baseline = terminalVisibleSnapshotWithSource(context.term, context.generation);
+        message.baseline_snapshot = baseline.data || "";
+        message.baseline_source = baseline.source || "unknown";
+        message.baseline_continuity_version = baseline.continuityVersion || 0;
+        message.baseline_render_epoch = baseline.renderEpoch || 0;
+        message.baseline_buffer_type = baseline.bufferType || "unknown";
+        message.baseline_buffer_at_capacity = Boolean(baseline.bufferAtCapacity);
+        message.baseline_anchor_guard_active = Boolean(baseline.anchorGuardActive);
+        message.baseline_anchor_guard_line = Number.isInteger(baseline.anchorGuardLine) ? baseline.anchorGuardLine : -1;
+        message.baseline_cursor_line = Number.isInteger(baseline.cursorLine) ? baseline.cursorLine : -1;
+      }
+      sendWSOnSocket(context.socket, message);
+    });
+  return state.terminalInputQueue;
 }
 
 function selectSession(id) {
@@ -176,6 +223,8 @@ function connectWS(id) {
   if (state.socket) state.socket.close();
   initTerminal();
   const ws = new WebSocket(terminalWebSocketURL(id));
+  const term = state.term;
+  const generation = state.terminalGeneration;
   state.socket = ws;
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
@@ -186,7 +235,7 @@ function connectWS(id) {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "snapshot_request") {
-          void syncSnapshotNow();
+          enqueueSnapshotSync(msg.request_id || "", { socket: ws, term, generation, sessionID: id }, msg.purpose || "");
           return;
         }
         if (msg.type === "terminal_resize") {
@@ -213,8 +262,12 @@ function isHeadlessMode() {
 }
 
 function sendWS(obj) {
-  if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-    state.socket.send(JSON.stringify(obj));
+  return sendWSOnSocket(state.socket, obj);
+}
+
+function sendWSOnSocket(socket, obj) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(obj));
     return true;
   }
   return false;
@@ -318,11 +371,27 @@ function writeTerminal(text) {
 
 function waitForNextPaint() {
   return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve();
+    };
     if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(() => resolve());
+      // Background tabs may throttle requestAnimationFrame indefinitely. A
+      // bounded fallback keeps correlated snapshot requests responsive while
+      // still preferring a real paint in the foreground.
+      timer = setTimeout(finish, 50);
+      try {
+        requestAnimationFrame(finish);
+      } catch {
+        finish();
+      }
       return;
     }
-    setTimeout(resolve, 16);
+    timer = setTimeout(finish, 16);
   });
 }
 
@@ -330,30 +399,286 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function terminalVisibleSnapshot() {
-  return terminalVisibleSnapshotWithSource().data;
+function terminalVisibleSnapshot(term = state.term) {
+  return terminalVisibleSnapshotWithSource(term).data;
 }
 
-function terminalVisibleSnapshotWithSource() {
-  if (!state.term) return { data: "", source: "none" };
-  const bufferSnapshot = terminalBufferSnapshot();
-  if (bufferSnapshot) return { data: bufferSnapshot, source: "buffer" };
+function terminalSnapshotMetadata(term = state.term) {
+  const snapshot = terminalVisibleSnapshotWithSource(term);
+  return {
+    source: snapshot.source || "unknown",
+    continuity_version: snapshot.continuityVersion || 0,
+    render_epoch: snapshot.renderEpoch || 0,
+    buffer_type: snapshot.bufferType || "unknown",
+    buffer_at_capacity: Boolean(snapshot.bufferAtCapacity),
+    anchor_guard_active: Boolean(snapshot.anchorGuardActive),
+    anchor_guard_line: Number.isInteger(snapshot.anchorGuardLine) ? snapshot.anchorGuardLine : -1,
+    cursor_line: Number.isInteger(snapshot.cursorLine) ? snapshot.cursorLine : -1,
+    data_length: (snapshot.data || "").length,
+    line_count: snapshot.data ? snapshot.data.split("\n").length : 0,
+    terminal_generation: state.terminalGeneration,
+    socket_ready_state: state.socket?.readyState ?? -1,
+  };
+}
+
+function terminalVisibleSnapshotWithSource(term = state.term, generation = state.terminalGeneration) {
+  if (!term) {
+    const metadata = observeSnapshotRenderContinuity(null, null, generation);
+    return { data: "", source: "none", ...metadata };
+  }
+  const buffer = terminalActiveBuffer(term);
+  const metadata = observeSnapshotRenderContinuity(term, buffer, generation);
+  const bufferSnapshot = terminalBufferSnapshot(term, buffer);
+  if (bufferSnapshot.data) {
+    const anchorGuardLine = snapshotAnchorGuardDataLine(
+      term,
+      buffer,
+      generation,
+      bufferSnapshot.physicalStarts,
+      bufferSnapshot.physicalEnds,
+    );
+    const cursorLine = terminalCursorDataLine(buffer, bufferSnapshot.physicalStarts, bufferSnapshot.physicalEnds);
+    return {
+      data: bufferSnapshot.data,
+      source: "buffer",
+      ...metadata,
+      anchorGuardActive: anchorGuardLine >= 0,
+      anchorGuardLine,
+      cursorLine,
+    };
+  }
   const domSnapshot = terminalDOMVisibleSnapshot();
-  if (domSnapshot) return { data: domSnapshot, source: "dom" };
-  return { data: "", source: "empty" };
+  if (domSnapshot) {
+    return {
+      data: domSnapshot,
+      source: "dom",
+      ...metadata,
+      bufferType: "dom",
+      bufferAtCapacity: false,
+      anchorGuardActive: false,
+      anchorGuardLine: -1,
+      cursorLine: -1,
+    };
+  }
+  return {
+    data: "",
+    source: "empty",
+    ...metadata,
+    bufferType: "empty",
+    bufferAtCapacity: false,
+    anchorGuardActive: false,
+    anchorGuardLine: -1,
+    cursorLine: -1,
+  };
 }
 
-function terminalBufferSnapshot() {
-  const buffer = state.term?.buffer?.active;
-  if (!buffer || typeof buffer.getLine !== "function" || !Number.isFinite(buffer.length)) return "";
+function terminalActiveBuffer(term = state.term) {
+  return term?.buffer?.active || null;
+}
+
+function terminalBufferType(term, buffer) {
+  const declared = typeof buffer?.type === "string" ? buffer.type.trim().toLowerCase() : "";
+  if (declared) return declared;
+  if (buffer && term?.buffer?.normal === buffer) return "normal";
+  if (buffer && term?.buffer?.alternate === buffer) return "alternate";
+  return buffer ? "unknown" : "none";
+}
+
+function terminalScrollbackLimit(term) {
+  const configured = Number(term?.options?.scrollback ?? term?._core?.optionsService?.rawOptions?.scrollback);
+  return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : null;
+}
+
+function terminalBufferAtCapacity(term, buffer, bufferType) {
+  if (!buffer || bufferType !== "normal") return false;
+  const length = Number(buffer.length);
+  const rows = Number(term?.rows);
+  const scrollback = terminalScrollbackLimit(term);
+  if (!Number.isFinite(length) || !Number.isFinite(rows) || rows <= 0 || scrollback === null) return false;
+  return length >= Math.floor(rows) + scrollback;
+}
+
+function observeSnapshotRenderContinuity(term, buffer, generation) {
+  const normalizedGeneration = Number.isFinite(Number(generation)) ? Number(generation) : 0;
+  const length = Number.isFinite(Number(buffer?.length)) ? Number(buffer.length) : null;
+  const previous = state.snapshotRenderContinuity;
+  const changed = !previous ||
+    previous.term !== term ||
+    previous.buffer !== buffer ||
+    previous.generation !== normalizedGeneration ||
+    (length !== null && previous.length !== null && length < previous.length);
+  if (changed) {
+    if (previous) disposeSnapshotAnchorGuard();
+    state.snapshotRenderEpoch++;
+  }
+  state.snapshotRenderContinuity = { term, buffer, generation: normalizedGeneration, length };
+  const bufferType = terminalBufferType(term, buffer);
+  const anchorGuardActive = snapshotAnchorGuardActive(term, buffer, normalizedGeneration);
+  return {
+    continuityVersion: SNAPSHOT_CONTINUITY_VERSION,
+    renderEpoch: state.snapshotRenderEpoch,
+    bufferType,
+    bufferAtCapacity: terminalBufferAtCapacity(term, buffer, bufferType),
+    anchorGuardActive,
+  };
+}
+
+function prepareSnapshotAnchorGuard(term, generation) {
+  const buffer = terminalActiveBuffer(term);
+  // Apply a pending terminal/buffer transition before installing the marker;
+  // otherwise the baseline capture itself would immediately invalidate it.
+  observeSnapshotRenderContinuity(term, buffer, generation);
+  disposeSnapshotAnchorGuard();
+  // Every Enter establishes a new identity boundary even when marker support
+  // is unavailable. Baseline and subsequent snapshots observe this same epoch.
+  state.snapshotRenderEpoch++;
+  if (!term || !buffer || terminalBufferType(term, buffer) !== "normal" || typeof term.registerMarker !== "function") return false;
+  const baseY = Number(buffer.baseY);
+  const cursorY = Number(buffer.cursorY);
+  const length = Number(buffer.length);
+  if (!Number.isFinite(baseY) || !Number.isFinite(cursorY) || !Number.isFinite(length) || length <= 0) return false;
+  const cursorLine = Math.max(0, Math.min(Math.floor(length) - 1, Math.floor(baseY + cursorY)));
+  const logicalSnapshot = terminalBufferLogicalSnapshot(buffer);
+  if (logicalSnapshot.physicalStarts.length === 0) return false;
+  const targetLine = logicalSnapshot.physicalStarts[Math.max(0, logicalSnapshot.physicalStarts.length - 64)];
+  const offset = targetLine - cursorLine;
+  let marker = null;
+  try {
+    marker = term.registerMarker(offset) || null;
+  } catch {
+    marker = null;
+  }
+  if (!marker || marker.isDisposed) return false;
+  const markerLine = Number(marker.line);
+  if (!Number.isFinite(markerLine) || markerLine !== targetLine) {
+    try {
+      marker.dispose?.();
+    } catch {}
+    return false;
+  }
+  const guard = { marker, term, buffer, generation };
+  state.snapshotAnchorGuard = guard;
+  if (typeof marker.onDispose === "function") {
+    marker.onDispose(() => {
+      if (state.snapshotAnchorGuard !== guard) return;
+      state.snapshotAnchorGuard = null;
+      state.snapshotRenderEpoch++;
+    });
+  }
+  return true;
+}
+
+function snapshotAnchorGuardActive(term, buffer, generation) {
+  const guard = state.snapshotAnchorGuard;
+  if (!guard) return false;
+  if (guard.marker?.isDisposed) {
+    state.snapshotAnchorGuard = null;
+    state.snapshotRenderEpoch++;
+    return false;
+  }
+  return guard.term === term && guard.buffer === buffer && guard.generation === generation;
+}
+
+function snapshotAnchorGuardDataLine(term, buffer, generation, physicalStarts, physicalEnds) {
+  if (!snapshotAnchorGuardActive(term, buffer, generation)) return -1;
+  const markerLine = Number(state.snapshotAnchorGuard?.marker?.line);
+  if (!Number.isFinite(markerLine)) return -1;
+  return terminalPhysicalDataLine(markerLine, physicalStarts, physicalEnds);
+}
+
+function disposeSnapshotAnchorGuard() {
+  const guard = state.snapshotAnchorGuard;
+  if (!guard) return;
+  // Clear first so a synchronous onDispose callback knows this is a deliberate
+  // replacement/buffer transition rather than scrollback eviction.
+  state.snapshotAnchorGuard = null;
+  try {
+    guard.marker?.dispose?.();
+  } catch {}
+}
+
+function terminalBufferSnapshot(term = state.term, activeBuffer = null) {
+  const buffer = activeBuffer || terminalActiveBuffer(term);
+  return terminalBufferLogicalSnapshot(buffer);
+}
+
+function terminalBufferLogicalSnapshot(buffer) {
+  if (!buffer || typeof buffer.getLine !== "function" || !Number.isFinite(buffer.length)) {
+    return { data: "", physicalStarts: [], physicalEnds: [] };
+  }
   const lines = [];
+  const physicalStarts = [];
+  const physicalEnds = [];
   const end = Math.max(0, buffer.length);
   for (let i = 0; i < end; i++) {
-    lines.push(buffer.getLine(i)?.translateToString(true) || "");
+    const bufferLine = buffer.getLine(i);
+    const text = terminalBufferPhysicalLineText(bufferLine);
+    if (bufferLine?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+      physicalEnds[physicalEnds.length - 1] = i;
+    } else {
+      lines.push(text);
+      physicalStarts.push(i);
+      physicalEnds.push(i);
+    }
   }
-  while (lines.length && lines[0].trim() === "") lines.shift();
-  while (lines.length && lines[lines.length - 1].trim() === "") lines.pop();
-  return lines.join("\n");
+  while (lines.length && lines[0].trim() === "") {
+    lines.shift();
+    physicalStarts.shift();
+    physicalEnds.shift();
+  }
+  while (lines.length && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+    physicalStarts.pop();
+    physicalEnds.pop();
+  }
+  return { data: lines.join("\n"), physicalStarts, physicalEnds };
+}
+
+function terminalCursorDataLine(buffer, physicalStarts, physicalEnds) {
+  const baseY = Number(buffer?.baseY);
+  const cursorY = Number(buffer?.cursorY);
+  if (!Number.isFinite(baseY) || !Number.isFinite(cursorY)) return -1;
+  const physicalLine = Math.floor(baseY + cursorY);
+  return terminalPhysicalDataLine(physicalLine, physicalStarts, physicalEnds);
+}
+
+function terminalPhysicalDataLine(physicalLine, physicalStarts, physicalEnds) {
+  if (!Number.isInteger(physicalLine)) return -1;
+  for (let i = physicalStarts.length - 1; i >= 0; i--) {
+    if (physicalStarts[i] <= physicalLine && physicalLine <= physicalEnds[i]) return i;
+  }
+  return -1;
+}
+
+function terminalBufferPhysicalLineText(bufferLine) {
+  if (!bufferLine || typeof bufferLine.translateToString !== "function") return "";
+  const length = terminalBufferPhysicalLineLength(bufferLine);
+  if (length !== null) {
+    // The cell-aware end excludes unused padding cells while retaining a real
+    // trailing U+0020 cell. translateToString(true) cannot make that distinction.
+    return bufferLine.translateToString(false, 0, length) || "";
+  }
+  return bufferLine.translateToString(true) || "";
+}
+
+function terminalBufferPhysicalLineLength(bufferLine) {
+  if (typeof bufferLine.getTrimmedLength === "function") {
+    const length = Number(bufferLine.getTrimmedLength());
+    if (Number.isFinite(length) && length >= 0) return Math.floor(length);
+  }
+  const width = Number(bufferLine.length);
+  if (!Number.isFinite(width) || width < 0 || typeof bufferLine.getCell !== "function") return null;
+  let reusableCell;
+  for (let column = Math.floor(width) - 1; column >= 0; column--) {
+    const cell = bufferLine.getCell(column, reusableCell);
+    if (!cell) continue;
+    reusableCell = cell;
+    const code = typeof cell.getCode === "function" ? Number(cell.getCode()) : 0;
+    const chars = typeof cell.getChars === "function" ? cell.getChars() : "";
+    if ((Number.isFinite(code) && code !== 0) || chars !== "") return column + 1;
+  }
+  return 0;
 }
 
 function terminalDOMVisibleSnapshot() {
@@ -448,25 +773,125 @@ function terminalCharColumns(char) {
   return 1;
 }
 
-async function syncSnapshotNow() {
-  if (!state.term) return;
-  const requestSeq = ++state.snapshotRequestSeq;
+function enqueueSnapshotSync(serverRequestID, context, purpose = "") {
+  purpose = String(purpose || "").trim();
+  const activeBatch = state.snapshotSyncBatches[state.snapshotSyncBatches.length - 1];
+  if (
+    activeBatch &&
+    activeBatch.purpose === purpose &&
+    activeBatch.context.term === context.term &&
+    activeBatch.context.socket === context.socket &&
+    activeBatch.context.generation === context.generation &&
+    activeBatch.context.sessionID === context.sessionID
+  ) {
+    activeBatch.requestIDs.push(serverRequestID);
+    return activeBatch.promise;
+  }
+  const batch = { context, purpose, requestIDs: [serverRequestID], promise: null };
+  const previous = state.snapshotSyncQueue.catch(() => {});
+  batch.promise = previous.then(async () => {
+    try {
+      if (!snapshotContextIsCurrent(context)) return;
+      if (purpose === "input_baseline") {
+        prepareSnapshotAnchorGuard(context.term, context.generation);
+      }
+      const snapshot = await captureTerminalSnapshot(context, true);
+      if (!snapshot || !snapshotContextIsCurrent(context)) return;
+      for (const requestID of batch.requestIDs) {
+        const message = snapshotMessage(snapshot);
+        if (requestID) message.request_id = requestID;
+        sendWSOnSocket(context.socket, message);
+      }
+    } finally {
+      if (state.snapshotSyncBatch === batch) state.snapshotSyncBatch = null;
+      const index = state.snapshotSyncBatches.indexOf(batch);
+      if (index >= 0) state.snapshotSyncBatches.splice(index, 1);
+    }
+  });
+  state.snapshotSyncBatch = batch;
+  state.snapshotSyncBatches.push(batch);
+  state.snapshotSyncQueue = batch.promise.catch(() => {});
+  return batch.promise;
+}
+
+function snapshotContextIsCurrent(context) {
+  return Boolean(
+    context?.term &&
+      context?.socket &&
+      state.term === context.term &&
+      state.socket === context.socket &&
+      state.terminalGeneration === context.generation &&
+      state.active === context.sessionID &&
+      context.socket.readyState === WebSocket.OPEN,
+  );
+}
+
+async function syncSnapshotNow(serverRequestID = "", requestContext = null) {
+  const context = requestContext || {
+    term: state.term,
+    socket: state.socket,
+    generation: state.terminalGeneration,
+    sessionID: state.active,
+  };
+  const snapshot = await captureTerminalSnapshot(context, Boolean(requestContext));
+  if (!snapshot) return;
+  const message = snapshotMessage(snapshot);
+  if (serverRequestID) message.request_id = serverRequestID;
+  if (requestContext) {
+    sendWSOnSocket(context.socket, message);
+  } else {
+    sendWS(message);
+  }
+}
+
+function snapshotMessage(snapshot) {
+  return {
+    type: "snapshot",
+    data: snapshot.data || "",
+    source: snapshot.source || "unknown",
+    render_epoch: snapshot.renderEpoch || 0,
+    buffer_type: snapshot.bufferType || "unknown",
+    buffer_at_capacity: Boolean(snapshot.bufferAtCapacity),
+    anchor_guard_active: Boolean(snapshot.anchorGuardActive),
+    continuity_version: snapshot.continuityVersion || 0,
+    anchor_guard_line: Number.isInteger(snapshot.anchorGuardLine) ? snapshot.anchorGuardLine : -1,
+    cursor_line: Number.isInteger(snapshot.cursorLine) ? snapshot.cursorLine : -1,
+  };
+}
+
+async function captureTerminalSnapshot(context, requireCurrent) {
+  if (!context.term) return null;
+  if (requireCurrent && !snapshotContextIsCurrent(context)) return null;
   await state.pendingTerminalWrite.catch(() => {});
-  let snapshot = "";
-  for (let i = 0; i < 5; i++) {
+  let snapshot = null;
+  for (let i = 0; i < 3; i++) {
+    if (requireCurrent && !snapshotContextIsCurrent(context)) return null;
     resizeTerm();
     await waitForNextPaint();
     await waitForNextPaint();
-    const first = terminalVisibleSnapshotWithSource();
-    await wait(80);
+    const first = terminalVisibleSnapshotWithSource(context.term, context.generation);
+    await wait(40);
     await state.pendingTerminalWrite.catch(() => {});
     await waitForNextPaint();
-    const second = terminalVisibleSnapshotWithSource();
-    snapshot = second;
-    if (requestSeq !== state.snapshotRequestSeq) return;
-    if (first.data === second.data && first.source === second.source) break;
+    const second = terminalVisibleSnapshotWithSource(context.term, context.generation);
+    if (requireCurrent && !snapshotContextIsCurrent(context)) return null;
+    if (first.data === second.data &&
+        first.source === second.source &&
+        first.renderEpoch === second.renderEpoch &&
+        first.bufferType === second.bufferType &&
+        first.bufferAtCapacity === second.bufferAtCapacity &&
+        first.anchorGuardActive === second.anchorGuardActive &&
+        first.continuityVersion === second.continuityVersion &&
+        first.anchorGuardLine === second.anchorGuardLine &&
+        first.cursorLine === second.cursorLine) {
+      snapshot = second;
+      break;
+    }
   }
-  sendWS({ type: "snapshot", data: snapshot.data || "", source: snapshot.source || "unknown" });
+  // A screen that kept changing throughout every sample may be halfway
+  // through a TUI redraw. Returning no snapshot makes the server retry instead
+  // of treating an incoherent frame as a round boundary.
+  return snapshot;
 }
 
 async function loadQuick() {
@@ -1971,7 +2396,10 @@ if (typeof window !== "undefined") {
     addPreStartCommandRow,
     visibleSessions,
     syncSnapshotNow,
+    enqueueSnapshotSync,
+    queueTerminalInput,
     terminalVisibleSnapshot,
+    terminalSnapshotMetadata,
     terminalWebSocketURL,
     resizeTerm,
     syncHeadlessTerminalSize,

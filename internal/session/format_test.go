@@ -6,8 +6,13 @@ import (
 	"testing"
 )
 
+func pickAnchoredNotifyContent(body string) string {
+	const previous = "> formatting test"
+	return PickNotifyContent(previous+"\n"+body, previous, nil, "formatting test")
+}
+
 func TestPickNotifyContentUsesVisibleSnapshot(t *testing.T) {
-	got := PickNotifyContent("cmd\nrendered output", "", []byte("raw"), "")
+	got := pickAnchoredNotifyContent("cmd\nrendered output")
 	if got != "cmd\nrendered output" {
 		t.Fatalf("unexpected content: %q", got)
 	}
@@ -37,7 +42,7 @@ func TestPickNotifyContentIgnoresRoundStartAndUsesVisibleTail(t *testing.T) {
 	}
 }
 
-func TestPickNotifyContentFallsBackToVisibleTailWhenDiffCannotMatch(t *testing.T) {
+func TestPickNotifyContentDoesNotLeakFullSnapshotWhenDiffCannotMatch(t *testing.T) {
 	SetLarkNotifyMaxLines(3)
 	t.Cleanup(func() { SetLarkNotifyMaxLines(defaultMaxLarkTextLines) })
 	visible := strings.Join([]string{
@@ -48,13 +53,19 @@ func TestPickNotifyContentFallsBackToVisibleTailWhenDiffCannotMatch(t *testing.T
 		"2. second",
 	}, "\n")
 	got := PickNotifyContent(visible, "stale snapshot", []byte("current answer1.first2.second"), "current question")
-	want := strings.Join([]string{
-		"current answer",
-		"1. first",
-		"2. second",
+	if got != "" {
+		t.Fatalf("an unanchored snapshot must fail closed instead of leaking terminal history: %q", got)
+	}
+}
+
+func TestPickNotifyContentFailsClosedForOrdinaryRoundWithoutBaseline(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_HISTORY_MUST_NOT_LEAK",
+		"› this is a unique current question with enough detail",
+		"• this reply still has no trustworthy round baseline",
 	}, "\n")
-	if got != want {
-		t.Fatalf("fallback should use visible tail:\n%q\nwant:\n%q", got, want)
+	if got := PickNotifyContent(visible, "", nil, "this is a unique current question with enough detail"); got != "" {
+		t.Fatalf("an ordinary round without a baseline must fail closed: %q", got)
 	}
 }
 
@@ -95,7 +106,7 @@ func TestPickNotifyContentUsesInputAnchorBeforeSnapshotDiff(t *testing.T) {
 	}
 }
 
-func TestPickNotifyContentUsesLatestRepeatedInputAnchor(t *testing.T) {
+func TestPickNotifyContentRejectsRepeatedInputWithoutBaseline(t *testing.T) {
 	visible := strings.Join([]string{
 		"› 北京呢",
 		"• 北京旧结果。",
@@ -103,37 +114,58 @@ func TestPickNotifyContentUsesLatestRepeatedInputAnchor(t *testing.T) {
 		"• 北京新结果。",
 	}, "\n")
 	got := PickNotifyContent(visible, "", nil, "北京呢")
-	want := "• 北京新结果。"
-	if got != want {
-		t.Fatalf("latest repeated input should be used as anchor:\n%q\nwant:\n%q", got, want)
+	if got != "" {
+		t.Fatalf("repeated input without a baseline cannot identify the current occurrence: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsShortHistoricalInputWithoutBaseline(t *testing.T) {
+	for _, input := range []string{"hi", "继续"} {
+		t.Run(input, func(t *testing.T) {
+			visible := strings.Join([]string{
+				"OLD_HISTORY_MUST_NOT_LEAK",
+				"› " + input,
+				"• historical answer",
+				"• ambiguous tail",
+			}, "\n")
+			if got := PickNotifyContent(visible, "", nil, input); got != "" {
+				t.Fatalf("a short input surrounded by history is not a trustworthy unbaselined anchor: %q", got)
+			}
+		})
 	}
 }
 
 func TestNotifyContentNeedsMoreSnapshotUsesLatestRepeatedInputInWindow(t *testing.T) {
-	visible := strings.Join([]string{
+	previous := strings.Join([]string{
 		"> ask",
 		"old answer",
+	}, "\n")
+	visible := strings.Join([]string{
+		previous,
 		"> ask",
 	}, "\n")
-	if !notifyContentNeedsMoreSnapshotWithWindow(visible, "", nil, "ask", "ask") {
+	if !notifyContentNeedsMoreSnapshotWithWindow(visible, previous, nil, "ask", "ask") {
 		t.Fatalf("window should wait when the latest repeated input has no reply")
 	}
 
 	visible += "\nnew answer"
-	if notifyContentNeedsMoreSnapshotWithWindow(visible, "", nil, "ask", "ask") {
+	if notifyContentNeedsMoreSnapshotWithWindow(visible, previous, nil, "ask", "ask") {
 		t.Fatalf("window should be ready once the latest repeated input has a reply")
 	}
 }
 
 func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
 	input := "第一行\n第二行\n第三行"
-	visible := strings.Join([]string{
+	previous := strings.Join([]string{
 		"› 第一行",
 		"第二行",
 		"第三行",
+	}, "\n")
+	visible := strings.Join([]string{
+		previous,
 		"• 多行输入后的回复。",
 	}, "\n")
-	got := PickNotifyContent(visible, "", nil, input)
+	got := PickNotifyContent(visible, previous, nil, input)
 	want := "• 多行输入后的回复。"
 	if got != want {
 		t.Fatalf("multiline input anchor should be skipped from notification:\n%q\nwant:\n%q", got, want)
@@ -142,15 +174,18 @@ func TestPickNotifyContentSkipsMultilineInputAnchor(t *testing.T) {
 
 func TestPickNotifyContentFindsIndentedRichTextInputAnchorWithoutPromptSpace(t *testing.T) {
 	input := "关于PE的维护不对啊，你应该用V1、V2、V3、V4这种来。F4是什么版本啊？你要按照这个逻辑来。"
-	visible := strings.Join([]string{
+	previous := strings.Join([]string{
 		"上一轮有缩进的最终输出。",
 		"    Worked for 8m 30s",
 		"    ›关于PE的维护不对啊，你应该用V1、V2、V3、V4这种来。",
 		"      F4是什么版本啊？你要按照这个逻辑来。",
+	}, "\n")
+	visible := strings.Join([]string{
+		previous,
 		"    • 这是当前轮回复。",
 	}, "\n")
 
-	got := PickNotifyContent(visible, "", nil, input)
+	got := PickNotifyContent(visible, previous, nil, input)
 	want := "• 这是当前轮回复。"
 	if got != want {
 		t.Fatalf("indented rich-text input anchor should exclude prior output:\n%q\nwant:\n%q", got, want)
@@ -159,15 +194,18 @@ func TestPickNotifyContentFindsIndentedRichTextInputAnchorWithoutPromptSpace(t *
 
 func TestPickNotifyContentFindsIndentedCodexFileMentionAnchor(t *testing.T) {
 	input := "@v2/framework/session/player/audio/audio.go这个的改动中，你看一下，因为线上他用的可能是没有文本的TTS。不会有问题吧？"
-	visible := strings.Join([]string{
+	previous := strings.Join([]string{
 		"• 已修改并推送，提交：cf9cab20。",
 		"  - 删除通用 InitEnabledComponents/IsEnabled。",
 		"    › v2/framework/session/player/audio/audio.go这个的改动中，你看一下，因为线上他用",
 		"      的可能是没有文本的TTS。不会有问题吧？",
+	}, "\n")
+	visible := strings.Join([]string{
+		previous,
 		"    • 我按代码审查方式看这个文件。",
 	}, "\n")
 
-	got := PickNotifyContent(visible, "", nil, input)
+	got := PickNotifyContent(visible, previous, nil, input)
 	want := "• 我按代码审查方式看这个文件。"
 	if got != want {
 		t.Fatalf("Codex file mention anchor should ignore hidden @ marker and indentation:\n%q\nwant:\n%q", got, want)
@@ -175,27 +213,288 @@ func TestPickNotifyContentFindsIndentedCodexFileMentionAnchor(t *testing.T) {
 }
 
 func TestPickNotifyContentFallsBackToLastIndentedPromptAfterRichTextRewrite(t *testing.T) {
-	visible := strings.Join([]string{
+	previous := strings.Join([]string{
 		"上一轮完整输出。",
 		"  - 上一轮列表项。",
 		"    › rich-text-file-chip 请检查这个改动",
 		"      以及所有兼容情况。",
+	}, "\n")
+	visible := strings.Join([]string{
+		previous,
 		"    • 只保留当前轮回复。",
 	}, "\n")
 
-	got := PickNotifyContent(visible, "", nil, "@完全不同的原始富文本引用 请检查这个改动以及所有兼容情况。")
+	got := PickNotifyContent(visible, previous, nil, "@/tmp/完全不同的原始富文本引用 请检查这个改动以及所有兼容情况。")
 	want := "• 只保留当前轮回复。"
 	if got != want {
 		t.Fatalf("last indented prompt should prevent full-history fallback after rich-text rewrite:\n%q\nwant:\n%q", got, want)
 	}
 }
 
-func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
+func TestPickNotifyContentNormalizesUnicodeAndInvisiblePromptCharacters(t *testing.T) {
+	input := "Café 请检查这个问题"
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"\u200b❯\u00a0Cafe\u0301 \u200d请检查这个问题",
+		"● 只保留当前轮回复。",
+	}, "\n")
+
+	got := PickNotifyContent(visible, "OLD_SENTINEL", nil, input)
+	if got != "● 只保留当前轮回复。" {
+		t.Fatalf("Unicode-normalized prompt should anchor the current round, got %q", got)
+	}
+}
+
+func TestPickNotifyContentMatchesInputEchoContainingANSIControls(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"\x1b[36m›\x1b[0m \x1b[1m检查 ANSI 锚点\x1b[0m",
+		"• 当前轮回复。",
+	}, "\n")
+
+	got := PickNotifyContent(visible, "OLD_SENTINEL", nil, "检查 ANSI 锚点")
+	if got != "• 当前轮回复。" {
+		t.Fatalf("ANSI-decorated input echo should anchor the current round, got %q", got)
+	}
+}
+
+func TestPickNotifyContentSupportsLongMultilineInputAndPromptLikeContinuation(t *testing.T) {
+	inputLines := make([]string, 0, 42)
+	inputLines = append(inputLines, "第一行")
+	for i := 1; i <= 40; i++ {
+		prefix := "普通"
+		if i == 12 {
+			prefix = "• 用户输入中的项目"
+		}
+		if i == 25 {
+			prefix = "› 用户输入中的示例"
+		}
+		inputLines = append(inputLines, prefix+strconv.Itoa(i))
+	}
+	visibleLines := []string{"OLD_SENTINEL", "› " + inputLines[0]}
+	visibleLines = append(visibleLines, inputLines[1:]...)
+	visibleLines = append(visibleLines, "• 长输入之后的回复。")
+
+	got := PickNotifyContent(strings.Join(visibleLines, "\n"), "OLD_SENTINEL", nil, strings.Join(inputLines, "\n"))
+	if got != "• 长输入之后的回复。" {
+		t.Fatalf("long multiline input should remain a valid anchor, got %q", got)
+	}
+}
+
+func TestPickNotifyContentDoesNotTreatOrdinaryMentionAsFileChip(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"› foo",
+		"• unrelated reply",
+	}, "\n")
+	if got := PickNotifyContent(visible, "", nil, "@foo"); got != "" {
+		t.Fatalf("ordinary @mention must not collide with an unprefixed prompt: %q", got)
+	}
+}
+
+func TestPickNotifyContentDoesNotTreatMentionWithLaterPathAsFileChip(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"› alice 请检查 /tmp/example.go",
+		"• unrelated reply",
+	}, "\n")
+	if got := PickNotifyContent(visible, "", nil, "@alice 请检查 /tmp/example.go"); got != "" {
+		t.Fatalf("a user mention followed by a path must not lose its @ marker: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsFullyReflowedUnanchoredHistory(t *testing.T) {
+	previous := "OLD_SENTINEL one\nOLD_SENTINEL two\nold footer"
+	visible := "reflowed OLD_SENTINEL one and two\nnew answer without a prompt\nnew footer"
+	if got := PickNotifyContent(visible, previous, nil, "input missing from snapshot"); got != "" {
+		t.Fatalf("fully reflowed history without a trusted boundary must fail closed: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsReflowWithOnlyWeakCommonFooter(t *testing.T) {
 	previous := strings.Join([]string{
+		"OLD_SENTINEL first historical line",
+		"OLD_SENTINEL second historical line",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	visible := strings.Join([]string{
+		"reflowed OLD_SENTINEL first and second historical lines",
+		"current answer without a trustworthy prompt",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "missing current input"); got != "" {
+		t.Fatalf("a shared status footer must not authorize a near-full-screen diff: %q", got)
+	}
+}
+
+func TestPickNotifyContentExtractsOnlyActiveInteractionMenu(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL historical question",
+		"OLD_SENTINEL historical answer",
+		"Select Model and Effort",
+		"1. gpt-5.6-sol (current)  Frontier model",
+		"2. gpt-5.6-terra          Balanced model",
+		"Press enter to confirm or esc to go back",
+	}, "\n")
+	got := PickNotifyContent(visible, "unrelated baseline", nil, "/model")
+	if strings.Contains(got, "OLD_SENTINEL") || !strings.HasPrefix(got, "Select Model and Effort\n") {
+		t.Fatalf("interaction fallback must return only the active menu block: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsStaleReasoningMenuForUnrelatedInput(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"Select Reasoning Level for gpt-5.6-sol",
+		"1. Low",
+		"2. Medium (default)",
+		"3. High",
+	}, "\n")
+	if got := PickNotifyContent(visible, "different baseline", nil, "成都天气如何"); got != "" {
+		t.Fatalf("an old reasoning menu must not match an unrelated turn: %q", got)
+	}
+}
+
+func TestPickNotifyContentDoesNotDiffStaleReasoningMenuAfterNumericInput(t *testing.T) {
+	previous := "stable unrelated baseline line one\nstable unrelated baseline line two"
+	visible := previous + "\n" + strings.Join([]string{
+		"Select Reasoning Level for gpt-5.6-sol",
+		"1. Low",
+		"2. Medium (default)",
+		"3. High",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "1"); got != "" {
+		t.Fatalf("generic diff must not bypass stale Reasoning-menu context checks: %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesStableTailInsteadOfHistoricalRepeatedInputAfterReflow(t *testing.T) {
+	previous := "OLD_SENTINEL historical header\n› repeat question\n• historical answer"
+	visible := "reflowed OLD_SENTINEL historical header\n› repeat question\n• historical answer\n• ambiguous new tail"
+	if got := PickNotifyContent(visible, previous, nil, "repeat question"); got != "" {
+		t.Fatalf("a partially reflowed baseline cannot safely downgrade to its shorter repeated tail: %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesComposerAnchorAlreadyPresentInBaseline(t *testing.T) {
+	previous := strings.Join([]string{
+		"OLD_SENTINEL historical answer",
+		"› 当前问题",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	visible := strings.Join([]string{
+		"OLD_SENTINEL historical answer",
+		"› 当前问题",
+		"• 只发送当前回答。",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "当前问题"); got != "• 只发送当前回答。" {
+		t.Fatalf("the pre-Enter composer line should remain a valid round anchor, got %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesCorrectRepeatedComposerOccurrenceFromBaseline(t *testing.T) {
+	previous := strings.Join([]string{
+		"› 重复问题",
+		"• OLD_SENTINEL old answer",
+		"› 重复问题",
+		"gpt-5.6-sol high fast · ~/project/easy_terminal",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› 重复问题",
+		"• OLD_SENTINEL old answer",
+		"› 重复问题",
+		"• 当前回答里引用了：重复问题",
+		"gpt-5.6-sol high fast · ~/project/easy_terminal",
+	}, "\n")
+	want := "• 当前回答里引用了：重复问题"
+	if got := PickNotifyContent(visible, previous, nil, "重复问题"); got != want {
+		t.Fatalf("the baseline's newest repeated composer must be selected by occurrence: got %q, want %q", got, want)
+	}
+}
+
+func TestPickNotifyContentRejectsBaselinePromptFollowedByHistoricalReply(t *testing.T) {
+	previous := strings.Join([]string{
+		"› 重复问题",
+		"• OLD_SENTINEL historical reply",
+	}, "\n")
+	visible := previous + "\n• ambiguous new tail"
+	if _, ok := newestInputAnchorSpan(splitVisibleLines(visible), splitVisibleLines(previous), "重复问题"); ok {
+		t.Fatal("a historical prompt followed by reply content must not be accepted as the active composer anchor")
+	}
+	if got := PickNotifyContent(visible, previous, nil, "重复问题"); got != "• ambiguous new tail" {
+		t.Fatalf("the exact append-only diff may still return only the new tail, got %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsWhenBaselineComposerOccurrenceDisappears(t *testing.T) {
+	previous := strings.Join([]string{
+		"› 重复问题",
+		"ok",
+		"› 重复问题",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› 重复问题",
+		"ok",
+		"• ambiguous answer after the active echo disappeared",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "重复问题"); got != "" {
+		t.Fatalf("an older duplicate must not replace a disappeared active composer anchor: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsLongButDifferentPromptPrefix(t *testing.T) {
+	visible := strings.Join([]string{
+		"OLD_SENTINEL",
+		"› 请你认真分析一下这个系统中的模块A具体实现",
+		"• historical answer",
+	}, "\n")
+	if got := PickNotifyContent(visible, "", nil, "请你认真分析一下这个系统中的模块B安全边界"); got != "" {
+		t.Fatalf("a long common prefix alone must not select another prompt: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsNearIdenticalHistoricalPromptWithoutBaseline(t *testing.T) {
+	visible := strings.Join([]string{
+		"› 请完整检查这个模块的全部兼容性问题，并修复发现的缺陷。",
+		"• OLD_SENTINEL historical answer",
+	}, "\n")
+	input := "请完整检查这个模块的全部兼容性问题，并修复发现的缺陷！"
+	if got := PickNotifyContent(visible, "", nil, input); got != "" {
+		t.Fatalf("a one-character difference must not fuzzy-match a historical prompt: %q", got)
+	}
+}
+
+func TestPickNotifyContentPreservesSemanticCodeIndentation(t *testing.T) {
+	previous := "› show code"
+	visible := strings.Join([]string{
+		previous,
+		"    func main() {",
+		"        println(\"ok\")",
+		"    }",
+	}, "\n")
+	want := "    func main() {\n        println(\"ok\")\n    }"
+	if got := PickNotifyContent(visible, previous, nil, "show code"); got != want {
+		t.Fatalf("semantic response indentation must be preserved:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestPickNotifyContentKeepsWhitespaceBoundariesInSingleLineAnchor(t *testing.T) {
+	visible := "OLD_SENTINEL\n› a bc\n• wrong answer"
+	if got := PickNotifyContent(visible, "", nil, "ab c"); got != "" {
+		t.Fatalf("different whitespace boundaries must not collide: %q", got)
+	}
+}
+
+func TestPickNotifyContentUsesTailBeforeStableFooter(t *testing.T) {
+	previous := strings.Join([]string{
+		"older stable output detail",
 		"old output",
 		"gpt-5.4 low fast · ~/Easy_Terminal_Workspace/测试",
 	}, "\n")
 	visible := strings.Join([]string{
+		"older stable output detail",
 		"old output",
 		"• Ran lsof -nP -iTCP:8083 -sTCP:LISTEN",
 		"  (no output)",
@@ -209,11 +508,11 @@ func TestPickNotifyContentDiffsInsertedMiddleBeforeStableFooter(t *testing.T) {
 		"已关闭 8083 接口。",
 	}, "\n")
 	if got != want {
-		t.Fatalf("middle insertion before stable footer should be diffed:\n%q\nwant:\n%q", got, want)
+		t.Fatalf("content after the stable output tail should be selected:\n%q\nwant:\n%q", got, want)
 	}
 }
 
-func TestPickNotifyContentUsesLastRepeatedPreviousTailAnchor(t *testing.T) {
+func TestPickNotifyContentKeepsFullAppendWhenReplyRepeatsPreviousTail(t *testing.T) {
 	previous := strings.Join([]string{
 		"anchor one",
 		"anchor two",
@@ -230,8 +529,243 @@ func TestPickNotifyContentUsesLastRepeatedPreviousTailAnchor(t *testing.T) {
 		"new content only",
 	}, "\n")
 	got := PickNotifyContent(visible, previous, nil, "next")
-	if got != "new content only" {
-		t.Fatalf("last repeated anchor should be used, got %q", got)
+	want := strings.Join([]string{
+		"old duplicate content",
+		"anchor one",
+		"anchor two",
+		"anchor three",
+		"new content only",
+	}, "\n")
+	if got != want {
+		t.Fatalf("an appended repeated tail must not replace the original boundary: got %q, want %q", got, want)
+	}
+}
+
+func TestPickNotifyContentUsesUniquePreviousTailAnchorsFromTwoThroughFiveLines(t *testing.T) {
+	for anchorLines := 2; anchorLines <= 5; anchorLines++ {
+		t.Run(strconv.Itoa(anchorLines)+"_lines", func(t *testing.T) {
+			anchor := make([]string, 0, anchorLines)
+			for i := 0; i < anchorLines; i++ {
+				anchor = append(anchor, "distinctive previous boundary line "+strconv.Itoa(i+1)+" alpha beta")
+			}
+			previous := strings.Join(anchor, "\n")
+			visible := strings.Join(append(append([]string{"OLDER_VIEWPORT_HISTORY"}, anchor...), "CURRENT_REPLY_ONLY"), "\n")
+			if got := PickNotifyContent(visible, previous, nil, "input echo missing from current snapshot"); got != "CURRENT_REPLY_ONLY" {
+				t.Fatalf("the unique %d-line previous tail should locate only the current reply, got %q", anchorLines, got)
+			}
+		})
+	}
+}
+
+func TestAdaptiveTailAnchorPrefersLongestUniqueSuffix(t *testing.T) {
+	anchor := []string{
+		"distinctive previous boundary one alpha beta",
+		"distinctive previous boundary two gamma delta",
+		"distinctive previous boundary three epsilon zeta",
+		"distinctive repeated suffix four eta theta",
+		"distinctive repeated suffix five iota kappa",
+	}
+	previous := strings.Join(anchor, "\n")
+	want := strings.Join([]string{anchor[3], anchor[4], "CURRENT_REPLY_ONLY"}, "\n")
+	visible := strings.Join(append(append(append([]string{"OLDER_VIEWPORT_HISTORY"}, anchor...), anchor[3], anchor[4]), "CURRENT_REPLY_ONLY"), "\n")
+	if got := PickNotifyContent(visible, previous, nil, "input echo missing from current snapshot"); got != want {
+		t.Fatalf("the unique five-line suffix must win even when its two-line suffix repeats later: got %q, want %q", got, want)
+	}
+}
+
+func TestAdaptiveTailAnchorFailsClosedForUnsafeOccurrencesAndIndentationRewrite(t *testing.T) {
+	previous := strings.Join([]string{
+		"distinctive previous conclusion alpha beta",
+		"    distinctive previous supporting gamma delta",
+	}, "\n")
+	tests := []struct {
+		name    string
+		visible string
+	}{
+		{
+			name:    "zero occurrences",
+			visible: "UNRELATED_HISTORY\nOLD_HISTORY_MUST_NOT_LEAK",
+		},
+		{
+			name:    "multiple occurrences",
+			visible: previous + "\nreply quote\n" + previous + "\nOLD_HISTORY_MUST_NOT_LEAK",
+		},
+		{
+			name: "indentation changed",
+			visible: strings.Join([]string{
+				"distinctive previous conclusion alpha beta",
+				"distinctive previous supporting gamma delta",
+				"OLD_HISTORY_MUST_NOT_LEAK",
+			}, "\n"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, ok := visibleTextAfterPreviousTailAnchor(tt.visible, previous, "", 5); ok || got != "" {
+				t.Fatalf("unsafe previous-tail match must fail closed: ok=%v body=%q", ok, got)
+			}
+		})
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsDuplicateIntroducedByReply(t *testing.T) {
+	previous := "• distinctive previous conclusion line\n  distinctive previous supporting detail"
+	visible := previous + "\nreply introduction\n" + previous + "\nfinal conclusion"
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("a reply quoting the tail makes its occurrence ambiguous: ok=%v body=%q", ok, got)
+	}
+}
+
+func TestAdaptiveTailAnchorDoesNotDowngradeAfterSelectedCandidateDisappears(t *testing.T) {
+	previous := strings.Join([]string{
+		"UNIQUE_CONTEXT_FOR_BASELINE",
+		"shared tail detail alpha",
+		"shared tail detail beta",
+	}, "\n")
+	visible := strings.Join([]string{
+		"OTHER_CONTEXT_FROM_HISTORY",
+		"shared tail detail alpha",
+		"shared tail detail beta",
+		"OLD_HISTORY_MUST_NOT_LEAK",
+	}, "\n")
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("a missing selected candidate must not downgrade to a weaker suffix: ok=%v body=%q", ok, got)
+	}
+}
+
+func TestPickNotifyContentUsesAdaptiveTailAnchorAcrossChangingTUIFooter(t *testing.T) {
+	previous := strings.Join([]string{
+		"• 上一轮结论具有足够长度和辨识度。",
+		"  上一轮补充说明同样具有足够长度。",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+		"1 background terminal running · /ps to view · /stop to close",
+	}, "\n")
+	visible := strings.Join([]string{
+		"• 上一轮结论具有足够长度和辨识度。",
+		"  上一轮补充说明同样具有足够长度。",
+		"• 本轮只应发送这一条新回答。",
+		"gpt-5.6-terra high fast · ~/project/easy_terminal",
+		"2 background terminals running · /ps to view · /stop to close",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "当前输入没有显示在屏幕中"); got != "• 本轮只应发送这一条新回答。" {
+		t.Fatalf("stable tail lines should survive changing TUI chrome, got %q", got)
+	}
+}
+
+func TestAdaptiveTailAnchorUsesPreviousOutputWhenComposerEchoDisappears(t *testing.T) {
+	previous := strings.Join([]string{
+		"• 上一轮结论具有足够长度和辨识度。",
+		"  上一轮补充说明同样具有足够长度。",
+		"Worked for 8m 30s",
+		"› 当前输入可能在重绘后消失",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	visible := strings.Join([]string{
+		"• 上一轮结论具有足够长度和辨识度。",
+		"  上一轮补充说明同样具有足够长度。",
+		"Worked for 8m 30s",
+		"• CURRENT_REPLY_ONLY",
+		"gpt-5.6-sol medium fast · ~/project/easy_terminal",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "当前输入可能在重绘后消失"); got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("the previous output tail should survive a disappearing composer echo, got %q", got)
+	}
+}
+
+func TestAdaptiveTailAnchorDoesNotSkipMarkdownLookingOutput(t *testing.T) {
+	previous := strings.Join([]string{
+		"stable conclusion alpha with enough entropy",
+		"stable supporting beta with enough entropy",
+		"> OLD_QUOTE_MUST_NOT_LEAK",
+		"gpt-5.6-sol medium fast · ~/project",
+	}, "\n")
+	visible := strings.Join([]string{
+		"stable conclusion alpha with enough entropy",
+		"stable supporting beta with enough entropy",
+		"> OLD_QUOTE_MUST_NOT_LEAK",
+		"CURRENT_REPLY_ONLY",
+		"gpt-5.6-terra high fast · ~/project",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, "input missing from snapshot"); got != "CURRENT_REPLY_ONLY" {
+		t.Fatalf("markdown-looking assistant output remains part of the stable boundary: %q", got)
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsReplyQuoteAfterOriginalAnchorWasEvicted(t *testing.T) {
+	anchor := []string{
+		"distinctive evicted boundary one alpha beta",
+		"distinctive evicted boundary two gamma delta",
+		"distinctive evicted boundary three epsilon zeta",
+		"distinctive evicted boundary four eta theta",
+		"distinctive evicted boundary five iota kappa",
+	}
+	previous := strings.Join(anchor, "\n")
+	visible := strings.Join(append(append([]string{
+		"• CURRENT_REPLY_STARTED_BEFORE_THE_QUOTE",
+		"the assistant now quotes the previous answer verbatim:",
+	}, anchor...), "• CURRENT_REPLY_CONTINUES_AFTER_THE_QUOTE"), "\n")
+	if got := pickNotifyContentWithWindowPolicy(visible, previous, nil, "input echo missing from current snapshot", "", false); got != "" {
+		t.Fatalf("renderer-reported scrollback eviction must disable text-tail matching: %q", got)
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsDisappearedRepeatedOccurrence(t *testing.T) {
+	anchor := []string{
+		"• 重复但足够长的上一轮结论。",
+		"  重复但足够长的上一轮详情。",
+	}
+	previous := strings.Join(append(append([]string{}, anchor...), anchor...), "\n")
+	visible := strings.Join(append(append([]string{}, anchor...), "• ambiguous new tail"), "\n")
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("an older duplicate must not replace a vanished latest tail occurrence: ok=%v body=%q", ok, got)
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsLowEntropyTwoLineSuffix(t *testing.T) {
+	previous := "done\ndone"
+	visible := previous + "\nambiguous"
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("two short generic lines are not a trustworthy tail anchor: ok=%v body=%q", ok, got)
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsLowEntropyThreeLineSuffix(t *testing.T) {
+	previous := "done\nokay\nready"
+	visible := previous + "\nambiguous"
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("three short generic lines are not a trustworthy tail anchor: ok=%v body=%q", ok, got)
+	}
+}
+
+func TestPickNotifyContentRejectsHistoryRevealedAbovePreviousSnapshot(t *testing.T) {
+	previous := "stable previous line one\nstable previous line two"
+	visible := "OLDER_HISTORY_MUST_NOT_LEAK\n" + previous
+	if got := PickNotifyContent(visible, previous, nil, "missing current input"); got != "" {
+		t.Fatalf("text revealed above the baseline is old viewport history, not a reply: %q", got)
+	}
+}
+
+func TestPickNotifyContentRejectsHistoryInsertedBetweenHeaderAndFooter(t *testing.T) {
+	previous := "Codex\ngpt-5.6-sol medium fast · ~/project"
+	visible := "Codex\nOLD_HISTORY_MUST_NOT_LEAK\ngpt-5.6-sol medium fast · ~/project"
+	if got := PickNotifyContent(visible, previous, nil, "missing current input"); got != "" {
+		t.Fatalf("a weak shared header/footer cannot authorize a middle diff: %q", got)
+	}
+}
+
+func TestPickNotifyContentRequiresRawExactAppendPrefix(t *testing.T) {
+	previous := "stable line one\n    indented old line"
+	visible := "stable line one\nindented old line\nOLD_HISTORY_MUST_NOT_LEAK"
+	if got := PickNotifyContent(visible, previous, nil, "missing current input"); got != "" {
+		t.Fatalf("whitespace-normalized history is not a strict append boundary: %q", got)
+	}
+}
+
+func TestAdaptiveTailAnchorRejectsReflowedPreviousLines(t *testing.T) {
+	previous := "• first distinctive previous line\n  second distinctive previous line"
+	visible := "• first distinctive previous line second distinctive previous line\n• ambiguous new tail"
+	if got, ok := visibleTextAfterPreviousTailAnchor(visible, previous, "", 5); ok || got != "" {
+		t.Fatalf("reflowed physical lines must not be treated as an exact tail boundary: ok=%v body=%q", ok, got)
 	}
 }
 
@@ -253,6 +787,26 @@ func TestPickNotifyContentDoesNotUseRoundReplyWithoutVisibleSnapshot(t *testing.
 	}
 	if !NotifyContentNeedsMoreSnapshot("", "", []byte("current answer only"), "missing input") {
 		t.Fatalf("missing visible snapshot should wait")
+	}
+}
+
+func TestPickNotifyContentWithUnknownInputNeverFallsBackToHistoricalPrompt(t *testing.T) {
+	previous := "different baseline that cannot be matched"
+	visible := strings.Join([]string{
+		"› historical input",
+		"• OLD_SENTINEL historical answer",
+		"• ambiguous tail",
+	}, "\n")
+	if got := PickNotifyContent(visible, previous, nil, ""); got != "" {
+		t.Fatalf("without a recorded input or trusted boundary, historical prompts must not authorize output: %q", got)
+	}
+}
+
+func TestPickNotifyContentWithUnknownInputStillAllowsExactAppendOnlyDiff(t *testing.T) {
+	previous := "stable previous line one\nstable previous line two"
+	visible := previous + "\nnew content only"
+	if got := PickNotifyContent(visible, previous, nil, ""); got != "new content only" {
+		t.Fatalf("an exact append-only boundary remains safe without input text: %q", got)
 	}
 }
 
@@ -318,7 +872,7 @@ func TestPickNotifyContentKeepsCodexModelMenusAsVisibleText(t *testing.T) {
 		"› 4. Extra high (current)  Extra high reasoning depth for complex problems",
 		"Press enter to confirm or esc to go back",
 	}, "\n")
-	got = PickNotifyContent(reasoningVisible, before, []byte("1Select Reasoning Level1.Low2.Medium3.High"), "1")
+	got = PickNotifyContent(reasoningVisible, modelVisible, []byte("1Select Reasoning Level1.Low2.Medium3.High"), "1")
 	want = strings.Join([]string{
 		"Select Reasoning Level for gpt-5.5",
 		"1. Low                  Fast responses with lighter reasoning",
@@ -333,7 +887,8 @@ func TestPickNotifyContentKeepsCodexModelMenusAsVisibleText(t *testing.T) {
 }
 
 func TestNotifyContentNeedsMoreSnapshotForInputOnlyOrTransientOnly(t *testing.T) {
-	if !NotifyContentNeedsMoreSnapshot("> current question", "", nil, "current question") {
+	const previous = "> current question"
+	if !NotifyContentNeedsMoreSnapshot(previous, previous, nil, "current question") {
 		t.Fatalf("input-only visible text should wait")
 	}
 	visible := strings.Join([]string{
@@ -341,11 +896,11 @@ func TestNotifyContentNeedsMoreSnapshotForInputOnlyOrTransientOnly(t *testing.T)
 		"• Working (2s • esc to interrupt)",
 		"gpt-5.5 medium · ~",
 	}, "\n")
-	if !NotifyContentNeedsMoreSnapshot(visible, "", nil, "current question") {
+	if !NotifyContentNeedsMoreSnapshot(visible, previous, nil, "current question") {
 		t.Fatalf("transient-only visible text should wait")
 	}
 	complete := visible + "\nanswer"
-	if NotifyContentNeedsMoreSnapshot(complete, "", nil, "current question") {
+	if NotifyContentNeedsMoreSnapshot(complete, previous, nil, "current question") {
 		t.Fatalf("completed visible text should be ready")
 	}
 }
@@ -364,7 +919,7 @@ func TestPickNotifyContentDropsCodexTUIStatusOnlySnapshot(t *testing.T) {
 }
 
 func TestPickNotifyContentSanitizesEmail(t *testing.T) {
-	got := PickNotifyContent("contact me@example.com", "", nil, "")
+	got := pickAnchoredNotifyContent("contact me@example.com")
 	if strings.Contains(got, "me@example.com") || !strings.Contains(got, "[email]") {
 		t.Fatalf("email was not sanitized: %q", got)
 	}
@@ -398,12 +953,12 @@ func TestPickNotifyContentAppliesDropLinePatterns(t *testing.T) {
 		}
 	})
 
-	got := PickNotifyContent(strings.Join([]string{
+	got := pickAnchoredNotifyContent(strings.Join([]string{
 		"keep first",
 		"noise: drop this",
 		"keep second",
 		"contains secret token",
-	}, "\n"), "", nil, "")
+	}, "\n"))
 	want := "keep first\nkeep second"
 	if got != want {
 		t.Fatalf("drop line patterns were not applied:\n%q\nwant:\n%q", got, want)
@@ -422,12 +977,12 @@ func TestPickNotifyContentAppliesBlockHeadDropRule(t *testing.T) {
 		}
 	})
 
-	got := PickNotifyContent(strings.Join([]string{
+	got := pickAnchoredNotifyContent(strings.Join([]string{
 		"• 已完成发布。",
 		"  发布结果：",
 		"  - GitHub Release 已生成",
 		"• 下一段保留",
-	}, "\n"), "", nil, "")
+	}, "\n"))
 	if got != "• 下一段保留" {
 		t.Fatalf("block should be dropped:\n%q", got)
 	}
@@ -449,8 +1004,9 @@ func TestPickNotifyContentDropsCodexToolBlocksAndFooterStatus(t *testing.T) {
 		}
 	})
 
+	const previous = "› 修复问题"
 	got := PickNotifyContent(strings.Join([]string{
-		"› 修复问题",
+		previous,
 		"• Viewed Image",
 		"└ conf_8081/data/uploads/example.png",
 		"• Ran go test ./...",
@@ -462,7 +1018,7 @@ func TestPickNotifyContentDropsCodexToolBlocksAndFooterStatus(t *testing.T) {
 		"  Read manager.go",
 		"• 已完成修复并通过全部测试。",
 		"gpt-5.6-terra high fast · ~/project/easy_terminal",
-	}, "\n"), "", nil, "修复问题")
+	}, "\n"), previous, nil, "修复问题")
 	if got != "• 已完成修复并通过全部测试。" {
 		t.Fatalf("Codex process output should be hidden from the final notification:\n%q", got)
 	}
@@ -476,14 +1032,14 @@ func TestToolMarkerBlockEndsOnlyAtNextMarker(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = SetLarkNotifyDropLineRules(nil) })
 
-	got := PickNotifyContent(strings.Join([]string{
+	got := pickAnchoredNotifyContent(strings.Join([]string{
 		"• 准备查询天气。",
 		"• Ran curl --max-time 15",
 		"https://wttr.in/Chengdu?format=j1",
 		"command output without indentation",
 		"• 成都目前 31°C，多云。",
 		"- 体感 36°C",
-	}, "\n"), "", nil, "")
+	}, "\n"))
 	want := "• 准备查询天气。\n• 成都目前 31°C，多云。\n- 体感 36°C"
 	if got != want {
 		t.Fatalf("tool marker block should be dropped through the next marker:\n%q\nwant:\n%q", got, want)
@@ -502,12 +1058,12 @@ func TestPickNotifyContentAppliesBlockHeadKeepRule(t *testing.T) {
 		}
 	})
 
-	got := PickNotifyContent(strings.Join([]string{
+	got := pickAnchoredNotifyContent(strings.Join([]string{
 		"• 已完成发布。",
 		"  发布结果：",
 		"  - GitHub Release 已生成",
 		"• 下一段保留",
-	}, "\n"), "", nil, "")
+	}, "\n"))
 	want := "• 已完成发布。\n• 下一段保留"
 	if got != want {
 		t.Fatalf("block body should be dropped:\n%q\nwant:\n%q", got, want)
@@ -530,7 +1086,7 @@ func TestPickNotifyContentDropsCodexStartupTipAndMCPErrors(t *testing.T) {
 		}
 	})
 
-	got := PickNotifyContent(strings.Join([]string{
+	got := pickAnchoredNotifyContent(strings.Join([]string{
 		"Tip: Try the Codex App. Run 'codex app' or visit https://chatgpt.com/codex",
 		"  This promotional message is terminal-wrapped.",
 		"⚠ MCP client for `codex_apps` failed to start: MCP startup failed",
@@ -538,7 +1094,7 @@ func TestPickNotifyContentDropsCodexStartupTipAndMCPErrors(t *testing.T) {
 		"  send initialize request",
 		"⚠ MCP startup incomplete (failed: codex_apps)",
 		"真正需要推送的结果",
-	}, "\n"), "", nil, "")
+	}, "\n"))
 	if got != "真正需要推送的结果" {
 		t.Fatalf("Codex startup noise should be dropped:\n%q", got)
 	}
@@ -556,7 +1112,7 @@ func TestPickNotifyContentAppliesLineGroupRule(t *testing.T) {
 		}
 	})
 
-	got := PickNotifyContent("deploy token=abc123 done", "", nil, "")
+	got := pickAnchoredNotifyContent("deploy token=abc123 done")
 	want := "deploy token= done"
 	if got != want {
 		t.Fatalf("capture group should be removed:\n%q\nwant:\n%q", got, want)

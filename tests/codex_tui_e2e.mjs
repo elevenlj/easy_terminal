@@ -17,7 +17,6 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "easy-terminal-codex-e2e-"))
 let server;
 let chrome;
 let cdp;
-let lastPushedSnapshot = "";
 
 async function main() {
   try {
@@ -46,12 +45,12 @@ async function main() {
       "--no-default-browser-check",
       `--remote-debugging-port=${chromePort}`,
       `--user-data-dir=${path.join(tmp, "chrome-profile")}`,
-      `http://localhost:${port}`,
+      "about:blank",
     ], { stdio: ["ignore", "pipe", "pipe"] });
     pipeLogs(chrome, "chrome");
     await waitForHTTP(`http://localhost:${chromePort}/json/version`);
 
-    const pageInfo = await newPage(`http://localhost:${port}`);
+    const pageInfo = await singlePageTarget();
     cdp = await CDPClient.connect(pageInfo.webSocketDebuggerUrl);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
@@ -100,17 +99,15 @@ async function runCodexPromptNotificationContentE2E() {
   const secondPrompt = "请只回复由 EASY、TERMINAL、E2E、BETA 用下划线拼接后的字符串，不要解释。";
 
   await submitComposer(firstPrompt);
-  const firstSnapshot = await waitForTerminalSnapshot("EASY_TERMINAL_E2E_ALPHA", 90000);
-  await pushTerminalSnapshot(firstSnapshot);
-  const firstContent = await waitForCurrentRoundContent("EASY_TERMINAL_E2E_ALPHA", 15000, { fresh: false });
+  await waitForTerminalSnapshot("EASY_TERMINAL_E2E_ALPHA", 90000);
+  const firstContent = await waitForCurrentRoundContent("EASY_TERMINAL_E2E_ALPHA", 15000);
   assertNoMojibake(firstContent);
   assert.equal(firstContent.includes(firstPrompt), false, "current-round content should start after the first input anchor");
   await waitForCodexReady();
 
   await submitComposer(secondPrompt);
-  const secondSnapshot = await waitForTerminalSnapshot("EASY_TERMINAL_E2E_BETA", 90000);
-  await pushTerminalSnapshot(secondSnapshot);
-  const secondContent = await waitForCurrentRoundContent("EASY_TERMINAL_E2E_BETA", 15000, { fresh: false });
+  await waitForTerminalSnapshot("EASY_TERMINAL_E2E_BETA", 90000);
+  const secondContent = await waitForCurrentRoundContent("EASY_TERMINAL_E2E_BETA", 15000);
   assertNoMojibake(secondContent);
   assert.equal(secondContent.includes(secondPrompt), false, "current-round content should start after the second input anchor");
   assert.equal(secondContent.includes(firstPrompt), false, "current-round content should not include the previous input");
@@ -164,7 +161,8 @@ async function waitForCurrentRoundContent(text, timeoutMs = 10000, options = {})
       return content.includes(text);
     }, timeoutMs);
   } catch (err) {
-    throw new Error(`timed out waiting for current-round content ${JSON.stringify(text)}; content=${JSON.stringify(previewSnapshot(content))}; pushed=${JSON.stringify(previewSnapshot(lastPushedSnapshot))}`, { cause: err });
+    const diagnostics = await safeCurrentRoundDiagnostics(content);
+    throw new Error(`timed out waiting for current-round content ${JSON.stringify(text)}; diagnostics=${JSON.stringify(diagnostics)}`, { cause: err });
   }
   return content;
 }
@@ -173,17 +171,6 @@ async function currentRoundContent(options = {}) {
   const sessionID = await evalExpr("window.easyTerminalApp.state.active");
   const query = options.fresh === false ? "?fresh=0" : "";
   return fetchJSON(`http://localhost:${port}/api/sessions/${encodeURIComponent(sessionID)}/current-round${query}`);
-}
-
-async function pushTerminalSnapshot(snapshot) {
-  lastPushedSnapshot = snapshot || "";
-  await evalExpr(`(() => {
-    const app = window.easyTerminalApp;
-    const socket = app?.state?.socket;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify({ type: "snapshot", data: ${JSON.stringify(snapshot || "")}, source: "e2e" }));
-    return true;
-  })()`);
 }
 
 async function waitForCodexReady() {
@@ -267,8 +254,36 @@ async function evalExpr(expression) {
   return result.result?.value;
 }
 
-async function newPage(url) {
-  return fetchJSON(`http://localhost:${chromePort}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
+async function singlePageTarget() {
+  let pages = [];
+  await waitFor(async () => {
+    const targets = await fetchJSON(`http://localhost:${chromePort}/json/list`);
+    pages = targets.filter((target) => target.type === "page" && target.webSocketDebuggerUrl);
+    return pages.length > 0;
+  });
+  const [primary, ...extras] = pages;
+  for (const extra of extras) {
+    await fetch(`http://localhost:${chromePort}/json/close/${encodeURIComponent(extra.id)}`, { method: "PUT" }).catch(() => {});
+  }
+  return primary;
+}
+
+async function safeCurrentRoundDiagnostics(content) {
+  const sessionID = await evalExpr("window.easyTerminalApp?.state?.active || ''").catch(() => "");
+  const snapshot = await evalExpr("window.easyTerminalApp?.terminalSnapshotMetadata?.() || null").catch(() => null);
+  let session = null;
+  try {
+    const sessions = await fetchJSON(`http://localhost:${port}/api/sessions`);
+    const current = sessions.find((item) => item.id === sessionID);
+    if (current) session = { id: current.id, status: current.status, live: Boolean(current.live) };
+  } catch {}
+  const value = String(content || "");
+  return {
+    session,
+    snapshot,
+    content_length: value.length,
+    content_line_count: value ? value.split(/\r?\n/).length : 0,
+  };
 }
 
 async function fetchJSON(url, options) {

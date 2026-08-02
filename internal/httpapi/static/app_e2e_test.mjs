@@ -306,6 +306,29 @@ const fetchCalls = [];
 const sentMessages = [];
 const localStorageData = new Map();
 
+function withoutSnapshotRenderMetadata(message) {
+  const copy = { ...message };
+  delete copy.render_epoch;
+  delete copy.buffer_type;
+  delete copy.buffer_at_capacity;
+  delete copy.anchor_guard_active;
+  delete copy.continuity_version;
+  delete copy.anchor_guard_line;
+  delete copy.cursor_line;
+  return copy;
+}
+
+function assertSnapshotRenderMetadata(message, bufferType = "unknown", atCapacity = false, guardActive = false, guardLine = -1, cursorLine = undefined) {
+  assert.equal(message.continuity_version, 2);
+  assert.ok(Number.isInteger(message.render_epoch) && message.render_epoch > 0, "snapshot should carry a positive render epoch");
+  assert.equal(message.buffer_type, bufferType);
+  assert.equal(message.buffer_at_capacity, atCapacity);
+  assert.equal(message.anchor_guard_active, guardActive);
+  assert.equal(message.anchor_guard_line, guardLine);
+  assert.ok(Number.isInteger(message.cursor_line), "snapshot should carry a cursor line identity");
+  if (cursorLine !== undefined) assert.equal(message.cursor_line, cursorLine);
+}
+
 class FakeWebSocket {
   static OPEN = 1;
 }
@@ -455,6 +478,36 @@ await Promise.resolve();
 await Promise.resolve();
 
 const app = context.window.easyTerminalApp;
+
+const originalSetTimeout = context.setTimeout;
+const originalClearTimeout = context.clearTimeout;
+const originalRequestAnimationFrame = context.requestAnimationFrame;
+let delayedPaintCallback = null;
+context.requestAnimationFrame = (callback) => {
+  delayedPaintCallback = callback;
+  return 1;
+};
+let paintResolutions = 0;
+const delayedPaintStarted = Date.now();
+await context.waitForNextPaint().then(() => { paintResolutions++; });
+assert.ok(Date.now() - delayedPaintStarted >= 35, "a throttled animation frame should use the bounded timer fallback");
+assert.equal(paintResolutions, 1);
+delayedPaintCallback?.();
+await Promise.resolve();
+assert.equal(paintResolutions, 1, "a late animation frame must not resolve the paint wait twice");
+
+let clearedPaintTimers = 0;
+context.setTimeout = (callback, delay) => originalSetTimeout(callback, delay);
+context.clearTimeout = (timer) => {
+  clearedPaintTimers++;
+  originalClearTimeout(timer);
+};
+context.requestAnimationFrame = (callback) => originalSetTimeout(callback, 0);
+await context.waitForNextPaint();
+assert.equal(clearedPaintTimers, 1, "a foreground animation frame should clear its fallback timer");
+context.setTimeout = originalSetTimeout;
+context.clearTimeout = originalClearTimeout;
+context.requestAnimationFrame = originalRequestAnimationFrame;
 assert.ok(app, "app test API is exposed");
 assert.equal(app.standardTerminal.cols, 120);
 assert.equal(app.standardTerminal.rows, 36);
@@ -557,14 +610,417 @@ app.state.term = {
       viewportY: 1,
       getLine(index) {
         const values = ["old hidden", "visible one", "visible two", "new hidden"];
-        return { translateToString: () => values[index] };
+        return { isWrapped: false, translateToString: () => values[index] };
       },
     },
   },
 };
 app.state.pendingTerminalWrite = Promise.resolve();
 await app.syncSnapshotNow();
-assert.deepEqual(sentMessages.pop(), { type: "snapshot", data: "old hidden\nvisible one\nvisible two\nnew hidden", source: "buffer" });
+let snapshotMessage = sentMessages.pop();
+assertSnapshotRenderMetadata(snapshotMessage);
+assert.deepEqual(withoutSnapshotRenderMetadata(snapshotMessage), { type: "snapshot", data: "old hidden\nvisible one\nvisible two\nnew hidden", source: "buffer" });
+
+app.state.term = {
+  cols: 12,
+  rows: 6,
+  buffer: {
+    active: {
+      length: 6,
+      viewportY: 0,
+      getLine(index) {
+        const values = [
+          { raw: "› a long    ", trimmedLength: 9, isWrapped: false },
+          { raw: "input       ", trimmedLength: 5, isWrapped: true },
+          { raw: "real output    ", trimmedLength: 12, isWrapped: false },
+          { raw: "continues    ", trimmedLength: 9, isWrapped: true },
+          { raw: "            ", trimmedLength: 0, isWrapped: false },
+          { raw: "next paragraph", trimmedLength: 14, isWrapped: false },
+        ];
+        const value = values[index];
+        return {
+          isWrapped: value.isWrapped,
+          length: value.raw.length,
+          getCell(column) {
+            const occupied = column < value.trimmedLength;
+            const char = occupied ? value.raw[column] : "";
+            return {
+              getCode: () => char ? char.codePointAt(0) : 0,
+              getChars: () => char,
+            };
+          },
+          translateToString(trimRight, start = 0, end = value.raw.length) {
+            const text = value.raw.slice(start, end);
+            return trimRight ? text.trimEnd() : text;
+          },
+        };
+      },
+    },
+  },
+};
+await app.syncSnapshotNow("snapshot-request-1");
+snapshotMessage = sentMessages.pop();
+assertSnapshotRenderMetadata(snapshotMessage);
+assert.deepEqual(withoutSnapshotRenderMetadata(snapshotMessage), {
+  type: "snapshot",
+  data: "› a long input\nreal output continues\n\nnext paragraph",
+  source: "buffer",
+  request_id: "snapshot-request-1",
+});
+
+sentMessages.length = 0;
+app.state.terminalInputQueue = Promise.resolve();
+await app.queueTerminalInput("\r");
+assert.deepEqual(sentMessages.pop(), {
+  type: "input",
+  data: "\r",
+  baseline_snapshot: "› a long input\nreal output continues\n\nnext paragraph",
+  baseline_source: "buffer",
+  baseline_continuity_version: 2,
+  baseline_render_epoch: snapshotMessage.render_epoch + 1,
+  baseline_buffer_type: "unknown",
+  baseline_buffer_at_capacity: false,
+  baseline_anchor_guard_active: false,
+  baseline_anchor_guard_line: -1,
+  baseline_cursor_line: -1,
+});
+await app.queueTerminalInput("x");
+assert.deepEqual(sentMessages.pop(), { type: "input", data: "x" });
+await app.queueTerminalInput("pasted first line\npasted second line\r");
+const pastedMultilineInput = sentMessages.pop();
+assert.equal(pastedMultilineInput.type, "input");
+assert.equal(pastedMultilineInput.data, "pasted first line\npasted second line\r");
+assert.equal(
+  pastedMultilineInput.baseline_snapshot,
+  "› a long input\nreal output continues\n\nnext paragraph",
+  "a pasted input chunk containing line breaks must still carry one pre-input baseline",
+);
+assert.equal(pastedMultilineInput.baseline_continuity_version, 2);
+assert.equal(pastedMultilineInput.baseline_render_epoch, snapshotMessage.render_epoch + 2);
+
+sentMessages.length = 0;
+const snapshotContext = {
+  socket: app.state.socket,
+  term: app.state.term,
+  generation: app.state.terminalGeneration,
+  sessionID: app.state.active,
+};
+const concurrentSnapshotIDs = Array.from({ length: 10 }, (_, index) => `snapshot-concurrent-${index + 1}`);
+await Promise.all(concurrentSnapshotIDs.map((requestID) => app.enqueueSnapshotSync(requestID, snapshotContext)));
+assert.deepEqual(
+  sentMessages.filter((message) => message.type === "snapshot").map((message) => message.request_id),
+  concurrentSnapshotIDs,
+  "a snapshot batch should answer every concurrent request exactly once and in order",
+);
+
+sentMessages.length = 0;
+const oldBatchContext = { ...snapshotContext };
+const oldBatchIDs = Array.from({ length: 10 }, (_, index) => `snapshot-old-generation-${index + 1}`);
+const oldBatch = Promise.all(oldBatchIDs.map((requestID) => app.enqueueSnapshotSync(requestID, oldBatchContext)));
+app.state.terminalGeneration++;
+const batchGeneration = app.state.terminalGeneration;
+const newBatchTerm = {
+  cols: 120,
+  rows: 2,
+  buffer: {
+    active: {
+      length: 1,
+      getLine() {
+        return { isWrapped: false, translateToString: () => "new generation snapshot" };
+      },
+    },
+  },
+};
+const newBatchSocket = {
+  readyState: FakeWebSocket.OPEN,
+  send(payload) {
+    sentMessages.push(JSON.parse(payload));
+  },
+};
+app.state.term = newBatchTerm;
+app.state.socket = newBatchSocket;
+const newBatchContext = {
+  socket: newBatchSocket,
+  term: newBatchTerm,
+  generation: batchGeneration,
+  sessionID: app.state.active,
+};
+const newBatchIDs = Array.from({ length: 10 }, (_, index) => `snapshot-new-generation-${index + 1}`);
+const newBatch = Promise.all(newBatchIDs.map((requestID) => app.enqueueSnapshotSync(requestID, newBatchContext)));
+await Promise.all([oldBatch, newBatch]);
+const generationMessages = sentMessages.filter((message) => message.type === "snapshot");
+assert.deepEqual(
+  generationMessages.map((message) => message.request_id),
+  newBatchIDs,
+  "switching terminal generation must drop the whole old batch and preserve the new batch",
+);
+assert.ok(
+  generationMessages.every((message) => message.data === "new generation snapshot"),
+  "new-generation responses must never contain the old terminal buffer",
+);
+app.state.term = snapshotContext.term;
+app.state.socket = snapshotContext.socket;
+app.state.terminalGeneration = snapshotContext.generation;
+
+sentMessages.length = 0;
+const closingSocket = {
+  readyState: FakeWebSocket.OPEN,
+  send(payload) {
+    sentMessages.push(JSON.parse(payload));
+  },
+};
+app.state.socket = closingSocket;
+const closingContext = { ...snapshotContext, socket: closingSocket };
+const closingRequest = app.enqueueSnapshotSync("snapshot-closing-socket", closingContext);
+closingSocket.readyState = 3;
+await closingRequest;
+assert.equal(
+  sentMessages.some((message) => message.request_id === "snapshot-closing-socket"),
+  false,
+  "a socket closed during capture must not receive a late response",
+);
+app.state.socket = snapshotContext.socket;
+
+sentMessages.length = 0;
+let unstableRevision = 0;
+const unstableTerm = {
+  cols: 120,
+  rows: 2,
+  buffer: {
+    active: {
+      length: 1,
+      getLine() {
+        unstableRevision++;
+        return { isWrapped: false, translateToString: () => `redraw-${unstableRevision}` };
+      },
+    },
+  },
+};
+app.state.terminalGeneration++;
+app.state.term = unstableTerm;
+const unstableContext = {
+  socket: app.state.socket,
+  term: unstableTerm,
+  generation: app.state.terminalGeneration,
+  sessionID: app.state.active,
+};
+await app.enqueueSnapshotSync("snapshot-never-stable", unstableContext);
+assert.equal(
+  sentMessages.some((message) => message.request_id === "snapshot-never-stable"),
+  false,
+  "a continuously redrawing TUI must fail closed instead of returning an incoherent boundary",
+);
+app.state.term = snapshotContext.term;
+app.state.terminalGeneration = snapshotContext.generation;
+
+sentMessages.length = 0;
+const staleTerm = app.state.term;
+const staleSocket = app.state.socket;
+const staleGeneration = app.state.terminalGeneration;
+const staleRequest = app.syncSnapshotNow("snapshot-stale-generation", {
+  socket: staleSocket,
+  term: staleTerm,
+  generation: staleGeneration,
+  sessionID: app.state.active,
+});
+app.state.terminalGeneration++;
+app.state.term = { ...staleTerm };
+app.state.socket = {
+  readyState: FakeWebSocket.OPEN,
+  send(payload) {
+    sentMessages.push(JSON.parse(payload));
+  },
+};
+await staleRequest;
+assert.equal(
+  sentMessages.some((message) => message.request_id === "snapshot-stale-generation"),
+  false,
+  "a terminal replacement should cancel an in-flight snapshot from the old generation",
+);
+app.state.term = staleTerm;
+app.state.socket = staleSocket;
+app.state.terminalGeneration = staleGeneration;
+
+sentMessages.length = 0;
+const markerPhysicalLines = 140;
+const markerNormalBuffer = {
+  type: "normal",
+  length: markerPhysicalLines,
+  baseY: markerPhysicalLines - 2,
+  cursorY: 1,
+  getLine(index) {
+    return {
+      isWrapped: index % 2 === 1,
+      translateToString: () => index % 2 === 0 ? `logical-${index / 2}:` : " continuation",
+    };
+  },
+};
+const markerAlternateBuffer = {
+  type: "alternate",
+  length: 2,
+  baseY: 0,
+  cursorY: 1,
+  getLine(index) {
+    return { isWrapped: false, translateToString: () => `alternate-${index}` };
+  },
+};
+let markerActiveBuffer = markerNormalBuffer;
+const registeredMarkers = [];
+const markerTerm = {
+  cols: 120,
+  rows: 2,
+  options: { scrollback: markerPhysicalLines - 2 },
+  buffer: {
+    normal: markerNormalBuffer,
+    alternate: markerAlternateBuffer,
+    get active() {
+      return markerActiveBuffer;
+    },
+  },
+  registerMarker(offset) {
+    const callbacks = [];
+    const marker = {
+      line: markerNormalBuffer.baseY + markerNormalBuffer.cursorY + offset,
+      isDisposed: false,
+      onDispose(callback) {
+        callbacks.push(callback);
+      },
+      dispose() {
+        if (this.isDisposed) return;
+        this.isDisposed = true;
+        callbacks.forEach((callback) => callback());
+      },
+    };
+    registeredMarkers.push({ offset, marker });
+    return marker;
+  },
+};
+app.state.term = markerTerm;
+app.state.terminalInputQueue = Promise.resolve();
+await app.queueTerminalInput("\r");
+const guardedBaseline = sentMessages.pop();
+assert.equal(guardedBaseline.baseline_buffer_type, "normal");
+assert.equal(guardedBaseline.baseline_buffer_at_capacity, true);
+assert.equal(guardedBaseline.baseline_anchor_guard_active, true);
+assert.equal(guardedBaseline.baseline_continuity_version, 2);
+assert.equal(guardedBaseline.baseline_anchor_guard_line, 6);
+assert.equal(guardedBaseline.baseline_cursor_line, 69);
+assert.equal(registeredMarkers[0].offset, -127, "guard should start at the earliest physical row covering the last 64 logical lines");
+
+registeredMarkers[0].marker.dispose();
+assert.ok(app.state.snapshotRenderEpoch > guardedBaseline.baseline_render_epoch, "automatic marker disposal should advance render epoch");
+await app.syncSnapshotNow();
+const disposedGuardSnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(disposedGuardSnapshot, "normal", true, false);
+assert.equal(registeredMarkers.length, 1, "ordinary refresh must not renew a disposed guard");
+
+sentMessages.length = 0;
+const markerSnapshotContext = {
+  socket: app.state.socket,
+  term: markerTerm,
+  generation: app.state.terminalGeneration,
+  sessionID: app.state.active,
+};
+const refreshBeforeBaseline = app.enqueueSnapshotSync("refresh-before-baseline", markerSnapshotContext, "refresh");
+const inputBaselineOne = app.enqueueSnapshotSync("input-baseline-1", markerSnapshotContext, "input_baseline");
+const inputBaselineTwo = app.enqueueSnapshotSync("input-baseline-2", markerSnapshotContext, "input_baseline");
+await Promise.all([refreshBeforeBaseline, inputBaselineOne, inputBaselineTwo]);
+const purposeMessages = sentMessages.filter((message) => message.type === "snapshot");
+assert.deepEqual(
+  purposeMessages.map((message) => message.request_id),
+  ["refresh-before-baseline", "input-baseline-1", "input-baseline-2"],
+  "different-purpose batches should stay FIFO while matching baseline requests share one capture",
+);
+assert.equal(registeredMarkers.length, 2, "one input_baseline batch should prepare exactly one marker");
+assertSnapshotRenderMetadata(purposeMessages[0], "normal", true, false);
+assertSnapshotRenderMetadata(purposeMessages[1], "normal", true, true, 6);
+assertSnapshotRenderMetadata(purposeMessages[2], "normal", true, true, 6);
+const secondGuardEpoch = purposeMessages[1].render_epoch;
+markerActiveBuffer = markerAlternateBuffer;
+await app.syncSnapshotNow();
+const switchedBufferSnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(switchedBufferSnapshot, "alternate", false, false);
+assert.ok(switchedBufferSnapshot.render_epoch > secondGuardEpoch, "active buffer switch should invalidate the guard and advance epoch");
+assert.equal(registeredMarkers[1].marker.isDisposed, true, "buffer switch should release the old marker");
+
+const invalidMarker = {
+  line: 7,
+  isDisposed: false,
+  dispose() {
+    this.isDisposed = true;
+  },
+};
+const invalidMarkerTerm = {
+  cols: 120,
+  rows: 2,
+  options: { scrollback: markerPhysicalLines - 2 },
+  buffer: { active: markerNormalBuffer, normal: markerNormalBuffer, alternate: markerAlternateBuffer },
+  registerMarker() {
+    return invalidMarker;
+  },
+};
+app.state.term = invalidMarkerTerm;
+app.state.terminalInputQueue = Promise.resolve();
+await app.queueTerminalInput("\r");
+const invalidMarkerBaseline = sentMessages.pop();
+assert.equal(invalidMarkerBaseline.baseline_anchor_guard_active, false, "a marker not exactly on the requested physical line must be rejected");
+assert.equal(invalidMarkerBaseline.baseline_anchor_guard_line, -1);
+assert.equal(invalidMarkerBaseline.baseline_cursor_line, 69);
+assert.equal(invalidMarker.isDisposed, true);
+
+sentMessages.length = 0;
+let trackedBufferLength = 4;
+const normalTrackedBuffer = {
+  type: "normal",
+  get length() {
+    return trackedBufferLength;
+  },
+  getLine(index) {
+    return { isWrapped: false, translateToString: () => `normal-${index}` };
+  },
+};
+const alternateTrackedBuffer = {
+  type: "alternate",
+  length: 2,
+  getLine(index) {
+    return { isWrapped: false, translateToString: () => `alternate-${index}` };
+  },
+};
+let activeTrackedBuffer = normalTrackedBuffer;
+const continuityTerm = {
+  cols: 120,
+  rows: 2,
+  options: { scrollback: 2 },
+  buffer: {
+    normal: normalTrackedBuffer,
+    alternate: alternateTrackedBuffer,
+    get active() {
+      return activeTrackedBuffer;
+    },
+  },
+};
+app.state.term = continuityTerm;
+await app.syncSnapshotNow();
+const capacitySnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(capacitySnapshot, "normal", true);
+
+trackedBufferLength = 3;
+await app.syncSnapshotNow();
+const regressedSnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(regressedSnapshot, "normal", false);
+assert.ok(regressedSnapshot.render_epoch > capacitySnapshot.render_epoch, "buffer length regression should advance render epoch");
+
+activeTrackedBuffer = alternateTrackedBuffer;
+await app.syncSnapshotNow();
+const alternateSnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(alternateSnapshot, "alternate", false);
+assert.ok(alternateSnapshot.render_epoch > regressedSnapshot.render_epoch, "active buffer replacement should advance render epoch");
+
+app.state.terminalGeneration++;
+await app.syncSnapshotNow();
+const generationSnapshot = sentMessages.pop();
+assertSnapshotRenderMetadata(generationSnapshot, "alternate", false);
+assert.ok(generationSnapshot.render_epoch > alternateSnapshot.render_epoch, "terminal generation change should advance render epoch");
 
 app.state.term = {
   cols: 120,
@@ -590,7 +1046,9 @@ terminalDOMRows = [
   terminalRow([]),
 ];
 await app.syncSnapshotNow();
-assert.deepEqual(sentMessages.pop(), {
+snapshotMessage = sentMessages.pop();
+assertSnapshotRenderMetadata(snapshotMessage, "dom");
+assert.deepEqual(withoutSnapshotRenderMetadata(snapshotMessage), {
   type: "snapshot",
   data: "/model\n/model choose what model and reasoning effort to use\nSelect Model and Effort\nAccess legacy models by running codex -m <model_name>\n› 1. gpt-5.5 (current)        Frontier model\n  2. gpt-5.4                  Strong model",
   source: "dom",
@@ -605,7 +1063,9 @@ terminalDOMRows = [
   terminalRow([["Press enter to confirm or esc to go back", 0]]),
 ];
 await app.syncSnapshotNow();
-assert.deepEqual(sentMessages.pop(), {
+snapshotMessage = sentMessages.pop();
+assertSnapshotRenderMetadata(snapshotMessage, "dom");
+assert.deepEqual(withoutSnapshotRenderMetadata(snapshotMessage), {
   type: "snapshot",
   data: "Select Reasoning Level for gpt-5.5\n1. Low                  Fast responses with lighter reasoning\n2. Medium (default)     Balances speed and reasoning depth for everyday tasks\n3. High                 Greater reasoning depth for complex problems\n› 4. Extra high (current)  Extra high reasoning depth for complex problems\nPress enter to confirm or esc to go back",
   source: "dom",
@@ -615,7 +1075,9 @@ terminalDOMRows = [
   terminalRow([["left", 0], ["right", 80]]),
 ];
 await app.syncSnapshotNow();
-assert.deepEqual(sentMessages.pop(), {
+snapshotMessage = sentMessages.pop();
+assertSnapshotRenderMetadata(snapshotMessage, "dom");
+assert.deepEqual(withoutSnapshotRenderMetadata(snapshotMessage), {
   type: "snapshot",
   data: "alphabeta\nleft      right",
   source: "dom",

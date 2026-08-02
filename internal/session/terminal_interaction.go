@@ -64,6 +64,9 @@ func DetectCodexTerminalInteraction(text, sessionID, lastInputText string, notif
 	if kind == TerminalInteractionCodexResume && !isCodexResumeInteractionInput(lastInputText) {
 		return nil
 	}
+	if kind == TerminalInteractionCodexReasoning && !isCodexReasoningInteractionInput(lastInputText) {
+		return nil
+	}
 	footerIndex := codexInteractionFooterIndex(lines, titleIndex+1)
 	if footerIndex < 0 {
 		if kind != TerminalInteractionCodexReasoning {
@@ -104,6 +107,69 @@ func DetectCodexTerminalInteraction(text, sessionID, lastInputText string, notif
 	}
 }
 
+// codexTerminalInteractionVisibleBlock returns only the active menu portion
+// of a terminal snapshot. Detection may inspect the whole screen for context,
+// but notification content must never include scrollback above the menu.
+func codexTerminalInteractionVisibleBlock(text, previousText, lastInputText string) string {
+	interaction := DetectCodexTerminalInteraction(text, "", lastInputText, 0, 0)
+	if interaction == nil {
+		return ""
+	}
+	if interaction.Kind == TerminalInteractionCodexReasoning && !hasCodexModelInteractionContext(previousText) {
+		return ""
+	}
+	lines := splitVisibleLines(trimVisibleText(text))
+	_, _, titleIndex := codexInteractionTitle(lines)
+	if titleIndex < 0 || titleIndex >= len(lines) {
+		return ""
+	}
+	return trimVisibleText(strings.Join(lines[titleIndex:], "\n"))
+}
+
+func codexTerminalInteractionChangedSinceBaseline(text, previousText, lastInputText string) bool {
+	current := DetectCodexTerminalInteraction(text, "", lastInputText, 0, 0)
+	if current == nil {
+		return false
+	}
+	previous := DetectCodexTerminalInteraction(previousText, "", lastInputText, 0, 0)
+	return previous == nil || previous.Kind != current.Kind || previous.Fingerprint != current.Fingerprint
+}
+
+// codexTerminalInteractionContextRejected distinguishes a structurally valid
+// but stale TUI menu from ordinary text. Once such a menu is recognized it
+// must not fall through to generic screen diffing, which could otherwise turn
+// an old Reasoning menu into a new selector after an unrelated numeric input.
+func codexTerminalInteractionContextRejected(text, previousText, lastInputText string) bool {
+	lines := splitVisibleLines(trimVisibleText(text))
+	kind, _, _ := codexInteractionTitle(lines)
+	if kind == "" {
+		return false
+	}
+	forcedInput := ""
+	switch kind {
+	case TerminalInteractionCodexModel:
+		forcedInput = "/model"
+	case TerminalInteractionCodexReasoning:
+		forcedInput = "1"
+	case TerminalInteractionCodexResume:
+		forcedInput = "/resume"
+	}
+	if DetectCodexTerminalInteraction(text, "", forcedInput, 0, 0) == nil {
+		return false
+	}
+	switch kind {
+	case TerminalInteractionCodexModel:
+		return !isCodexModelInteractionInput(lastInputText)
+	case TerminalInteractionCodexResume:
+		return !isCodexResumeInteractionInput(lastInputText)
+	case TerminalInteractionCodexReasoning:
+		return !isCodexReasoningInteractionInput(lastInputText) ||
+			!hasCodexModelInteractionContext(previousText)
+	default:
+		return true
+	}
+}
+
 func codexReasoningMenuReachesTerminalTail(lines []string, start int) bool {
 	lastMeaningful := -1
 	for i := start; i < len(lines); i++ {
@@ -139,7 +205,7 @@ func isCodexInteractionStatusLine(line string) bool {
 		strings.Contains(lower, "comfortable view") ||
 		strings.Contains(lower, "ctrl+t transcript") ||
 		strings.Contains(lower, "ctrl+e expand") ||
-		strings.Contains(lower, "browse")
+		(strings.Contains(lower, "browse") && (strings.Contains(trimmed, "↑") || strings.Contains(trimmed, "↓") || strings.Contains(lower, "ctrl+")))
 }
 
 func codexInteractionTitle(lines []string) (kind string, title string, index int) {
@@ -314,6 +380,20 @@ func isCodexResumeInteractionInput(text string) bool {
 	return text == "/resume" || strings.HasPrefix(text, "/resume ")
 }
 
+func isCodexReasoningInteractionInput(text string) bool {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "／", "/"))
+	if isCodexModelInteractionInput(text) {
+		return true
+	}
+	n, err := strconv.Atoi(text)
+	return err == nil && n > 0 && n <= maxTerminalInteractionOptions
+}
+
+func hasCodexModelInteractionContext(text string) bool {
+	interaction := DetectCodexTerminalInteraction(text, "", "/model", 0, 0)
+	return interaction != nil && interaction.Kind == TerminalInteractionCodexModel
+}
+
 func cloneTerminalInteraction(interaction *TerminalInteraction) *TerminalInteraction {
 	if interaction == nil {
 		return nil
@@ -324,14 +404,20 @@ func cloneTerminalInteraction(interaction *TerminalInteraction) *TerminalInterac
 }
 
 func (rt *RuntimeSession) notificationInteractionLocked(messageID string) *TerminalInteraction {
-	body, _ := selectNotifyBodyWithWindow(
+	previousSnapshot := rt.previousNotifySnapshotLocked()
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(
 		rt.visibleSnapshot,
-		rt.previousNotifySnapshotLocked(),
+		previousSnapshot,
 		rt.roundReply,
 		rt.lastInputText,
 		rt.notificationWindowInputText,
+		rt.notifyTextAnchorPolicyLocked(),
 	)
 	interaction := DetectCodexTerminalInteraction(body, rt.session.ID, rt.lastInputText, rt.notifyVersion, rt.visibleSnapshotVersion)
+	if interaction != nil && interaction.Kind == TerminalInteractionCodexReasoning &&
+		!hasCodexModelInteractionContext(previousSnapshot) {
+		interaction = nil
+	}
 	if interaction == nil || interaction.ID == rt.lastConsumedTerminalInteractionID {
 		rt.pendingTerminalInteraction = nil
 		return nil

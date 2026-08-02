@@ -920,11 +920,11 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 			}
 			return sessionID, nil
 		}
-		content := rt.CurrentRoundContent()
+		content := rt.CurrentRoundRawContent()
 		if strings.TrimSpace(content) == "" {
 			content = "当前轮暂无内容"
 		}
-		if err := b.replyLarkText(ctx, messageID, content); err != nil {
+		if err := b.replyLarkRawText(ctx, messageID, content); err != nil {
 			return sessionID, err
 		}
 		defaultLarkMessageRegistry.remember(sessionID, messageID, parentID, rootID)
@@ -1644,6 +1644,13 @@ func (b *LarkReplyBridge) replyLarkText(ctx context.Context, messageID string, t
 	return b.replyText(ctx, messageID, truncateForLark(sanitizeForLarkAudit(text)))
 }
 
+func (b *LarkReplyBridge) replyLarkRawText(ctx context.Context, messageID string, text string) error {
+	if b.replyText == nil || messageID == "" {
+		return nil
+	}
+	return b.replyText(ctx, messageID, text)
+}
+
 func (b *LarkReplyBridge) replyTextToMessage(ctx context.Context, messageID string, text string) error {
 	if b.apiClient == nil {
 		return nil
@@ -2064,28 +2071,35 @@ func SubmitStructuredInput(rt *RuntimeSession, text string) error {
 	return SubmitStructuredInputWithMention(rt, text, "")
 }
 
+// SubmitStructuredInputFrom binds the pre-Enter baseline request to the WebSocket
+// that submitted the composer text. A second connected browser must not become
+// this round's renderer owner merely because map iteration selected it first.
+func SubmitStructuredInputFrom(rt *RuntimeSession, text string, responder chan RuntimeEvent) error {
+	return submitStructuredInputWithMentionFrom(rt, text, "", true, responder)
+}
+
 func SubmitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string) error {
-	return submitStructuredInputWithMention(rt, text, mentionOpenID, true)
+	return submitStructuredInputWithMentionFrom(rt, text, mentionOpenID, true, nil)
 }
 
 func SubmitSilentStructuredInput(rt *RuntimeSession, text string) error {
-	return submitStructuredInputWithMention(rt, text, "", false)
+	return submitStructuredInputWithMentionFrom(rt, text, "", false, nil)
 }
 
 func SubmitTerminalInteractionInputWithMention(rt *RuntimeSession, text string, mentionOpenID string) error {
-	return submitStructuredInputWithMode(rt, text, mentionOpenID, true, false)
+	return submitStructuredInputWithMode(rt, text, mentionOpenID, true, false, nil)
 }
 
-func submitStructuredInputWithMention(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool) error {
+func submitStructuredInputWithMentionFrom(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool, responder chan RuntimeEvent) error {
 	if rt == nil {
 		return fmt.Errorf("runtime not found")
 	}
 	text = strings.TrimRight(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
 	pressEnter := structuredInputShouldPressEnter(rt, text)
-	return submitStructuredInputWithMode(rt, text, mentionOpenID, trackActivity, pressEnter)
+	return submitStructuredInputWithMode(rt, text, mentionOpenID, trackActivity, pressEnter, responder)
 }
 
-func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool, pressEnter bool) error {
+func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenID string, trackActivity bool, pressEnter bool, responder chan RuntimeEvent) error {
 	if rt == nil {
 		return fmt.Errorf("runtime not found")
 	}
@@ -2096,8 +2110,10 @@ func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenI
 		enterLen = len(structuredInputEnterSequence)
 	}
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d track_activity=%v", sessionID, len(text), pressEnter, enterLen, trackActivity)
-	if trackActivity {
-		rt.PrepareInputSnapshotBaseline()
+	if trackActivity && !pressEnter {
+		// Numeric/menu navigation does not submit a round. Preserve the screen
+		// before changing the selection so menu transitions remain diffable.
+		rt.PrepareInputSnapshotBaselineFrom(responder)
 		rt.SetNotificationMentionOpenID(mentionOpenID)
 		rt.MarkStructuredInputActivity(text)
 	}
@@ -2109,6 +2125,15 @@ func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenI
 	}
 	if structuredInputEnterDelay > 0 {
 		time.Sleep(structuredInputEnterDelay)
+	}
+	if trackActivity {
+		// The baseline is an Enter boundary, so capture it after the text has
+		// rendered in the active composer and before Enter submits it. This gives
+		// the renderer a cursor-backed input identity instead of a historical
+		// screen that cannot contain the user's structured input.
+		rt.PrepareInputSnapshotBaselineFrom(responder)
+		rt.SetNotificationMentionOpenID(mentionOpenID)
+		rt.MarkStructuredInputActivity(text)
 	}
 	enter := structuredInputEnterSequence
 	if enter == "" {

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
@@ -400,27 +402,33 @@ func truncateRunesFromTail(text string, maxRunes int, prefix string) string {
 }
 
 func StripTerminalControls(data []byte) string {
-	var b strings.Builder
+	return compactRepeatedLines(stripTerminalControlsRaw(data))
+}
+
+func stripTerminalControlsRaw(data []byte) string {
+	out := make([]byte, 0, len(data))
 	for i := 0; i < len(data); i++ {
 		c := data[i]
 		switch c {
 		case 0x1b:
 			i = skipEscape(data, i)
 		case '\r':
-			b.WriteByte('\n')
+			out = append(out, '\n')
 		case '\b':
-			s := b.String()
-			if len(s) > 0 {
-				b.Reset()
-				b.WriteString(s[:len(s)-1])
+			if len(out) > 0 {
+				_, size := utf8.DecodeLastRune(out)
+				if size <= 0 {
+					size = 1
+				}
+				out = out[:len(out)-size]
 			}
 		default:
 			if c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f) {
-				b.WriteByte(c)
+				out = append(out, c)
 			}
 		}
 	}
-	return compactRepeatedLines(b.String())
+	return string(out)
 }
 
 func HasRenderableContent(data []byte) bool {
@@ -440,21 +448,60 @@ func PickNotifyContent(visibleSnapshot string, previousVisibleSnapshot string, r
 	return pickNotifyContentWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, "")
 }
 
+// notifyTextAnchorPolicy separates legacy/unit-call behavior from production
+// renderer identity checks. Production snapshots carry a guard-line index for
+// both frames; a textual occurrence is the same boundary only when it remains
+// at the same logical offset from that live xterm marker.
+type notifyTextAnchorPolicy struct {
+	allowed            bool
+	enforceIdentity    bool
+	previousGuardLine  int
+	currentGuardLine   int
+	previousCursorLine int
+}
+
+func permissiveNotifyTextAnchorPolicy(allowed bool) notifyTextAnchorPolicy {
+	return notifyTextAnchorPolicy{allowed: allowed, previousGuardLine: -1, currentGuardLine: -1, previousCursorLine: -1}
+}
+
 func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) string {
+	return pickNotifyContentWithWindowPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, true)
+}
+
+func pickNotifyContentWithWindowPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, allowPreviousTextAnchors bool) string {
+	return pickNotifyContentWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, permissiveNotifyTextAnchorPolicy(allowPreviousTextAnchors))
+}
+
+func pickNotifyContentWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) string {
+	if isRawLarkNotifyInput(lastInputText) {
+		return pickRawNotifyContentWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
+	}
 	lastInputText = strings.TrimSpace(lastInputText)
 	windowStartInputText = strings.TrimSpace(windowStartInputText)
-	body, _ := selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText)
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
 	if body == "" {
 		return ""
-	}
-	if isRawLarkNotifyInput(lastInputText) {
-		return strings.TrimSpace(body)
 	}
 	body = trimVisibleText(body)
 	body = dropCodexPromptStatusLines(body)
 	body = applyConfiguredLarkNotifyFilters(body)
 	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
+}
+
+// pickRawNotifyContentWithWindowAnchorPolicy is the explicit /c path. It uses
+// the real round input, window boundary, and renderer identity when they can
+// prove a boundary, but deliberately skips every notification transformation.
+// If the boundary cannot be proven, /c is the one user-requested operation
+// that may return the complete visible terminal snapshot.
+func pickRawNotifyContentWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) string {
+	lastInputText = strings.TrimSpace(lastInputText)
+	windowStartInputText = strings.TrimSpace(windowStartInputText)
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
+	if strings.TrimSpace(body) == "" {
+		body = visibleSnapshot
+	}
+	return strings.TrimSpace(body)
 }
 
 func isRawLarkNotifyInput(input string) bool {
@@ -531,9 +578,17 @@ func NotifyContentNeedsMoreSnapshot(visibleSnapshot string, previousVisibleSnaps
 }
 
 func notifyContentNeedsMoreSnapshotWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) bool {
+	return notifyContentNeedsMoreSnapshotWithWindowPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, true)
+}
+
+func notifyContentNeedsMoreSnapshotWithWindowPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, allowPreviousTextAnchors bool) bool {
+	return notifyContentNeedsMoreSnapshotWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, permissiveNotifyTextAnchorPolicy(allowPreviousTextAnchors))
+}
+
+func notifyContentNeedsMoreSnapshotWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
 	windowStartInputText = strings.TrimSpace(windowStartInputText)
-	body, _ := selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText)
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
 	if strings.TrimSpace(body) == "" {
 		return true
 	}
@@ -544,18 +599,26 @@ func notifyContentNeedsMoreSnapshotWithWindow(visibleSnapshot string, previousVi
 	return !hasReply || (containsTransientStatusLine(body) && !hasReply)
 }
 
-func selectNotifyBody(visibleSnapshot string, previousVisibleSnapshot string, _ []byte, lastInputText string) (string, bool) {
-	return selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, nil, lastInputText, "")
+func selectNotifyBody(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string) (string, bool) {
+	return selectNotifyBodyWithWindow(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, "")
 }
 
-func selectNotifyBodyWithWindow(visibleSnapshot string, previousVisibleSnapshot string, _ []byte, lastInputText string, windowStartInputText string) (string, bool) {
+func selectNotifyBodyWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) (string, bool) {
+	return selectNotifyBodyWithWindowPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, true)
+}
+
+func selectNotifyBodyWithWindowPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, allowPreviousTextAnchors bool) (string, bool) {
+	return selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, permissiveNotifyTextAnchorPolicy(allowPreviousTextAnchors))
+}
+
+func selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) (string, bool) {
 	if strings.TrimSpace(windowStartInputText) != "" {
-		visibleBody, fromVisible := currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, windowStartInputText)
+		visibleBody, fromVisible := currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, roundReply, windowStartInputText, anchorPolicy)
 		if strings.TrimSpace(visibleBody) != "" {
 			return trimVisibleText(visibleBody), fromVisible
 		}
 	}
-	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
+	visibleBody, fromVisible := currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, anchorPolicy)
 	if strings.TrimSpace(visibleBody) == "" {
 		return "", false
 	}
@@ -567,14 +630,22 @@ func NotifyContentNeedsConservativeDelay(visibleSnapshot string, previousVisible
 }
 
 func notifyContentNeedsConservativeDelayWithWindow(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, windowStartInputText string) bool {
+	return notifyContentNeedsConservativeDelayWithWindowPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, windowStartInputText, true)
+}
+
+func notifyContentNeedsConservativeDelayWithWindowPolicy(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, windowStartInputText string, allowPreviousTextAnchors bool) bool {
+	return notifyContentNeedsConservativeDelayWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, nil, lastInputText, windowStartInputText, permissiveNotifyTextAnchorPolicy(allowPreviousTextAnchors))
+}
+
+func notifyContentNeedsConservativeDelayWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) bool {
 	lastInputText = strings.TrimSpace(lastInputText)
 	windowStartInputText = strings.TrimSpace(windowStartInputText)
 	var body string
 	var fromVisible bool
 	if windowStartInputText != "" {
-		body, fromVisible = currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, windowStartInputText)
+		body, fromVisible = currentWindowVisibleText(visibleSnapshot, previousVisibleSnapshot, roundReply, windowStartInputText, anchorPolicy)
 	} else {
-		body, fromVisible = currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, lastInputText)
+		body, fromVisible = currentRoundVisibleText(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, anchorPolicy)
 	}
 	if !fromVisible || strings.TrimSpace(body) == "" {
 		return true
@@ -600,43 +671,73 @@ func notifyContentNeedsConservativeDelayWithWindow(visibleSnapshot string, previ
 	return false
 }
 
-func currentWindowVisibleText(visibleSnapshot string, previousVisibleSnapshot string, windowStartInputText string) (string, bool) {
+func currentWindowVisibleText(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) (string, bool) {
 	visibleSnapshot = trimVisibleText(visibleSnapshot)
 	if visibleSnapshot == "" {
 		return "", false
 	}
-	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok && strings.TrimSpace(body) != "" {
-		return trimVisibleText(body), true
+	// The input echo is a stronger round boundary than a visual diff. A resize
+	// can reflow every physical line and make the whole screen look changed.
+	if anchorPolicy.allowed && strings.TrimSpace(previousVisibleSnapshot) != "" {
+		if body := visibleTextFromInputStartWithPolicy(visibleSnapshot, previousVisibleSnapshot, windowStartInputText, anchorPolicy); strings.TrimSpace(body) != "" {
+			return trimVisibleText(body), true
+		}
 	}
-	if body, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok && strings.TrimSpace(body) != "" {
-		return trimVisibleText(body), true
+	if body := codexTerminalInteractionVisibleBlock(visibleSnapshot, previousVisibleSnapshot, windowStartInputText); body != "" {
+		if anchorPolicy.allowed || codexTerminalInteractionChangedSinceBaseline(visibleSnapshot, previousVisibleSnapshot, windowStartInputText) {
+			return body, true
+		}
 	}
-	if body := visibleTextFromInputStart(visibleSnapshot, windowStartInputText); strings.TrimSpace(body) != "" {
-		return trimVisibleText(body), true
+	if codexTerminalInteractionContextRejected(visibleSnapshot, previousVisibleSnapshot, windowStartInputText) {
+		return "", false
 	}
-	return visibleSnapshot, true
+	if anchorPolicy.allowed {
+		if !anchorPolicy.enforceIdentity {
+			if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok && strings.TrimSpace(body) != "" {
+				return trimVisibleText(body), true
+			}
+		}
+		if body, ok := visibleTextAfterPreviousTailAnchorWithPolicy(visibleSnapshot, previousVisibleSnapshot, windowStartInputText, roundReply, 5, anchorPolicy); ok && strings.TrimSpace(body) != "" {
+			return trimVisibleText(body), true
+		}
+	}
+	return "", false
 }
 
-func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) (string, bool) {
+func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, anchorPolicy notifyTextAnchorPolicy) (string, bool) {
 	visibleSnapshot = trimVisibleText(visibleSnapshot)
 	if visibleSnapshot == "" {
 		return "", false
 	}
-	if strings.TrimSpace(lastInputText) != "" {
-		if body := visibleTextFromLastInput(visibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
+	if strings.TrimSpace(lastInputText) != "" && anchorPolicy.allowed && strings.TrimSpace(previousVisibleSnapshot) != "" {
+		if body := visibleTextFromLastInputWithPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, anchorPolicy); strings.TrimSpace(body) != "" {
 			return trimVisibleText(body), true
 		}
-		if body := visibleTextAfterLastInputPrompt(visibleSnapshot); strings.TrimSpace(body) != "" {
+		if !anchorPolicy.enforceIdentity {
+			if body := visibleTextAfterLastInputPrompt(visibleSnapshot, previousVisibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
+				return trimVisibleText(body), true
+			}
+		}
+	}
+	if body := codexTerminalInteractionVisibleBlock(visibleSnapshot, previousVisibleSnapshot, lastInputText); body != "" {
+		if anchorPolicy.allowed || codexTerminalInteractionChangedSinceBaseline(visibleSnapshot, previousVisibleSnapshot, lastInputText) {
+			return body, true
+		}
+	}
+	if codexTerminalInteractionContextRejected(visibleSnapshot, previousVisibleSnapshot, lastInputText) {
+		return "", false
+	}
+	if anchorPolicy.allowed {
+		if !anchorPolicy.enforceIdentity {
+			if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok {
+				return trimVisibleText(body), true
+			}
+		}
+		if body, ok := visibleTextAfterPreviousTailAnchorWithPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, roundReply, 5, anchorPolicy); ok {
 			return trimVisibleText(body), true
 		}
 	}
-	if body, ok := visibleTextChangedSincePrevious(visibleSnapshot, previousVisibleSnapshot); ok {
-		return trimVisibleText(body), true
-	}
-	if body, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok {
-		return trimVisibleText(body), true
-	}
-	return visibleSnapshot, true
+	return "", false
 }
 
 func visibleTextChangedSincePrevious(visibleSnapshot string, previousVisibleSnapshot string) (string, bool) {
@@ -650,118 +751,259 @@ func visibleTextChangedSincePrevious(visibleSnapshot string, previousVisibleSnap
 	if len(currentLines) == 0 || len(previousLines) == 0 {
 		return "", false
 	}
-	currentNorm := normalizedVisibleLines(currentLines)
-	previousNorm := normalizedVisibleLines(previousLines)
-	prefix := 0
-	for prefix < len(currentNorm) && prefix < len(previousNorm) && currentNorm[prefix] == previousNorm[prefix] {
-		prefix++
+	if len(currentLines) < len(previousLines) {
+		return "", false
 	}
-	suffix := 0
-	for suffix < len(currentNorm)-prefix &&
-		suffix < len(previousNorm)-prefix &&
-		currentNorm[len(currentNorm)-1-suffix] == previousNorm[len(previousNorm)-1-suffix] {
-		suffix++
-	}
-	if prefix == len(currentLines) && prefix == len(previousLines) {
-		return "", true
-	}
-	start := prefix
-	end := len(currentLines) - suffix
-	for end < len(currentLines) && shouldKeepStableDiffSuffixLine(currentLines[end]) {
-		end++
-	}
-	if start > end {
-		start = end
-	}
-	if suffix == 0 {
-		if anchored, ok := visibleTextAfterPreviousTailAnchor(visibleSnapshot, previousVisibleSnapshot, 3); ok && strings.TrimSpace(anchored) != "" {
-			return anchored, true
+	for i := range previousLines {
+		if currentLines[i] != previousLines[i] {
+			return "", false
 		}
 	}
-	return strings.Join(currentLines[start:end], "\n"), true
+	if len(currentLines) == len(previousLines) {
+		return "", true
+	}
+	return strings.Join(currentLines[len(previousLines):], "\n"), true
 }
 
-func shouldKeepStableDiffSuffixLine(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
+func isStrongVisibleBoundaryLine(line, normalized string) bool {
+	if len([]rune(normalized)) < 4 {
 		return false
 	}
-	lower := strings.ToLower(trimmed)
-	if text, ok := shellInputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
-		return true
+	trimmed := strings.TrimSpace(line)
+	if isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) || isCodexInteractionStatusLine(trimmed) {
+		return false
 	}
 	if text, ok := inputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
-		return true
+		return false
 	}
-	return strings.Contains(lower, "press enter") ||
-		strings.Contains(lower, "esc to go back") ||
-		strings.Contains(lower, "enter to confirm")
+	if text, ok := shellInputEchoText(trimmed); ok && strings.TrimSpace(text) == "" {
+		return false
+	}
+	return true
 }
 
-func normalizedVisibleLines(lines []string) []string {
-	out := make([]string, len(lines))
+type indexedVisibleAnchorLine struct {
+	index int
+	text  string
+}
+
+// The browser installs a scrollback marker before the oldest of its final 64
+// logical lines. Keeping text-tail candidates inside the final 32 lines leaves
+// a conservative guard band for footer redraws and wrapped rows. If the guard
+// marker is evicted, the renderer epoch changes and the manager disables this
+// entire text-anchor path.
+const tailAnchorSearchLineLimit = 32
+
+// visibleTextAfterPreviousTailAnchor is the second-line round boundary when
+// the user's input echo cannot be found. It chooses one 2-5 line suffix using
+// only the baseline, then requires that exact sequence to occur exactly once
+// in the current snapshot. Candidate strength must never be weakened after
+// looking at current text: doing so lets an older short duplicate impersonate
+// a longer baseline tail whose distinguishing context disappeared.
+func visibleTextAfterPreviousTailAnchor(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, maxAnchorLines int) (string, bool) {
+	return visibleTextAfterPreviousTailAnchorWithPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, nil, maxAnchorLines, permissiveNotifyTextAnchorPolicy(true))
+}
+
+func visibleTextAfterPreviousTailAnchorWithPolicy(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, roundReply []byte, maxAnchorLines int, anchorPolicy notifyTextAnchorPolicy) (string, bool) {
+	if !anchorPolicy.allowed {
+		return "", false
+	}
+	if maxAnchorLines < 2 {
+		return "", false
+	}
+	previous := stableVisibleAnchorLines(previousVisibleSnapshot, lastInputText)
+	previousTail := visibleAnchorLinesInTail(previous, len(splitVisibleLines(trimVisibleText(previousVisibleSnapshot))), tailAnchorSearchLineLimit)
+	current := stableVisibleAnchorLines(visibleSnapshot, "")
+	if len(previousTail) < 2 || len(current) < 2 {
+		return "", false
+	}
+	if maxAnchorLines > len(previousTail) {
+		maxAnchorLines = len(previousTail)
+	}
+	var candidate []string
+	var candidateLines []indexedVisibleAnchorLine
+	// Prefer the longest available suffix. Shortening only because the current
+	// snapshot no longer contains its distinguishing prefix would turn an older
+	// duplicate into a false boundary.
+	for size := maxAnchorLines; size >= 2; size-- {
+		candidateLines = previousTail[len(previousTail)-size:]
+		currentCandidate := make([]string, size)
+		for i := range candidateLines {
+			currentCandidate[i] = candidateLines[i].text
+		}
+		if !tailAnchorSequenceTrusted(currentCandidate) || len(normalizedSequenceStarts(previous, currentCandidate)) != 1 {
+			continue
+		}
+		candidate = currentCandidate
+		break
+	}
+	if len(candidate) == 0 {
+		return "", false
+	}
+	currentStarts := normalizedSequenceStarts(current, candidate)
+	if len(currentStarts) != 1 {
+		// Zero occurrences means the selected boundary disappeared. Multiple
+		// occurrences are ambiguous between a redraw and the reply quoting the
+		// old tail. Neither case is safe to guess from text alone.
+		return "", false
+	}
+	visibleLines := splitVisibleLines(visibleSnapshot)
+	selected := currentStarts[0]
+	if anchorPolicy.enforceIdentity {
+		for i := range candidateLines {
+			if !anchorPolicy.sameGuardRelativeLine(candidateLines[i].index, current[selected+i].index) {
+				return "", false
+			}
+		}
+		if roundReplyReemitsTailAnchor(roundReply, candidate) {
+			// The old boundary appearing in this round's PTY output means it may
+			// have been redrawn or quoted rather than preserved in place.
+			return "", false
+		}
+	}
+	start := current[selected+len(candidate)-1].index + 1
+	if start >= len(visibleLines) {
+		return "", true
+	}
+	return dropLeadingTailInputEcho(strings.Join(visibleLines[start:], "\n"), lastInputText), true
+}
+
+func (policy notifyTextAnchorPolicy) sameGuardRelativeLine(previousLine int, currentLine int) bool {
+	if !policy.allowed {
+		return false
+	}
+	if !policy.enforceIdentity {
+		return true
+	}
+	if policy.previousGuardLine < 0 || policy.currentGuardLine < 0 ||
+		previousLine < policy.previousGuardLine || currentLine < policy.currentGuardLine {
+		return false
+	}
+	return previousLine-policy.previousGuardLine == currentLine-policy.currentGuardLine
+}
+
+func roundReplyReemitsTailAnchor(roundReply []byte, sequence []string) bool {
+	if len(roundReply) == 0 || len(sequence) < 2 {
+		return false
+	}
+	anchor := canonicalAnchorText(strings.Join(sequence, "\n"))
+	if anchor == "" {
+		return false
+	}
+	output := canonicalAnchorText(stripTerminalControlsRaw(roundReply))
+	return strings.Contains(output, anchor)
+}
+
+func stableVisibleAnchorLines(text string, activeInputText string) []indexedVisibleAnchorLine {
+	lines := splitVisibleLines(trimVisibleText(text))
+	skippedInputLines := make(map[int]struct{})
+	if strings.TrimSpace(activeInputText) != "" {
+		spans := inputAnchorSpans(lines, activeInputText)
+		if len(spans) > 0 {
+			span := spans[len(spans)-1]
+			if inputAnchorAtActiveBaselineTail(lines, span) {
+				for i := span.start; i <= span.end; i++ {
+					skippedInputLines[i] = struct{}{}
+				}
+			}
+		}
+	}
+	out := make([]indexedVisibleAnchorLine, 0, len(lines))
 	for i, line := range lines {
-		out[i] = normalizeVisibleAnchorLine(line)
+		if _, skip := skippedInputLines[i]; skip {
+			continue
+		}
+		normalized := normalizeVisibleAnchorLine(line)
+		if normalized == "" || !isStrongVisibleBoundaryLine(line, normalized) || isPureHorizontalRuleLine(line) {
+			continue
+		}
+		out = append(out, indexedVisibleAnchorLine{index: i, text: normalized})
 	}
 	return out
 }
 
-func visibleTextAfterPreviousTailAnchor(visibleSnapshot string, previousVisibleSnapshot string, anchorLines int) (string, bool) {
-	previousAnchor := tailNonEmptyNormalizedLines(previousVisibleSnapshot, anchorLines)
-	if len(previousAnchor) == 0 {
-		return "", false
+func visibleAnchorLinesInTail(lines []indexedVisibleAnchorLine, physicalLineCount int, limit int) []indexedVisibleAnchorLine {
+	if limit <= 0 || physicalLineCount <= 0 || len(lines) == 0 {
+		return nil
 	}
-	lines := splitVisibleLines(visibleSnapshot)
-	type indexedLine struct {
-		index int
-		text  string
+	start := physicalLineCount - limit
+	if start <= 0 {
+		return lines
 	}
-	current := make([]indexedLine, 0, len(lines))
 	for i, line := range lines {
-		normalized := normalizeVisibleAnchorLine(line)
-		if normalized != "" {
-			current = append(current, indexedLine{index: i, text: normalized})
+		if line.index >= start {
+			return lines[i:]
 		}
 	}
-	if len(current) < len(previousAnchor) {
-		return "", false
+	return nil
+}
+
+func dropLeadingTailInputEcho(text string, lastInputText string) string {
+	if strings.TrimSpace(text) == "" || strings.TrimSpace(lastInputText) == "" {
+		return text
 	}
-	for i := len(current) - len(previousAnchor); i >= 0; i-- {
+	lines := splitVisibleLines(text)
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) ||
+			isCodexSuggestionLine(trimmed) || isCodexInteractionStatusLine(trimmed) || isPureHorizontalRuleLine(trimmed) {
+			continue
+		}
+		if end, ok := inputAnchorEndLine(lines, i, lastInputText); ok {
+			return strings.Join(append(append([]string{}, lines[:i]...), lines[end+1:]...), "\n")
+		}
+		break
+	}
+	return text
+}
+
+func tailAnchorSequenceTrusted(sequence []string) bool {
+	if len(sequence) < 2 {
+		return false
+	}
+	totalRunes := 0
+	for _, line := range sequence {
+		totalRunes += len([]rune(line))
+	}
+	// Length alone is not entropy: "done / okay / ready" and repeated braces
+	// are common terminal tails. Require both enough material and a useful
+	// spread of non-punctuation characters before treating the suffix as an ID.
+	minimumRunes := 20
+	if len(sequence) == 2 {
+		minimumRunes = 16
+	}
+	if totalRunes < minimumRunes {
+		return false
+	}
+	distinct := make(map[rune]struct{})
+	for _, line := range sequence {
+		for _, r := range line {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				distinct[unicode.ToLower(r)] = struct{}{}
+			}
+		}
+	}
+	return len(distinct) >= 8
+}
+
+func normalizedSequenceStarts(lines []indexedVisibleAnchorLine, sequence []string) []int {
+	if len(sequence) == 0 || len(lines) < len(sequence) {
+		return nil
+	}
+	starts := make([]int, 0, 2)
+	for i := 0; i+len(sequence) <= len(lines); i++ {
 		matched := true
-		for j := range previousAnchor {
-			if current[i+j].text != previousAnchor[j] {
+		for j := range sequence {
+			if lines[i+j].text != sequence[j] {
 				matched = false
 				break
 			}
 		}
 		if matched {
-			start := current[i+len(previousAnchor)-1].index + 1
-			if start >= len(lines) {
-				return "", true
-			}
-			return strings.Join(lines[start:], "\n"), true
+			starts = append(starts, i)
 		}
 	}
-	return "", false
-}
-
-func tailNonEmptyNormalizedLines(text string, maxLines int) []string {
-	if maxLines <= 0 {
-		return nil
-	}
-	lines := splitVisibleLines(trimVisibleText(text))
-	out := make([]string, 0, maxLines)
-	for i := len(lines) - 1; i >= 0 && len(out) < maxLines; i-- {
-		normalized := normalizeVisibleAnchorLine(lines[i])
-		if normalized == "" {
-			continue
-		}
-		out = append(out, normalized)
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
+	return starts
 }
 
 func splitVisibleLines(text string) []string {
@@ -771,7 +1013,12 @@ func splitVisibleLines(text string) []string {
 }
 
 func normalizeVisibleAnchorLine(line string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+	// Tail anchors identify rendered output, not user input. Preserve leading
+	// whitespace and internal spacing exactly: collapsing indentation lets a
+	// reflowed or differently formatted historical block impersonate the old
+	// boundary. xterm snapshots already remove unused cell padding; trim only
+	// horizontal padding at the physical line end for legacy test/DOM sources.
+	return strings.TrimRight(line, " \t")
 }
 
 func visibleTextAfterRoundStart(visibleSnapshot string, snapshotAtRoundStart string) string {
@@ -808,27 +1055,135 @@ func normalizeSnapshotText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func visibleTextFromLastInput(visibleSnapshot string, lastInputText string) string {
-	lines := strings.Split(visibleSnapshot, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if end, ok := inputAnchorEndLine(lines, i, lastInputText); ok {
-			if end+1 >= len(lines) {
-				return ""
-			}
-			return strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
-		}
-	}
-	return ""
+func visibleTextFromLastInput(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) string {
+	return visibleTextFromLastInputWithPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, permissiveNotifyTextAnchorPolicy(true))
 }
 
-func visibleTextFromInputStart(visibleSnapshot string, inputText string) string {
+func visibleTextFromLastInputWithPolicy(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string, anchorPolicy notifyTextAnchorPolicy) string {
 	lines := strings.Split(visibleSnapshot, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if _, ok := inputAnchorEndLine(lines, i, inputText); ok {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
+	span, ok := newestInputAnchorSpanWithPolicy(lines, strings.Split(previousVisibleSnapshot, "\n"), lastInputText, anchorPolicy)
+	if !ok || span.end+1 >= len(lines) {
+		return ""
 	}
-	return ""
+	return trimAnchoredResponseBody(strings.Join(lines[span.end+1:], "\n"), leadingHorizontalWhitespace(lines[span.start]))
+}
+
+func visibleTextFromInputStart(visibleSnapshot string, previousVisibleSnapshot string, inputText string) string {
+	return visibleTextFromInputStartWithPolicy(visibleSnapshot, previousVisibleSnapshot, inputText, permissiveNotifyTextAnchorPolicy(true))
+}
+
+func visibleTextFromInputStartWithPolicy(visibleSnapshot string, previousVisibleSnapshot string, inputText string, anchorPolicy notifyTextAnchorPolicy) string {
+	lines := strings.Split(visibleSnapshot, "\n")
+	span, ok := newestInputAnchorSpanWithPolicy(lines, strings.Split(previousVisibleSnapshot, "\n"), inputText, anchorPolicy)
+	if !ok {
+		return ""
+	}
+	return trimVisibleText(strings.Join(lines[span.start:], "\n"))
+}
+
+type inputAnchorSpan struct {
+	start int
+	end   int
+}
+
+func inputAnchorSpans(lines []string, inputText string) []inputAnchorSpan {
+	spans := make([]inputAnchorSpan, 0, 2)
+	for i := 0; i < len(lines); i++ {
+		end, ok := inputAnchorEndLine(lines, i, inputText)
+		if !ok {
+			continue
+		}
+		spans = append(spans, inputAnchorSpan{start: i, end: end})
+		i = end
+	}
+	return spans
+}
+
+func newestInputAnchorSpan(currentLines, previousLines []string, inputText string) (inputAnchorSpan, bool) {
+	return newestInputAnchorSpanWithPolicy(currentLines, previousLines, inputText, permissiveNotifyTextAnchorPolicy(true))
+}
+
+func newestInputAnchorSpanWithPolicy(currentLines, previousLines []string, inputText string, anchorPolicy notifyTextAnchorPolicy) (inputAnchorSpan, bool) {
+	if !anchorPolicy.allowed {
+		return inputAnchorSpan{}, false
+	}
+	current := inputAnchorSpans(currentLines, inputText)
+	if len(current) == 0 {
+		return inputAnchorSpan{}, false
+	}
+	if strings.TrimSpace(strings.Join(previousLines, "\n")) != "" {
+		previous := inputAnchorSpans(previousLines, inputText)
+		if anchorPolicy.enforceIdentity {
+			previous = baselineInputAnchorSpansWithCursorProof(previous, anchorPolicy.previousCursorLine)
+			if len(previous) == 0 || !inputAnchorAtActiveBaselineTail(previousLines, previous[len(previous)-1]) {
+				return inputAnchorSpan{}, false
+			}
+			baseline := previous[len(previous)-1]
+			matches := make([]inputAnchorSpan, 0, 1)
+			for _, candidate := range current {
+				if anchorPolicy.sameGuardRelativeLine(baseline.start, candidate.start) &&
+					anchorPolicy.sameGuardRelativeLine(baseline.end, candidate.end) {
+					matches = append(matches, candidate)
+				}
+			}
+			if len(matches) != 1 {
+				return inputAnchorSpan{}, false
+			}
+			return matches[0], true
+		}
+		if len(current) < len(previous) {
+			// A matching occurrence disappeared. We cannot prove that a
+			// remaining duplicate is the input that started this round.
+			return inputAnchorSpan{}, false
+		}
+		if len(current) == len(previous) {
+			if len(previous) == 0 || !inputAnchorAtActiveBaselineTail(previousLines, previous[len(previous)-1]) {
+				// Equal occurrence counts are usable only when the newest baseline
+				// occurrence is the active composer line captured immediately before
+				// Enter. Otherwise it is merely historical scrollback.
+				return inputAnchorSpan{}, false
+			}
+			return current[len(previous)-1], true
+		}
+		// Select the first occurrence added since the baseline. A response may
+		// quote the user's input again later, so blindly taking the last match
+		// could cut into the reply itself.
+		return current[len(previous)], true
+	}
+	// Without a baseline there is no evidence that any matching prompt belongs
+	// to this round rather than scrollback. Never guess, regardless of input
+	// length or whether the occurrence happens to be the first visible line.
+	return inputAnchorSpan{}, false
+}
+
+func baselineInputAnchorSpansWithCursorProof(spans []inputAnchorSpan, cursorLine int) []inputAnchorSpan {
+	if len(spans) == 0 || cursorLine < 0 {
+		return nil
+	}
+	newest := spans[len(spans)-1]
+	if newest.end != cursorLine {
+		// The baseline is captured immediately before Enter. Regardless of the
+		// visible prompt glyph (`›`, `$`, `>`, ...), only the newest occurrence
+		// ending on the renderer cursor line can be the active composer. Do not
+		// downgrade to an older equal-text occurrence when this proof fails.
+		return nil
+	}
+	return spans
+}
+
+func inputAnchorAtActiveBaselineTail(lines []string, span inputAnchorSpan) bool {
+	if span.end < 0 || span.end >= len(lines) {
+		return false
+	}
+	for _, line := range lines[span.end+1:] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || isTransientStatusLine(trimmed) || isPromptStatusLine(trimmed) ||
+			isCodexSuggestionLine(trimmed) || isCodexInteractionStatusLine(trimmed) || isPureHorizontalRuleLine(trimmed) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func inputAnchorEndLine(lines []string, i int, lastInputText string) (int, bool) {
@@ -847,41 +1202,121 @@ func inputAnchorEndLine(lines []string, i int, lastInputText string) (int, bool)
 	return i, false
 }
 
-func visibleTextFromLastAnyInput(visibleSnapshot string) string {
+func visibleTextAfterLastInputPrompt(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) string {
 	lines := strings.Split(visibleSnapshot, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if text, ok := inputEchoText(lines[i]); ok && strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
-		if text, ok := shellInputEchoText(lines[i]); ok && strings.TrimSpace(text) != "" {
-			return strings.TrimSpace(strings.Join(lines[i:], "\n"))
-		}
+	starts := inputPromptReplyStarts(lines, lastInputText)
+	if len(starts) == 0 {
+		return ""
 	}
-	return ""
+	if strings.TrimSpace(previousVisibleSnapshot) != "" {
+		previousStarts := inputPromptReplyStarts(strings.Split(previousVisibleSnapshot, "\n"), lastInputText)
+		if len(starts) <= len(previousStarts) {
+			return ""
+		}
+	} else {
+		return ""
+	}
+	selected := starts[len(starts)-1]
+	return trimAnchoredResponseBody(strings.Join(lines[selected.responseLine:], "\n"), selected.promptIndent)
 }
 
-func visibleTextAfterLastInputPrompt(visibleSnapshot string) string {
-	lines := strings.Split(visibleSnapshot, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		trimmed := strings.TrimSpace(lines[i])
-		text, ok := trimPromptPrefix(trimmed, "›")
-		if !ok || strings.TrimSpace(text) == "" || isCodexSuggestionLine(trimmed) {
+func trimAnchoredResponseBody(text string, promptIndent string) string {
+	text = trimVisibleText(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	first := lines[0]
+	trimmedFirst := strings.TrimLeft(first, " \t")
+	indent := strings.TrimSuffix(first, trimmedFirst)
+	if promptIndent == "" || indent == "" || !strings.HasPrefix(indent, promptIndent) || !startsCodexResponseBlock(trimmedFirst) {
+		return text
+	}
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		if strings.HasPrefix(line, promptIndent) {
+			lines[i] = strings.TrimPrefix(line, promptIndent)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func leadingHorizontalWhitespace(line string) string {
+	return strings.TrimSuffix(line, strings.TrimLeft(line, " \t"))
+}
+
+type inputPromptReplyStart struct {
+	responseLine int
+	promptIndent string
+}
+
+func inputPromptReplyStarts(lines []string, lastInputText string) []inputPromptReplyStart {
+	starts := make([]inputPromptReplyStart, 0, 2)
+	for i := 0; i < len(lines); i++ {
+		text, ok := agentInputPromptText(lines[i])
+		if !ok || strings.TrimSpace(text) == "" || isCodexSuggestionLine(strings.TrimSpace(lines[i])) {
+			continue
+		}
+		promptText := text
 		for j := i + 1; j < len(lines); j++ {
 			candidate := strings.TrimSpace(lines[j])
 			if candidate == "" {
 				continue
 			}
-			if _, nextPrompt := trimPromptPrefix(candidate, "›"); nextPrompt {
+			if _, nextPrompt := agentInputPromptText(candidate); nextPrompt {
 				break
 			}
 			if startsCodexResponseBlock(candidate) {
-				return strings.TrimSpace(strings.Join(lines[j:], "\n"))
+				if anchorTextsLikelySame(promptText, lastInputText) {
+					starts = append(starts, inputPromptReplyStart{responseLine: j, promptIndent: leadingHorizontalWhitespace(lines[i])})
+				}
+				break
 			}
+			promptText += candidate
 		}
 	}
-	return ""
+	return starts
+}
+
+func agentInputPromptText(line string) (string, bool) {
+	line = strings.TrimSpace(stripAnchorIgnorables(line))
+	for _, prompt := range []string{"›", "❯", "»"} {
+		if text, ok := trimPromptPrefix(line, prompt); ok {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+func anchorTextsLikelySame(left string, right string) bool {
+	if anchorTextsEqual(left, right) {
+		return true
+	}
+	rightFirstField := ""
+	if fields := strings.Fields(strings.TrimSpace(right)); len(fields) > 0 {
+		rightFirstField = fields[0]
+	}
+	if strings.HasPrefix(rightFirstField, "@") && looksLikeRichTextFileMention(strings.TrimPrefix(rightFirstField, "@")) {
+		leftBody := anchorTextAfterFirstField(left)
+		rightBody := anchorTextAfterFirstField(right)
+		if len([]rune(canonicalAnchorText(rightBody))) >= 8 && anchorTextsEqual(leftBody, rightBody) {
+			return true
+		}
+	}
+	// Do not use generic edit-distance/prefix similarity here. Two adjacent
+	// user prompts commonly differ by only one word, and accepting an old 95%
+	// match is precisely how a previous reply can be mistaken for this round.
+	return false
+}
+
+func anchorTextAfterFirstField(text string) string {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) < 2 {
+		return ""
+	}
+	return strings.Join(fields[1:], " ")
 }
 
 func startsCodexResponseBlock(line string) bool {
@@ -891,7 +1326,7 @@ func startsCodexResponseBlock(line string) bool {
 	}
 	r, _ := utf8.DecodeRuneInString(line)
 	switch r {
-	case '•', '⏺', '■', '⚠', '✦':
+	case '•', '⏺', '■', '⚠', '✦', '●', '◆', '◇', '▪', '▸':
 		return true
 	default:
 		return false
@@ -908,45 +1343,145 @@ func wrappedInputEchoEndAt(lines []string, i int, lastInputText string) (int, bo
 	if !ok {
 		return i, false
 	}
-	target := compactAnchorText(lastInputText)
-	current := compactAnchorText(text)
-	if target == "" || current == "" || !strings.HasPrefix(target, current) {
+	states := anchorPrefixStates(lastInputText, text)
+	if len(states) == 0 {
 		return i, false
 	}
-	if current == target {
-		return i, true
+	if anchorPrefixComplete(states) {
+		// A one-line echo must pass the whitespace-boundary-sensitive exact
+		// matcher above. The compact prefix matcher exists only for wrapped
+		// input where display reflow can remove boundary whitespace.
+		return i, false
 	}
-	for j := i + 1; j < len(lines) && j <= i+32; j++ {
+	for j := i + 1; j < len(lines); j++ {
 		trimmed := strings.TrimSpace(lines[j])
 		if trimmed == "" {
 			continue
 		}
-		if _, ok := inputEchoText(trimmed); ok {
+		states = extendAnchorPrefixStates(states, trimmed)
+		if len(states) == 0 {
 			return i, false
 		}
-		if strings.HasPrefix(trimmed, "• ") || isPromptStatusLine(trimmed) || isCodexSuggestionLine(trimmed) {
-			return i, false
-		}
-		current += compactAnchorText(trimmed)
-		if current == target {
+		if anchorPrefixComplete(states) {
 			return j, true
-		}
-		if !strings.HasPrefix(target, current) {
-			return i, false
 		}
 	}
 	return i, false
 }
 
 func compactAnchorText(text string) string {
+	return canonicalAnchorText(text)
+}
+
+func canonicalAnchorText(text string) string {
+	text = norm.NFKC.String(stripTerminalControlsRaw([]byte(text)))
 	var b strings.Builder
-	for _, r := range strings.TrimSpace(text) {
-		if unicode.IsSpace(r) || r == '@' || r == '＠' {
+	for _, r := range text {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || isAnchorIgnorableRune(r) {
 			continue
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+func isAnchorIgnorableRune(r rune) bool {
+	if unicode.In(r, unicode.Cf) {
+		return true
+	}
+	return r == '\ufe0e' || r == '\ufe0f'
+}
+
+func anchorTextVariants(text string) []string {
+	normalized := norm.NFKC.String(stripTerminalControlsRaw([]byte(text)))
+	normalized = stripAnchorIgnorables(normalized)
+	firstField := ""
+	if fields := strings.Fields(normalized); len(fields) > 0 {
+		firstField = fields[0]
+	}
+	base := canonicalAnchorText(text)
+	if base == "" {
+		return nil
+	}
+	variants := []string{base}
+	if strings.HasPrefix(firstField, "@") && looksLikeRichTextFileMention(strings.TrimPrefix(firstField, "@")) {
+		variants = append(variants, strings.TrimPrefix(base, "@"))
+	}
+	return variants
+}
+
+func anchorBoundaryVariants(text string) []string {
+	text = norm.NFKC.String(stripTerminalControlsRaw([]byte(text)))
+	text = stripAnchorIgnorables(text)
+	base := strings.Join(strings.Fields(text), " ")
+	if base == "" {
+		return nil
+	}
+	variants := []string{base}
+	firstField := ""
+	if fields := strings.Fields(base); len(fields) > 0 {
+		firstField = fields[0]
+	}
+	if strings.HasPrefix(firstField, "@") && looksLikeRichTextFileMention(strings.TrimPrefix(firstField, "@")) {
+		variants = append(variants, strings.TrimPrefix(base, "@"))
+	}
+	return variants
+}
+
+func looksLikeRichTextFileMention(text string) bool {
+	return strings.ContainsAny(text, `/\\`)
+}
+
+type anchorPrefixState struct {
+	target  string
+	current string
+}
+
+func anchorPrefixStates(targetText string, currentText string) []anchorPrefixState {
+	states := make([]anchorPrefixState, 0, 4)
+	for _, target := range anchorTextVariants(targetText) {
+		for _, current := range anchorTextVariants(currentText) {
+			if current != "" && strings.HasPrefix(target, current) {
+				states = append(states, anchorPrefixState{target: target, current: current})
+			}
+		}
+	}
+	return states
+}
+
+func extendAnchorPrefixStates(states []anchorPrefixState, fragment string) []anchorPrefixState {
+	fragment = canonicalAnchorText(fragment)
+	if fragment == "" {
+		return states
+	}
+	out := states[:0]
+	for _, state := range states {
+		state.current += fragment
+		if strings.HasPrefix(state.target, state.current) {
+			out = append(out, state)
+		}
+	}
+	return out
+}
+
+func anchorPrefixComplete(states []anchorPrefixState) bool {
+	for _, state := range states {
+		if state.current == state.target {
+			return true
+		}
+	}
+	return false
+}
+
+func anchorTextsEqual(left string, right string) bool {
+	for _, leftVariant := range anchorBoundaryVariants(left) {
+		for _, rightVariant := range anchorBoundaryVariants(right) {
+			if leftVariant == rightVariant {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func visibleTextFromLastShellInput(visibleSnapshot string) string {
@@ -972,12 +1507,11 @@ func startsWithInputEcho(text string, input string) bool {
 }
 
 func inputEchoText(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	if rest, ok := trimPromptPrefix(trimmed, "›"); ok {
-		return rest, true
-	}
-	if rest, ok := trimPromptPrefix(trimmed, ">"); ok {
-		return rest, true
+	trimmed := strings.TrimSpace(stripAnchorIgnorables(StripTerminalControls([]byte(line))))
+	for _, prompt := range []string{"›", "❯", "»", ">"} {
+		if rest, ok := trimPromptPrefix(trimmed, prompt); ok {
+			return rest, true
+		}
 	}
 	if rest, ok := trimPromptPrefix(trimmed, "⏺"); ok {
 		return unwrapAgentActionName(rest), true
@@ -1006,11 +1540,12 @@ func unwrapAgentActionName(text string) string {
 }
 
 func isStructuredInputAnchorLine(line string, input string) bool {
-	raw, ok := inputEchoTextRaw(line)
-	if !ok || !strings.HasPrefix(raw, " ") {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	raw, ok := trimPromptPrefixRaw(trimmedLeft, ">")
+	if !ok {
 		return false
 	}
-	return strings.TrimSpace(raw) == strings.TrimSpace(input)
+	return anchorTextsEqual(raw, input)
 }
 
 func inputEchoTextRaw(line string) (string, bool) {
@@ -1064,14 +1599,30 @@ func trimPromptPrefix(line string, prompt string) (string, bool) {
 	if line == prompt {
 		return "", true
 	}
-	prefix := prompt + " "
-	if strings.HasPrefix(line, prefix) {
-		return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+	if !strings.HasPrefix(line, prompt) {
+		return "", false
 	}
-	if prompt == "›" && strings.HasPrefix(line, prompt) {
-		return strings.TrimSpace(strings.TrimPrefix(line, prompt)), true
+	rest := strings.TrimPrefix(line, prompt)
+	if prompt == "›" || prompt == "❯" || prompt == "»" {
+		return strings.TrimSpace(rest), true
+	}
+	first, _ := utf8.DecodeRuneInString(rest)
+	if unicode.IsSpace(first) {
+		return strings.TrimSpace(rest), true
 	}
 	return "", false
+}
+
+func stripAnchorIgnorables(text string) string {
+	return strings.Map(func(r rune) rune {
+		if isAnchorIgnorableRune(r) {
+			return -1
+		}
+		if r == '\u00a0' {
+			return ' '
+		}
+		return r
+	}, text)
 }
 
 func trimPromptPrefixRaw(line string, prompt string) (string, bool) {
@@ -1117,7 +1668,8 @@ func dropCodexPromptStatusLines(text string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	kept := lines[:0]
 	for _, line := range lines {
-		if isPromptStatusLine(strings.TrimSpace(line)) {
+		trimmed := strings.TrimSpace(line)
+		if isPromptStatusLine(trimmed) || isTransientStatusLine(trimmed) {
 			continue
 		}
 		kept = append(kept, line)
@@ -1223,6 +1775,9 @@ func containsTransientStatusLine(text string) bool {
 func isTransientStatusLine(line string) bool {
 	lower := strings.ToLower(line)
 	return strings.Contains(lower, "working (") ||
+		strings.HasPrefix(lower, "worked for ") ||
+		strings.HasPrefix(lower, "context left ") ||
+		strings.HasPrefix(lower, "tokens used ") ||
 		strings.Contains(lower, "esc to interrupt") ||
 		(strings.Contains(lower, "background terminal") && strings.Contains(lower, "running")) ||
 		strings.Contains(lower, "/ps to view") ||
@@ -1295,7 +1850,7 @@ func containsInputEchoLine(text string, input string) bool {
 
 func isInputEchoLine(line string, input string) bool {
 	text, ok := inputEchoText(line)
-	return ok && strings.TrimSpace(text) == strings.TrimSpace(input)
+	return ok && anchorTextsEqual(text, input)
 }
 
 func isPromptStatusLine(line string) bool {
