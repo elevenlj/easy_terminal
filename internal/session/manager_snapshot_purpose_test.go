@@ -196,7 +196,7 @@ func TestFreshSnapshotStaysWithBrowserRoundOwner(t *testing.T) {
 	}
 }
 
-func TestFreshSnapshotDoesNotReassignDisconnectedRoundOwner(t *testing.T) {
+func TestFreshSnapshotReassignsDisconnectedRoundOwner(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:     NewManager(nil, nil, WithBrowserNeeded(func(string) {})),
 		session:     Session{ID: "sess-disconnected-round-owner", Live: true},
@@ -211,14 +211,14 @@ func TestFreshSnapshotDoesNotReassignDisconnectedRoundOwner(t *testing.T) {
 	rt.snapshotAtRoundSource = "browser:buffer"
 	rt.mu.Unlock()
 
+	cancelOwner()
 	done := make(chan bool, 1)
 	go func() { done <- rt.RequestFreshSnapshot(5 * time.Second) }()
-	_ = receiveSnapshotRequestEvent(t, owner)
-	cancelOwner()
-	if receiveSnapshotResult(t, done) {
-		t.Fatal("a disconnected round owner must fail rather than reassign")
+	event := receiveSnapshotRequestEvent(t, fallback)
+	rt.SetVisibleSnapshotResponseFrom("replacement current snapshot", "browser:buffer", event.RequestID, fallback)
+	if !receiveSnapshotResult(t, done) {
+		t.Fatal("a live renderer must take over after the round owner disconnects")
 	}
-	assertNoSnapshotRequestEvent(t, fallback, "a disconnected round owner must not fall back to another renderer")
 }
 
 func TestRealBrowserDoesNotStopHeadlessRoundOwner(t *testing.T) {

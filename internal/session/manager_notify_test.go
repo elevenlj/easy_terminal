@@ -841,6 +841,49 @@ func TestWaitingNotificationUsesInputAnchorWhenRoundBaselineIsEmpty(t *testing.T
 	}
 }
 
+func TestWaitingNotificationTakesFreshSnapshotAfterRoundOwnerDisconnects(t *testing.T) {
+	notifier := &recordingNotifier{}
+	rt := &RuntimeSession{
+		manager:                 NewManager(nil, nil, WithNotifier(notifier)),
+		session:                 Session{ID: "sess-owner-takeover", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:           "确认发布结果",
+		notifyVersion:           7,
+		snapshotAtRoundStart:    "› 确认发布结果",
+		snapshotAtRoundVersion:  1,
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "› 确认发布结果",
+		visibleSnapshotVersion:  1,
+		subscribers:             make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	owner, cancelOwner := rt.SubscribeWithMode(false)
+	replacement, cancelReplacement := rt.SubscribeWithMode(false)
+	defer cancelReplacement()
+	rt.mu.Lock()
+	rt.snapshotAtRoundResponder = owner
+	rt.snapshotAtRoundSource = "browser:buffer"
+	rt.visibleSnapshotResponder = owner
+	rt.visibleSnapshotSource = "browser:buffer"
+	rt.mu.Unlock()
+	cancelOwner()
+
+	done := make(chan struct{})
+	go func() {
+		rt.notifyIfStillWaitingImmediately(7)
+		close(done)
+	}()
+	event := receiveSnapshotRequestEvent(t, replacement)
+	rt.SetVisibleSnapshotResponseFrom("› 确认发布结果\n• 已完成并发布。", "browser:buffer", event.RequestID, replacement)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiting notification did not finish after renderer takeover")
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].Content != "• 已完成并发布。" || notes[0].Running {
+		t.Fatalf("renderer takeover must finalize the waiting card with current content, got %#v", notes)
+	}
+}
+
 func TestOutputAfterNotificationPatchesRunningTitleOnWaitingToRunning(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "msg-1"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))

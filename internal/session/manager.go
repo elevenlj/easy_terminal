@@ -1457,7 +1457,8 @@ func (rt *RuntimeSession) CurrentVisibleContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+	content := pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+	return rt.cleanLarkNotifyContentForAgentLocked(content)
 }
 
 func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
@@ -1468,7 +1469,15 @@ func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
 }
 
 func (rt *RuntimeSession) currentNotifyContentLocked() string {
-	return pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+	content := pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+	return rt.cleanLarkNotifyContentForAgentLocked(content)
+}
+
+func (rt *RuntimeSession) cleanLarkNotifyContentForAgentLocked(content string) string {
+	if isRawLarkNotifyInput(rt.lastInputText) {
+		return content
+	}
+	return cleanLarkNotifyContentForAgent(content, rt.session.LastMode, rt.session.LastAgentKind)
 }
 
 // previousTextAnchorsAllowedLocked limits input/tail occurrence matching to
@@ -1751,10 +1760,23 @@ func (rt *RuntimeSession) requestFreshSnapshotFrom(timeout time.Duration, purpos
 	primaryHeadless := false
 	requiredTarget := origin
 	roundOwnerPinned := false
+	disconnectedRoundOwner := false
 	rt.mu.Lock()
+	roundSessionID := rt.session.ID
 	if purpose != SnapshotPurposeInputBaseline && rt.snapshotAtRoundStartSet && rt.snapshotAtRoundResponder != nil {
-		requiredTarget = rt.snapshotAtRoundResponder
-		roundOwnerPinned = true
+		if _, connected := rt.subscribers[rt.snapshotAtRoundResponder]; connected {
+			requiredTarget = rt.snapshotAtRoundResponder
+			roundOwnerPinned = true
+		} else {
+			// A renderer that owned the round may disappear after sleep, a page
+			// reload, or headless startup. Keeping a dead channel pinned forever
+			// makes every completion snapshot stale and prevents the waiting card
+			// from ever being finalized. Once the owner is actually absent from
+			// subscribers, allow the normal correlated-request path to select a
+			// live renderer. A still-connected owner remains strictly pinned.
+			requiredTarget = nil
+			disconnectedRoundOwner = true
+		}
 	}
 	if requiredTarget != nil {
 		if sub, ok := rt.subscribers[requiredTarget]; ok {
@@ -1771,6 +1793,9 @@ func (rt *RuntimeSession) requestFreshSnapshotFrom(timeout time.Duration, purpos
 		}
 	}
 	rt.mu.Unlock()
+	if disconnectedRoundOwner {
+		log.Printf("snapshot round owner disconnected; allowing live renderer takeover session=%s", roundSessionID)
+	}
 	fresh, attempted := rt.requestFreshSnapshotAttempt(primaryTimeout, primaryHeadless, purpose, requiredTarget)
 	if roundOwnerPinned {
 		return fresh
@@ -2250,6 +2275,7 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	if suppressUpdateTip || runningAtRefresh {
 		rt.mu.Lock()
 		manualContent := pickManualRefreshNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+		manualContent = rt.cleanLarkNotifyContentForAgentLocked(manualContent)
 		rt.mu.Unlock()
 		if strings.TrimSpace(manualContent) != "" {
 			content = manualContent
@@ -2277,6 +2303,7 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		if suppressUpdateTip {
 			fallbackContent = pickLarkManualRefreshFallbackTailContent(rt.visibleSnapshot)
 		}
+		fallbackContent = rt.cleanLarkNotifyContentForAgentLocked(fallbackContent)
 		fallbackContent = strings.TrimSpace(fallbackContent)
 		rt.mu.Unlock()
 		if fallbackContent != "" {
@@ -3443,6 +3470,7 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"
 	}
 	content := pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+	content = rt.cleanLarkNotifyContentForAgentLocked(content)
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return WaitingNotification{}, "", false, "empty_content"
@@ -3471,6 +3499,7 @@ func (rt *RuntimeSession) fallbackTailWaitingNotificationCandidateLocked() (Wait
 		return WaitingNotification{}, "", false
 	}
 	content := strings.TrimSpace(pickLarkNotifyFallbackTailContent(rt.visibleSnapshot))
+	content = strings.TrimSpace(rt.cleanLarkNotifyContentForAgentLocked(content))
 	if content == "" || !hasReplyLine(content, rt.lastInputText) {
 		return WaitingNotification{}, "", false
 	}

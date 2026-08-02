@@ -220,6 +220,63 @@ func splitLarkNotifyBlocks(lines []string) [][]string {
 	return blocks
 }
 
+// dropLeadingUntitledCodexFragment removes the visible tail of a Codex block
+// whose marker/title has already scrolled out of the terminal viewport. A
+// later bullet marker proves that the snapshot is using Codex's marker-based
+// block layout. We still require a Codex tool-continuation signal in the
+// prefix, so ordinary prose before a marker is preserved.
+func dropLeadingUntitledCodexFragment(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"), "\n")
+	firstContent := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if firstContent < 0 {
+			firstContent = i
+			if startsLarkNotifyMarkerBlock(line) {
+				return text
+			}
+			continue
+		}
+		if startsLarkNotifyMarkerBlock(line) {
+			if looksLikeUntitledCodexToolFragment(lines[firstContent:i]) {
+				return strings.Join(lines[i:], "\n")
+			}
+			return text
+		}
+	}
+	return text
+}
+
+func looksLikeUntitledCodexToolFragment(lines []string) bool {
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(trimmed, "└"),
+			strings.HasPrefix(trimmed, "├"),
+			strings.Contains(lower, "ctrl + t to view transcript"),
+			strings.HasPrefix(lower, "process exited with code "):
+			return true
+		}
+	}
+	return false
+}
+
+func cleanLarkNotifyContentForAgent(text string, mode string, agentKind string) string {
+	if strings.TrimSpace(mode) != SessionModeAgent || !strings.EqualFold(strings.TrimSpace(agentKind), "codex") {
+		return text
+	}
+	return dropLeadingUntitledCodexFragment(text)
+}
+
 func startsLarkNotifyMarkerBlock(line string) bool {
 	trimmed := strings.TrimLeftFunc(line, unicode.IsSpace)
 	if trimmed == "" {

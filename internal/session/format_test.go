@@ -1139,6 +1139,57 @@ func TestPickNotifyContentDropsCodexToolBlocksAndFooterStatus(t *testing.T) {
 	}
 }
 
+func TestPickNotifyContentDropsLeadingToolFragmentWithoutMarkerTitle(t *testing.T) {
+	content := strings.Join([]string{
+		"└ PID STARTED COMMAND 46748 Mon Aug 3 01:55:14 2026",
+		"/Users/eleven/Library/Caches/go-build/example/cmd -p 8001",
+		"… +371 lines (ctrl + t to view transcript)",
+		"source=browser:buffer;continuity_version=2;reason=stale_wrong_source_or_responder",
+		"• 从日志看，状态已经变成 waiting。",
+		"  真正阻断推送的是完成后的候选内容被判定为 stale_visible_snapshot。",
+	}, "\n")
+	got := cleanLarkNotifyContentForAgent(content, SessionModeAgent, "codex")
+	want := strings.Join([]string{
+		"• 从日志看，状态已经变成 waiting。",
+		"  真正阻断推送的是完成后的候选内容被判定为 stale_visible_snapshot。",
+	}, "\n")
+	if got != want {
+		t.Fatalf("untitled leading tool fragment must be removed:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestUntitledBulletRuleDoesNotApplyToClaude(t *testing.T) {
+	want := "Claude plain opening\n• Claude may use a different marker convention"
+	if got := cleanLarkNotifyContentForAgent(want, SessionModeAgent, "claude"); got != want {
+		t.Fatalf("Codex bullet rule must not alter Claude output: %q", got)
+	}
+}
+
+func TestUntitledCodexRuleKeepsOrdinaryTextBeforeWorkingMarker(t *testing.T) {
+	want := "普通正文必须保留\n• Working (8s • esc to interrupt)"
+	if got := cleanLarkNotifyContentForAgent(want, SessionModeAgent, "codex"); got != want {
+		t.Fatalf("ordinary Codex text before a marker must be preserved: %q", got)
+	}
+}
+
+func TestPickNotifyContentKeepsPlainOutputWithoutCodexMarker(t *testing.T) {
+	want := "plain terminal output\nsecond line"
+	if got := pickAnchoredNotifyContent(want); got != want {
+		t.Fatalf("plain terminal output without Codex marker must be preserved: %q", got)
+	}
+}
+
+func TestPickNotifyContentRawCommandKeepsUntitledLeadingFragment(t *testing.T) {
+	visible := strings.Join([]string{
+		"└ raw tool output",
+		"… +371 lines (ctrl + t to view transcript)",
+		"• normal marked block",
+	}, "\n")
+	if got := PickNotifyContent(visible, "", nil, "/c"); got != visible {
+		t.Fatalf("/c must keep the complete raw output:\n%q\nwant:\n%q", got, visible)
+	}
+}
+
 func TestToolMarkerBlockEndsOnlyAtNextMarker(t *testing.T) {
 	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{{
 		Kind: "block_head", Pattern: `^\s*[•⏺]\s+Ran\b.*`, Action: "drop_block",
