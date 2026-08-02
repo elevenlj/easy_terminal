@@ -49,10 +49,10 @@ func TestOverlappingRunningInputRebasesPreparedRendererBaseline(t *testing.T) {
 		rt.mu.Unlock()
 		t.Fatalf("overlap must bind the prepared v2 baseline: snapshot=%q source=%q version=%d", gotSnapshot, gotSource, gotVersion)
 	}
-	if rt.notificationWindowInputText != "" {
+	if rt.notificationWindowInputText != "second question" {
 		got := rt.notificationWindowInputText
 		rt.mu.Unlock()
-		t.Fatalf("a new renderer baseline must start a fresh notification window, got %q", got)
+		t.Fatalf("an unfinished earlier round must remain the notification-window start, got %q", got)
 	}
 	rt.visibleSnapshot = preparedBaseline + "\n› third question\n• final answer for the third question"
 	rt.visibleSnapshotSource = newSource
@@ -68,9 +68,61 @@ func TestOverlappingRunningInputRebasesPreparedRendererBaseline(t *testing.T) {
 		t.Fatalf("rebased overlap should retain renderer identity, got %#v", policy)
 	}
 	if content != "• final answer for the third question" {
-		t.Fatalf("new card must contain only the new round reply, got %q", content)
+		t.Fatalf("the latest matching input anchor should return only the content below it, got %q", content)
 	}
-	if strings.Contains(content, "OLD_HISTORY_MUST_NOT_LEAK") || strings.Contains(content, "partial answer") {
-		t.Fatalf("rebased overlap leaked the previous window: %q", content)
+}
+
+func TestOverlappingInputKeepsOldestUnansweredAnchorAcrossFreshBaseline(t *testing.T) {
+	responder := make(chan RuntimeEvent)
+	source := anchorMetadataSourceWithBaseAndLine("browser:buffer", "31", "normal", false, true, 0)
+	previous := strings.Join([]string{
+		"› first unanswered question",
+		"• partial work",
+		"› second question",
+	}, "\n")
+	rt := &RuntimeSession{
+		manager:                     NewManager(nil, nil),
+		session:                     Session{ID: "sess-overlap-window", Status: StatusRunning, Live: true},
+		lastInputText:               "second question",
+		notificationWindowInputText: "first unanswered question",
+		snapshotAtRoundStart:        previous,
+		snapshotAtRoundStartSet:     true,
+		visibleSnapshot:             previous,
+		visibleSnapshotSource:       source + ";cursor_line=2",
+		visibleSnapshotResponder:    responder,
+		visibleSnapshotCols:         120,
+		visibleSnapshotVersion:      2,
+	}
+
+	rt.MarkStructuredInputActivity("third question")
+
+	rt.mu.Lock()
+	if rt.notificationWindowInputText != "first unanswered question" {
+		got := rt.notificationWindowInputText
+		rt.mu.Unlock()
+		t.Fatalf("the oldest unanswered input must survive another overlapping input, got %q", got)
+	}
+	rt.visibleSnapshot = strings.Join([]string{
+		"› first unanswered question",
+		"• partial work",
+		"› second question",
+		"› third question",
+		"• final combined answer",
+	}, "\n")
+	rt.visibleSnapshotSource = source + ";cursor_line=4"
+	rt.visibleSnapshotResponder = responder
+	rt.visibleSnapshotCols = 120
+	content := rt.currentNotifyContentLocked()
+	rt.mu.Unlock()
+
+	want := strings.Join([]string{
+		"› first unanswered question",
+		"• partial work",
+		"› second question",
+		"› third question",
+		"• final combined answer",
+	}, "\n")
+	if content != want {
+		t.Fatalf("overlapping inputs must be emitted from the oldest unanswered anchor:\n%q\nwant:\n%q", content, want)
 	}
 }

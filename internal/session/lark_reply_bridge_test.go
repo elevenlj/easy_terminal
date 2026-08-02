@@ -787,6 +787,51 @@ func TestSubmitStructuredInputClearsPreviousNotificationBeforeEcho(t *testing.T)
 	}
 }
 
+func TestSubmitStructuredInputDoesNotTreatItsOwnEchoAsPreviousUnfinishedRound(t *testing.T) {
+	previousDelay := structuredInputEnterDelay
+	structuredInputEnterDelay = 0
+	defer func() { structuredInputEnterDelay = previousDelay }()
+
+	rt := &RuntimeSession{
+		manager:                 NewManager(nil, nil),
+		session:                 Session{ID: "sess-own-echo", Name: "TUI", Status: StatusWaiting, Live: true},
+		lastInputText:           "你好",
+		snapshotAtRoundStart:    "› 你好\n• previous completed answer",
+		snapshotAtRoundStartSet: true,
+		visibleSnapshot:         "› 你好\n• previous completed answer",
+		subscribers:             make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	ch, cancel := rt.SubscribeWithMode(false)
+	defer cancel()
+	go func() {
+		for ev := range ch {
+			if ev.Type == RuntimeEventSnapshotRequest {
+				rt.SetVisibleSnapshotWithSource("› 你好\n• previous completed answer\n› 你好", "browser:buffer")
+				return
+			}
+		}
+	}()
+	term := &recordingTerminal{readCh: make(chan []byte)}
+	term.onWrite = func(data string) {
+		if data == "你好" {
+			// PTY echo arrives before MarkStructuredInputActivity and changes the
+			// live status. It belongs to the new input, not the previous round.
+			rt.HandleOutput([]byte(data))
+		}
+	}
+	rt.terminal = term
+
+	if err := SubmitStructuredInput(rt, "你好"); err != nil {
+		t.Fatal(err)
+	}
+	rt.mu.Lock()
+	windowStart := rt.notificationWindowInputText
+	rt.mu.Unlock()
+	if windowStart != "" {
+		t.Fatalf("the new input's own echo must not preserve the completed previous input as an open window: %q", windowStart)
+	}
+}
+
 func TestSubmitStructuredInputRefreshesComposerBaselineBeforeEnter(t *testing.T) {
 	previousDelay := structuredInputEnterDelay
 	structuredInputEnterDelay = 0

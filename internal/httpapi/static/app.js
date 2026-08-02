@@ -122,6 +122,12 @@ function renderSessions() {
     el.onclick = () => selectSession(s.id);
     $("sessions").appendChild(el);
   }
+  renderActiveTitle();
+}
+
+function renderActiveTitle() {
+  const sess = currentSession();
+  $("active-title").textContent = sess ? `${sess.name}(${sess.status})` : "No session";
 }
 
 function currentSession() {
@@ -208,7 +214,6 @@ function selectSession(id) {
   const sess = state.sessions.find((s) => s.id === id);
   if (!sess) return;
   state.active = id;
-  $("active-title").textContent = `${sess.name}(${sess.status})`;
   renderSessions();
   if (sess.live) {
     connectWS(id);
@@ -930,6 +935,7 @@ function renderConfig() {
   $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
   $("cfg-auto-refresh-interval").value = cfg.lark_auto_refresh_interval_ms || 5000;
   $("cfg-lark-max-lines").value = cfg.lark_notify_max_lines;
+  $("cfg-lark-fallback-tail-lines").value = cfg.lark_notify_fallback_tail_lines || 100;
   $("cfg-lark-merge-wrapped-lines").checked = Boolean(cfg.lark_notify_merge_wrapped_lines);
   $("cfg-lark-app-id").value = cfg.lark_app_id || "";
   $("cfg-lark-app-secret").value = cfg.lark_app_secret || "";
@@ -1055,6 +1061,7 @@ function readConfigForm() {
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting", state.config?.conservative_waiting_transition_ms || 3000),
     lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval", state.config?.lark_auto_refresh_interval_ms || 5000),
     lark_notify_max_lines: readNumber("cfg-lark-max-lines", state.config?.lark_notify_max_lines || 100),
+    lark_notify_fallback_tail_lines: readNumber("cfg-lark-fallback-tail-lines", state.config?.lark_notify_fallback_tail_lines || 100),
     lark_notify_merge_wrapped_lines: $("cfg-lark-merge-wrapped-lines").checked,
     session_pre_start_command: $("cfg-prestart-command").value,
     lark_notify_drop_line_patterns: dropRules,

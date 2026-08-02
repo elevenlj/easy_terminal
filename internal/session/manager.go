@@ -1426,6 +1426,33 @@ func (rt *RuntimeSession) CachedCurrentRoundContent() string {
 	return rt.currentNotifyContentLocked()
 }
 
+// CurrentRoundDebug exposes the exact renderer boundary used by the
+// environment-gated E2E debug endpoint. It intentionally lives below the
+// runtime lock so a real browser/Codex test can diagnose anchor failures
+// without adding sensitive terminal text to normal service logs.
+func (rt *RuntimeSession) CurrentRoundDebug() map[string]any {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	policy := rt.notifyTextAnchorPolicyLocked()
+	return map[string]any{
+		"content":                   rt.currentNotifyContentLocked(),
+		"current_snapshot":          rt.visibleSnapshot,
+		"current_source":            rt.visibleSnapshotSource,
+		"previous_snapshot":         rt.previousNotifySnapshotLocked(),
+		"previous_source":           rt.snapshotAtRoundSource,
+		"last_input":                rt.lastInputText,
+		"window_start_input":        rt.notificationWindowInputText,
+		"anchor_allowed":            policy.allowed,
+		"anchor_identity":           policy.enforceIdentity,
+		"previous_guard_line":       policy.previousGuardLine,
+		"current_guard_line":        policy.currentGuardLine,
+		"previous_cursor_line":      policy.previousCursorLine,
+		"current_cursor_line":       policy.currentCursorLine,
+		"previous_snapshot_version": rt.snapshotAtRoundVersion,
+		"current_snapshot_version":  rt.visibleSnapshotVersion,
+	}
+}
+
 func (rt *RuntimeSession) CurrentVisibleContent() string {
 	rt.RequestFreshSnapshot(800 * time.Millisecond)
 	rt.mu.Lock()
@@ -1457,6 +1484,7 @@ func (rt *RuntimeSession) notifyTextAnchorPolicyLocked() notifyTextAnchorPolicy 
 		previousGuardLine:  -1,
 		currentGuardLine:   -1,
 		previousCursorLine: -1,
+		currentCursorLine:  -1,
 	}
 	previousSource := rt.lastNotifiedVisibleSnapshotSource
 	previousResponder := rt.lastNotifiedVisibleResponder
@@ -1494,6 +1522,7 @@ func (rt *RuntimeSession) notifyTextAnchorPolicyLocked() notifyTextAnchorPolicy 
 		policy.previousGuardLine = previousMetadata.anchorGuardLine
 		policy.currentGuardLine = currentMetadata.anchorGuardLine
 		policy.previousCursorLine = previousMetadata.cursorLine
+		policy.currentCursorLine = currentMetadata.cursorLine
 		return policy
 	}
 	if previousCols != 0 && rt.visibleSnapshotCols != 0 && previousCols != rt.visibleSnapshotCols {
@@ -1931,6 +1960,14 @@ func (rt *RuntimeSession) preferBrowserSnapshotSourceLocked(responder chan Runti
 }
 
 func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
+	rt.markStructuredInputActivity(text, nil)
+}
+
+func (rt *RuntimeSession) markStructuredInputActivityWithPreviousRoundState(text string, previousRoundUnfinished bool) {
+	rt.markStructuredInputActivity(text, &previousRoundUnfinished)
+}
+
+func (rt *RuntimeSession) markStructuredInputActivity(text string, previousRoundUnfinishedOverride *bool) {
 	rt.mu.Lock()
 	if rt.closed {
 		rt.mu.Unlock()
@@ -1945,7 +1982,13 @@ func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 	rt.inputRecordUnreliable = false
 	rt.inputBracketedPaste = false
 	rt.updateRecoveryFromSubmittedInputLocked(rt.lastInputText)
-	disabledNote, disabledOK := rt.markInputActivityLocked(true, previousInput)
+	var disabledNote WaitingNotification
+	var disabledOK bool
+	if previousRoundUnfinishedOverride != nil {
+		disabledNote, disabledOK = rt.markInputActivityLockedWithPreviousRoundState(true, previousInput, *previousRoundUnfinishedOverride)
+	} else {
+		disabledNote, disabledOK = rt.markInputActivityLocked(true, previousInput)
+	}
 	s := rt.session
 	sessionID := rt.session.ID
 	reportBrowserActive := rt.browserOwnsCurrentRoundLocked()
@@ -1957,6 +2000,12 @@ func (rt *RuntimeSession) MarkStructuredInputActivity(text string) {
 	if reportBrowserActive && rt.manager != nil {
 		rt.manager.BrowserActive(sessionID)
 	}
+}
+
+func (rt *RuntimeSession) structuredInputPreviousRoundUnfinished() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return !rt.closed && rt.session.Status == StatusRunning && strings.TrimSpace(rt.lastInputText) != "" && rt.snapshotAtRoundStartSet
 }
 
 func (rt *RuntimeSession) browserOwnsCurrentRoundLocked() bool {
@@ -2007,10 +2056,20 @@ func minDuration(a, b time.Duration) time.Duration {
 }
 
 func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput string) (WaitingNotification, bool) {
+	previousRoundUnfinished := rt.session.Status == StatusRunning && strings.TrimSpace(previousInput) != "" && rt.snapshotAtRoundStartSet
+	return rt.markInputActivityLockedWithPreviousRoundState(submitted, previousInput, previousRoundUnfinished)
+}
+
+func (rt *RuntimeSession) markInputActivityLockedWithPreviousRoundState(submitted bool, previousInput string, previousRoundUnfinished bool) (WaitingNotification, bool) {
 	var disabledNote WaitingNotification
 	disabledOK := false
 	rt.pendingTerminalInteraction = nil
 	if submitted {
+		previousRoundUnfinished = previousRoundUnfinished && strings.TrimSpace(previousInput) != "" && rt.snapshotAtRoundStartSet
+		windowStartInput := strings.TrimSpace(rt.notificationWindowInputText)
+		if windowStartInput == "" {
+			windowStartInput = strings.TrimSpace(previousInput)
+		}
 		rt.snapshotRoundGeneration++
 		rt.cancelSnapshotRequestsLocked(false)
 		overlapRunningCard := rt.notificationRunning && rt.lastNotifiedMessageID != ""
@@ -2018,21 +2077,19 @@ func (rt *RuntimeSession) markInputActivityLocked(submitted bool, previousInput 
 			disabledNote, disabledOK = rt.disabledNotificationLocked(rt.lastNotifiedMessageID)
 			rt.freezeNotificationMessageLocked(rt.lastNotifiedMessageID)
 		}
-		carryNotificationWindow := overlapRunningCard && rt.snapshotAtRoundStartSet && rt.notifyTextAnchorPolicyLocked().allowed
-		if carryNotificationWindow {
-			if strings.TrimSpace(rt.notificationWindowInputText) == "" {
-				rt.notificationWindowInputText = strings.TrimSpace(previousInput)
-			}
-			if strings.TrimSpace(rt.notificationWindowInputText) == "" {
-				rt.notificationWindowInputText = strings.TrimSpace(rt.lastInputText)
-			}
+		// Every structured Enter prepares a fresh renderer baseline containing
+		// the new active composer. If the prior round is still running, retain
+		// the oldest unanswered input as the logical notification-window start;
+		// otherwise this input starts a new window.
+		rt.snapshotAtRoundStart = rt.visibleSnapshot
+		rt.snapshotAtRoundSource = rt.visibleSnapshotSource
+		rt.snapshotAtRoundResponder = rt.visibleSnapshotResponder
+		rt.snapshotAtRoundCols = rt.visibleSnapshotCols
+		rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
+		rt.snapshotAtRoundStartSet = true
+		if previousRoundUnfinished {
+			rt.notificationWindowInputText = windowStartInput
 		} else {
-			rt.snapshotAtRoundStart = rt.visibleSnapshot
-			rt.snapshotAtRoundSource = rt.visibleSnapshotSource
-			rt.snapshotAtRoundResponder = rt.visibleSnapshotResponder
-			rt.snapshotAtRoundCols = rt.visibleSnapshotCols
-			rt.snapshotAtRoundVersion = rt.visibleSnapshotVersion
-			rt.snapshotAtRoundStartSet = true
 			rt.notificationWindowInputText = ""
 		}
 		rt.roundReply = nil
@@ -2187,20 +2244,49 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 	}
 	rt.mu.Unlock()
 	content, fresh := rt.currentRoundContentWithFreshSnapshot(800 * time.Millisecond)
+	rt.mu.Lock()
+	runningAtRefresh := rt.session.Status == StatusRunning
+	rt.mu.Unlock()
+	if suppressUpdateTip || runningAtRefresh {
+		rt.mu.Lock()
+		manualContent := pickManualRefreshNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
+		rt.mu.Unlock()
+		if strings.TrimSpace(manualContent) != "" {
+			content = manualContent
+		}
+	}
 	content = strings.TrimSpace(content)
 	rt.mu.Lock()
 	stale := rt.visibleSnapshotStaleForCurrentRoundLocked()
+	hasVisibleSnapshot := strings.TrimSpace(rt.visibleSnapshot) != ""
 	rt.mu.Unlock()
 	if !fresh && stale {
-		return errors.New("current visible snapshot is stale")
+		if !hasVisibleSnapshot {
+			return errors.New("current visible snapshot is stale and empty")
+		}
+		// A renderer may fail to answer after sleep/reconnect even though the
+		// runtime still has a useful cached screen. Manual refresh must never
+		// turn that into a blank card: force the bounded visible-tail fallback.
+		content = ""
 	}
 	hasSnapshotContent := content != ""
+	usedTailFallback := false
 	if !hasSnapshotContent {
-		content = strings.TrimSpace(rt.CurrentVisibleContent())
-		hasSnapshotContent = content != ""
+		rt.mu.Lock()
+		fallbackContent := pickLarkNotifyFallbackTailContent(rt.visibleSnapshot)
+		if suppressUpdateTip {
+			fallbackContent = pickLarkManualRefreshFallbackTailContent(rt.visibleSnapshot)
+		}
+		fallbackContent = strings.TrimSpace(fallbackContent)
+		rt.mu.Unlock()
+		if fallbackContent != "" {
+			content = fallbackContent
+			hasSnapshotContent = true
+			usedTailFallback = true
+		}
 	}
 	if !hasSnapshotContent {
-		content = "当前轮暂无内容"
+		content = EmptyNotificationPlaceholder
 	}
 	rt.mu.Lock()
 	lastInputText := rt.lastInputText
@@ -2212,7 +2298,8 @@ func (rt *RuntimeSession) refreshNotificationMessage(messageID string, suppressU
 		rt.mu.Unlock()
 		return errors.New("notification message is frozen")
 	}
-	if strings.TrimSpace(lastInputText) != "" && !hasReplyLine(content, lastInputText) {
+	if hasSnapshotContent && !usedTailFallback && strings.TrimSpace(lastInputText) != "" && !hasReplyLine(content, lastInputText) &&
+		!((suppressUpdateTip || runningAtRefresh) && containsTransientStatusLine(content)) {
 		rt.mu.Unlock()
 		return errors.New("current round has no reply content")
 	}
@@ -2983,6 +3070,25 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 					n.SessionID, version, shortNotifyHash(contentHash), n.SnapshotSource, len(n.Content), countLogLines(n.Content), previewLogText(n.Content, 160))
 			}
 		}
+		if !ok && (reason == "empty_content" || reason == "needs_more_snapshot") {
+			n, contentHash, ok = rt.fallbackTailWaitingNotificationCandidateLocked()
+			if ok {
+				policy := rt.notifyTextAnchorPolicyLocked()
+				currentAnchors := len(inputAnchorSpans(splitVisibleLines(rt.visibleSnapshot), rt.lastInputText))
+				previousAnchors := len(inputAnchorSpans(splitVisibleLines(rt.previousNotifySnapshotLocked()), rt.lastInputText))
+				log.Printf("waiting notification tail fallback ready session=%s version=%d lines=%d hash=%s snapshot_source=%s input_anchors=%d/%d anchor_allowed=%v identity=%v guard=%d/%d cursor=%d/%d window_start=%q",
+					n.SessionID, version, countLogLines(n.Content), shortNotifyHash(contentHash), n.SnapshotSource,
+					currentAnchors, previousAnchors, policy.allowed, policy.enforceIdentity, policy.previousGuardLine,
+					policy.currentGuardLine, policy.previousCursorLine, policy.currentCursorLine, rt.notificationWindowInputText)
+			}
+		}
+		if !ok && reason == "empty_content" {
+			n, contentHash, ok = rt.emptyWaitingNotificationCandidateLocked()
+			if ok {
+				log.Printf("waiting notification empty completion ready session=%s version=%d message=%s hash=%s",
+					n.SessionID, version, rt.lastNotifiedMessageID, shortNotifyHash(contentHash))
+			}
+		}
 		if !ok {
 			log.Printf("waiting notification not ready session=%s version=%d reason=%s status=%s live=%v notify_version=%d last_input=%q visible_len=%d round_len=%d",
 				rt.session.ID, version, reason, rt.session.Status, rt.session.Live, rt.notifyVersion, rt.lastInputText, len(rt.visibleSnapshot), len(rt.roundReply))
@@ -3358,6 +3464,71 @@ func (rt *RuntimeSession) fallbackWaitingNotificationCandidateLocked() (WaitingN
 	interaction := rt.notificationInteractionLocked(rt.lastNotifiedMessageID)
 	agentContext := rt.notificationAgentContextLocked()
 	return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: content, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: source, Interaction: interaction, AgentContext: agentContext}, contentHash, true, "ready"
+}
+
+func (rt *RuntimeSession) fallbackTailWaitingNotificationCandidateLocked() (WaitingNotification, string, bool) {
+	if !rt.fallbackTailRoundStartedLocked() {
+		return WaitingNotification{}, "", false
+	}
+	content := strings.TrimSpace(pickLarkNotifyFallbackTailContent(rt.visibleSnapshot))
+	if content == "" || !hasReplyLine(content, rt.lastInputText) {
+		return WaitingNotification{}, "", false
+	}
+	content = rt.stableNotifyContentForMessageLocked(rt.lastNotifiedMessageID, content)
+	contentHash := notifyContentHash(content)
+	if contentHash == rt.lastNotifiedRoundHash && !rt.notificationRunning {
+		return WaitingNotification{}, "", false
+	}
+	messageID := strings.TrimSpace(rt.lastNotifiedMessageID)
+	interaction := rt.notificationInteractionLocked(messageID)
+	agentContext := rt.notificationAgentContextLocked()
+	return WaitingNotification{
+		SessionID:          rt.session.ID,
+		Name:               rt.session.Name,
+		Content:            content,
+		ChatID:             rt.session.LarkChatID,
+		MentionOpenID:      rt.notificationMentionOpenID,
+		AutoSummaryEnabled: rt.autoSummaryEnabled,
+		MentionModeEnabled: rt.session.LarkMentionModeEnabled,
+		SnapshotSource:     rt.visibleSnapshotSource + ":tail_fallback",
+		Interaction:        interaction,
+		AgentContext:       agentContext,
+	}, contentHash, true
+}
+
+func (rt *RuntimeSession) fallbackTailRoundStartedLocked() bool {
+	input := strings.TrimSpace(rt.lastInputText)
+	if input == "" || len(rt.roundReply) > 0 {
+		return true
+	}
+	return containsInputEchoLine(trimVisibleText(rt.visibleSnapshot), input)
+}
+
+// emptyWaitingNotificationCandidateLocked closes an already-created running
+// card when the completed round contains no safe, meaningful text to publish.
+// It deliberately uses a neutral placeholder instead of falling back to raw
+// terminal history, which could belong to an earlier round.
+func (rt *RuntimeSession) emptyWaitingNotificationCandidateLocked() (WaitingNotification, string, bool) {
+	messageID := strings.TrimSpace(rt.lastNotifiedMessageID)
+	if !rt.notificationRunning || messageID == "" || rt.notificationMessageFrozenLocked(messageID) {
+		return WaitingNotification{}, "", false
+	}
+	content := EmptyNotificationPlaceholder
+	contentHash := notifyContentHash(content)
+	interaction := rt.notificationInteractionLocked(messageID)
+	agentContext := rt.notificationAgentContextLocked()
+	return WaitingNotification{
+		SessionID:          rt.session.ID,
+		Name:               rt.session.Name,
+		Content:            content,
+		ChatID:             rt.session.LarkChatID,
+		MentionOpenID:      rt.notificationMentionOpenID,
+		AutoSummaryEnabled: rt.autoSummaryEnabled,
+		MentionModeEnabled: rt.session.LarkMentionModeEnabled,
+		SnapshotSource:     rt.visibleSnapshotSource,
+		Interaction:        interaction,
+		AgentContext:       agentContext,
+	}, contentHash, true
 }
 
 func (rt *RuntimeSession) notifyContentNeedsMoreSnapshotLocked() bool {

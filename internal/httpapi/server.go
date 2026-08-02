@@ -184,6 +184,10 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if r.URL.Query().Get("debug") == "1" {
+			writeJSON(w, http.StatusOK, rt.CurrentRoundDebug(), nil)
+			return
+		}
 		content := rt.CachedCurrentRoundContent()
 		if r.URL.Query().Get("fresh") != "0" {
 			content = rt.CurrentRoundContent()

@@ -13,6 +13,7 @@ func identityAnchorPolicy(previousGuardLine, currentGuardLine int) notifyTextAnc
 		previousGuardLine:  previousGuardLine,
 		currentGuardLine:   currentGuardLine,
 		previousCursorLine: -1,
+		currentCursorLine:  -1,
 	}
 }
 
@@ -298,7 +299,7 @@ func TestComposerAnchorPolicyUsesGuardRelativeIdentity(t *testing.T) {
 		}
 	})
 
-	t.Run("same text at another relative line is rejected", func(t *testing.T) {
+	t.Run("same text at another relative line is accepted", func(t *testing.T) {
 		visible := strings.Join([]string{
 			"────────────────────────────────────────",
 			"    › " + input,
@@ -315,13 +316,183 @@ func TestComposerAnchorPolicyUsesGuardRelativeIdentity(t *testing.T) {
 			"",
 			policy,
 		)
-		if got != "" {
-			t.Fatalf("matching prompt text at a changed guard-relative line is historical/ambiguous: %q", got)
+		if got != "• CURRENT_REPLY_MUST_NOT_BE_ATTRIBUTED" {
+			t.Fatalf("renderer-relative position must not veto a matching input prompt: %q", got)
 		}
 	})
 }
 
-func TestHistoricalPromptGlyphCannotImpersonateInputWithoutCursorProof(t *testing.T) {
+func TestComposerAnchorPolicyAcceptsPromptSettledBelowPreEnterCursor(t *testing.T) {
+	const input = "你好"
+	previous := strings.Join([]string{
+		"› 你好",
+		"• historical answer",
+		"› 你好",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› 你好",
+		"• historical answer",
+		"────────────────────",
+		"› 你好",
+		"• CURRENT_REPLY_ONLY",
+	}, "\n")
+
+	policy := identityAnchorPolicy(0, 0)
+	policy.previousCursorLine = 2
+	policy.currentCursorLine = 4
+	got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy)
+	if got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("the submitted prompt should be found between the projected pre-Enter cursor and current cursor: %q", got)
+	}
+}
+
+func TestComposerCursorWindowUsesLatestMatchingPrompt(t *testing.T) {
+	const input = "你好"
+	previous := "› 你好"
+	visible := strings.Join([]string{
+		"────────────────────",
+		"› 你好",
+		"• CURRENT_REPLY_START",
+		"› 你好",
+		"• CURRENT_REPLY_END",
+	}, "\n")
+
+	policy := identityAnchorPolicy(0, 0)
+	policy.previousCursorLine = 0
+	policy.currentCursorLine = 4
+	got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy)
+	want := "• CURRENT_REPLY_END"
+	if got != want {
+		t.Fatalf("the latest prompt in the submitted cursor window must be used as the ambiguity fallback:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestComposerAnchorPolicyUsesNewInputPromptWhenTUIBaselineTextIsRedrawn(t *testing.T) {
+	const input = "hello"
+	previous := strings.Join([]string{
+		"› hello",
+		"• historical answer",
+		"Find and fix a bug in @filenamegpt-5.6-sol high fast · ~/project/easy_terminalhello",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› hello",
+		"• historical answer",
+		"────────────────────────────────────────",
+		"› hello",
+		"• CURRENT_REPLY_ONLY",
+	}, "\n")
+
+	policy := identityAnchorPolicy(0, 1)
+	policy.previousCursorLine = 2
+	got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy)
+	if got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("the newly-added Codex input prompt should recover a TUI-redrawn composer baseline: %q", got)
+	}
+}
+
+func TestComposerPromptRecoveryIgnoresGuardedWindow(t *testing.T) {
+	const input = "hello"
+	previous := strings.Join([]string{
+		"• historical answer",
+		"Find and fix a bug in @filenamegpt-5.6-sol high fast · ~/project/easy_terminalhello",
+	}, "\n")
+	visible := strings.Join([]string{
+		"────────────────────────────────────────",
+		"› hello",
+		"• CURRENT_REPLY_MUST_NOT_BE_ATTRIBUTED",
+	}, "\n")
+
+	policy := identityAnchorPolicy(0, 1)
+	policy.previousCursorLine = 1
+	if got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy); got != "• CURRENT_REPLY_MUST_NOT_BE_ATTRIBUTED" {
+		t.Fatalf("a matching input prompt must not be rejected by the guarded window: %q", got)
+	}
+}
+
+func TestComposerPromptRecoveryUsesLatestMatchingPromptFallback(t *testing.T) {
+	const input = "hello"
+	previous := strings.Join([]string{
+		"› hello",
+		"• historical answer",
+		"gpt-5.6-sol high fast · ~/project/easy_terminalhello",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› hello",
+		"• historical answer",
+		"────────────────────────────────────────",
+		"› hello",
+		"• CURRENT_REPLY_START",
+		"› hello",
+		"• CURRENT_REPLY_END",
+	}, "\n")
+
+	policy := identityAnchorPolicy(0, 1)
+	policy.previousCursorLine = 2
+	got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy)
+	want := "• CURRENT_REPLY_END"
+	if got != want {
+		t.Fatalf("prompt recovery should use the latest matching prompt when identity is ambiguous:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestComposerPromptRecoveryUsesLatestMatchWhenOccurrenceCountStaysEqual(t *testing.T) {
+	const input = "你好"
+	previous := strings.Join([]string{
+		"────────────────────",
+		"› 你好",
+		"• historical answer",
+		"› 你好",
+		"gpt-5.6-sol high fast · ~/project",
+	}, "\n")
+	visible := strings.Join([]string{
+		"────────────────────",
+		"› 你好",
+		"• historical answer",
+		"› 你好",
+		"• CURRENT_REPLY_ONLY",
+		"gpt-5.6-sol high fast · ~/project",
+	}, "\n")
+	policy := identityAnchorPolicy(0, 0)
+	policy.previousCursorLine = 4 // TUI footer, not the input row.
+	policy.currentCursorLine = 5
+
+	if got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy); got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("equal prompt counts must still use the latest guarded match, got %q", got)
+	}
+}
+
+func TestComposerPromptRecoveryUsesLatestMatchWhenHeaderRowsDisappear(t *testing.T) {
+	const input = "你好"
+	previous := strings.Join([]string{
+		"guard",
+		"banner row one",
+		"banner row two",
+		"› 你好",
+		"• historical answer one",
+		"› 你好",
+		"• historical answer two",
+		"› 你好",
+		"footer",
+	}, "\n")
+	visible := strings.Join([]string{
+		"guard",
+		"› 你好",
+		"• historical answer one",
+		"› 你好",
+		"• historical answer two",
+		"› 你好",
+		"• CURRENT_REPLY_ONLY",
+	}, "\n")
+	policy := identityAnchorPolicy(0, 0)
+	policy.previousCursorLine = 8
+	policy.currentCursorLine = 6
+
+	if got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy); got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("a redraw that removes header rows must still use the latest guarded input, got %q", got)
+	}
+}
+
+func TestSubmittedPromptGlyphDoesNotRequireCursorProof(t *testing.T) {
 	const input = "与本轮输入完全相同"
 	for _, prompt := range []string{"> ", "$ ", "› "} {
 		for _, cursorLine := range []int{-1, 1} {
@@ -332,11 +503,15 @@ func TestHistoricalPromptGlyphCannotImpersonateInputWithoutCursorProof(t *testin
 				policy := identityAnchorPolicy(0, 0)
 				policy.previousCursorLine = cursorLine
 
-				if got := visibleTextFromLastInputWithPolicy(visible, previous, input, policy); got != "" {
-					t.Fatalf("historical %q text without matching cursor proof must not become an input anchor: %q", prompt, got)
+				want := ""
+				if prompt == "> " || prompt == "› " {
+					want = "• HISTORICAL_TEXT_MUST_NOT_AUTHORIZE_THIS_REPLY"
 				}
-				if got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy); got != "" {
-					t.Fatalf("the unproved %q occurrence must fail closed through the full selector: %q", prompt, got)
+				if got := visibleTextFromLastInputWithPolicy(visible, previous, input, policy); got != want {
+					t.Fatalf("prompt %q cursor-independent result = %q, want %q", prompt, got, want)
+				}
+				if got := pickNotifyContentWithWindowAnchorPolicy(visible, previous, nil, input, "", policy); got != want {
+					t.Fatalf("full selector prompt %q result = %q, want %q", prompt, got, want)
 				}
 			})
 		}
@@ -364,6 +539,27 @@ func TestStrictInputAnchorsKeepStructuredCodexAndShellPrompts(t *testing.T) {
 				t.Fatalf("verified %s must remain a valid input anchor: %q", tt.name, got)
 			}
 		})
+	}
+}
+
+func TestStrictCodexComposerCursorProofDoesNotDependOnFooterWhitelist(t *testing.T) {
+	const input = "你好"
+	previous := strings.Join([]string{
+		"› 你好",
+		"› Use /skills to list available skills",
+	}, "\n")
+	visible := strings.Join([]string{
+		"› 你好",
+		"• CURRENT_REPLY_ONLY",
+		"› Use /skills to list available skills",
+	}, "\n")
+	policy := identityAnchorPolicy(0, 0)
+	policy.previousCursorLine = 0
+	policy.currentCursorLine = 2
+
+	want := "• CURRENT_REPLY_ONLY\n› Use /skills to list available skills"
+	if got := visibleTextFromLastInputWithPolicy(visible, previous, input, policy); got != want {
+		t.Fatalf("a prompt ending at the pre-Enter cursor is proven even when Codex adds an unknown footer hint:\n%q\nwant:\n%q", got, want)
 	}
 }
 
@@ -405,7 +601,7 @@ func TestStrictInputAnchorAcceptsWrappedAndMultilineComposerAtCursor(t *testing.
 	}
 }
 
-func TestStrictInputAnchorDoesNotDowngradeToOlderOccurrenceAtCursor(t *testing.T) {
+func TestStrictInputAnchorUsesNewestOccurrenceRegardlessOfCursor(t *testing.T) {
 	const input = "重复但只有最新一条才可能是 composer"
 	previous := strings.Join([]string{
 		"› " + input,
@@ -416,7 +612,7 @@ func TestStrictInputAnchorDoesNotDowngradeToOlderOccurrenceAtCursor(t *testing.T
 	policy := identityAnchorPolicy(0, 0)
 	policy.previousCursorLine = 0
 
-	if got := visibleTextFromLastInputWithPolicy(visible, previous, input, policy); got != "" {
-		t.Fatalf("cursor mismatch on the newest baseline occurrence must not downgrade to an older match: %q", got)
+	if got := visibleTextFromLastInputWithPolicy(visible, previous, input, policy); got != "• CURRENT_REPLY_MUST_NOT_BE_ATTRIBUTED" {
+		t.Fatalf("the newest matching input must be used regardless of cursor metadata: %q", got)
 	}
 }

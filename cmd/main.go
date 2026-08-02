@@ -35,6 +35,7 @@ const (
 	defaultConservativeWaitingTransitionMs = 500
 	defaultLarkAutoRefreshIntervalMs       = 5000
 	defaultLarkNotifyMaxLines              = 200
+	defaultLarkNotifyFallbackTailLines     = 100
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
 )
 
@@ -67,6 +68,7 @@ type Config struct {
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
+	LarkNotifyFallbackTailLines     int                                   `json:"lark_notify_fallback_tail_lines"`
 	LarkNotifyMergeWrappedLines     bool                                  `json:"lark_notify_merge_wrapped_lines"`
 	LarkNotifyDropLineRules         session.LarkNotifyDropLineRules       `json:"lark_notify_drop_line_patterns"`
 	SessionPreStartCommand          string                                `json:"session_pre_start_command"`
@@ -255,12 +257,16 @@ func loadConfig(path string) Config {
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = defaultLarkNotifyMaxLines
 	}
+	if cfg.LarkNotifyFallbackTailLines <= 0 {
+		cfg.LarkNotifyFallbackTailLines = defaultLarkNotifyFallbackTailLines
+	}
 	if strings.TrimSpace(cfg.LarkAutoSummaryPrompt) == "" {
 		cfg.LarkAutoSummaryPrompt = defaultLarkAutoSummaryPrompt
 	}
 	cfg.LarkNotifyDropLineRules = mergeRequiredLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules)
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(cfg.LarkSessionChatPrefix)
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	session.SetLarkNotifyFallbackTailLines(cfg.LarkNotifyFallbackTailLines)
 	session.SetLarkNotifyMergeWrappedLines(cfg.LarkNotifyMergeWrappedLines)
 	if err := session.SetLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules.Rules()); err != nil {
 		log.Printf("invalid lark_notify_drop_line_patterns: %v", err)
@@ -318,6 +324,7 @@ func defaultConfig() Config {
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+		LarkNotifyFallbackTailLines:     defaultLarkNotifyFallbackTailLines,
 		LarkNotifyMergeWrappedLines:     true,
 		LarkNotifyDropLineRules:         defaultLarkNotifyDropLineRules.Rules(),
 	}
@@ -414,7 +421,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	defer s.mu.Unlock()
 	oldCfg := *s.cfg
 	cfg := *s.cfg
-	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.LarkNotifyMaxLines <= 0 {
+	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.LarkNotifyMaxLines <= 0 || req.LarkNotifyFallbackTailLines <= 0 {
 		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
 	}
 	if req.SessionStartPresets == nil {
@@ -435,6 +442,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
 	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
 	cfg.LarkNotifyMaxLines = req.LarkNotifyMaxLines
+	cfg.LarkNotifyFallbackTailLines = req.LarkNotifyFallbackTailLines
 	cfg.LarkNotifyMergeWrappedLines = req.LarkNotifyMergeWrappedLines
 	cfg.LarkNotifyDropLineRules = req.LarkNotifyDropLineRules
 	cfg.SessionPreStartCommand = req.SessionPreStartCommand
@@ -461,6 +469,7 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
 	manager.SetNotifier(notifier)
 	session.SetLarkNotifyMaxLines(cfg.LarkNotifyMaxLines)
+	session.SetLarkNotifyFallbackTailLines(cfg.LarkNotifyFallbackTailLines)
 	session.SetLarkNotifyMergeWrappedLines(cfg.LarkNotifyMergeWrappedLines)
 	if err := session.SetLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules.Rules()); err != nil {
 		return err
@@ -494,6 +503,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		ConservativeWaitingTransitionMs: cfg.ConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       cfg.LarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              cfg.LarkNotifyMaxLines,
+		LarkNotifyFallbackTailLines:     cfg.LarkNotifyFallbackTailLines,
 		LarkNotifyMergeWrappedLines:     cfg.LarkNotifyMergeWrappedLines,
 		LarkNotifyDropLineRules:         cfg.LarkNotifyDropLineRules.Rules(),
 		SessionPreStartCommand:          cfg.SessionPreStartCommand,

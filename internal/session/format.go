@@ -16,12 +16,15 @@ var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2
 
 const (
 	defaultMaxLarkTextLines     = 300
+	defaultFallbackTailLines    = 100
+	maxInputAnchorRunes         = 30
 	maxLarkTextRunes            = 12000
 	larkTruncatedPrefix         = "[truncated]\n"
 	codexNoAnchorFallbackPrefix = "[missing input anchor; showing tail]\n"
 )
 
 var larkNotifyMaxLines atomic.Int64
+var larkNotifyFallbackTailLines atomic.Int64
 var larkNotifyDropLinePatterns atomic.Value
 var larkNotifyMergeWrappedLines atomic.Bool
 
@@ -34,6 +37,7 @@ type larkNotifyDropLinePattern struct {
 
 func init() {
 	larkNotifyMaxLines.Store(defaultMaxLarkTextLines)
+	larkNotifyFallbackTailLines.Store(defaultFallbackTailLines)
 	larkNotifyDropLinePatterns.Store([]larkNotifyDropLinePattern{})
 }
 
@@ -42,6 +46,13 @@ func SetLarkNotifyMaxLines(lines int) {
 		lines = defaultMaxLarkTextLines
 	}
 	larkNotifyMaxLines.Store(int64(lines))
+}
+
+func SetLarkNotifyFallbackTailLines(lines int) {
+	if lines <= 0 {
+		lines = defaultFallbackTailLines
+	}
+	larkNotifyFallbackTailLines.Store(int64(lines))
 }
 
 func SetLarkNotifyMergeWrappedLines(enabled bool) {
@@ -106,6 +117,37 @@ func sanitizeForLarkAudit(text string) string {
 func truncateForLark(text string) string {
 	text = truncateLinesFromTail(text, int(larkNotifyMaxLines.Load()), "")
 	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
+}
+
+// pickLarkNotifyFallbackTailContent is the explicit no-anchor fallback. It
+// keeps the newest configured number of visible lines while still applying
+// the same prompt cleanup, user filters, audit sanitization, and hard card
+// limits as an anchored notification.
+func pickLarkNotifyFallbackTailContent(visibleSnapshot string) string {
+	body := trimVisibleText(visibleSnapshot)
+	body = dropCodexPromptStatusLines(body)
+	body = applyConfiguredLarkNotifyFilters(body)
+	body = trimVisibleText(body)
+	if body == "" {
+		return ""
+	}
+	body = truncateLinesFromTail(body, int(larkNotifyFallbackTailLines.Load()), "")
+	return truncateForLark(sanitizeForLarkAudit(body))
+}
+
+// pickLarkManualRefreshFallbackTailContent preserves terminal state lines such
+// as Codex "Working (...)" for an explicit user refresh. User-configured
+// line/block filters still apply, so tool output suppression remains intact.
+func pickLarkManualRefreshFallbackTailContent(visibleSnapshot string) string {
+	body := trimVisibleText(visibleSnapshot)
+	body = dropCodexFooterStatusLines(body)
+	body = applyConfiguredLarkNotifyFilters(body)
+	body = trimVisibleText(body)
+	if body == "" {
+		return ""
+	}
+	body = truncateLinesFromTail(body, int(larkNotifyFallbackTailLines.Load()), "")
+	return truncateForLark(sanitizeForLarkAudit(body))
 }
 
 func applyConfiguredLarkNotifyFilters(text string) string {
@@ -458,10 +500,17 @@ type notifyTextAnchorPolicy struct {
 	previousGuardLine  int
 	currentGuardLine   int
 	previousCursorLine int
+	currentCursorLine  int
 }
 
 func permissiveNotifyTextAnchorPolicy(allowed bool) notifyTextAnchorPolicy {
-	return notifyTextAnchorPolicy{allowed: allowed, previousGuardLine: -1, currentGuardLine: -1, previousCursorLine: -1}
+	return notifyTextAnchorPolicy{
+		allowed:            allowed,
+		previousGuardLine:  -1,
+		currentGuardLine:   -1,
+		previousCursorLine: -1,
+		currentCursorLine:  -1,
+	}
 }
 
 func pickNotifyContentWithWindow(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string) string {
@@ -484,6 +533,32 @@ func pickNotifyContentWithWindowAnchorPolicy(visibleSnapshot string, previousVis
 	}
 	body = trimVisibleText(body)
 	body = dropCodexPromptStatusLines(body)
+	body = applyConfiguredLarkNotifyFilters(body)
+	body = trimVisibleText(body)
+	return truncateForLark(sanitizeForLarkAudit(body))
+}
+
+// pickManualRefreshNotifyContentWithWindowAnchorPolicy uses exactly the same
+// submitted-input boundary as ordinary notifications, but keeps transient TUI
+// state such as "Working (...)" so an explicit refresh reflects what is on the
+// terminal right now.
+func pickManualRefreshNotifyContentWithWindowAnchorPolicy(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, windowStartInputText string, anchorPolicy notifyTextAnchorPolicy) string {
+	if isRawLarkNotifyInput(lastInputText) {
+		return pickRawNotifyContentWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
+	}
+	inputText := strings.TrimSpace(windowStartInputText)
+	if inputText == "" {
+		inputText = strings.TrimSpace(lastInputText)
+	}
+	if _, ok := newestSubmittedInputAnchorSpan(strings.Split(visibleSnapshot, "\n"), inputText); !ok {
+		return ""
+	}
+	body, _ := selectNotifyBodyWithWindowAnchorPolicy(visibleSnapshot, previousVisibleSnapshot, roundReply, lastInputText, windowStartInputText, anchorPolicy)
+	if body == "" {
+		return ""
+	}
+	body = trimVisibleText(body)
+	body = dropCodexFooterStatusLines(body)
 	body = applyConfiguredLarkNotifyFilters(body)
 	body = trimVisibleText(body)
 	return truncateForLark(sanitizeForLarkAudit(body))
@@ -676,18 +751,25 @@ func currentWindowVisibleText(visibleSnapshot string, previousVisibleSnapshot st
 	if visibleSnapshot == "" {
 		return "", false
 	}
-	// The input echo is a stronger round boundary than a visual diff. A resize
-	// can reflow every physical line and make the whole screen look changed.
-	if anchorPolicy.allowed && strings.TrimSpace(previousVisibleSnapshot) != "" {
-		if body := visibleTextFromInputStartWithPolicy(visibleSnapshot, previousVisibleSnapshot, windowStartInputText, anchorPolicy); strings.TrimSpace(body) != "" {
-			return trimVisibleText(body), true
-		}
+	// A submitted prompt is the only round boundary. Renderer epochs, guards,
+	// cursor projections, visual diffs and previous-output tails must not veto or
+	// replace an explicit `›/> + input` match.
+	if body := visibleTextFromSubmittedInputStart(visibleSnapshot, windowStartInputText); strings.TrimSpace(body) != "" {
+		return trimVisibleText(body), true
 	}
+	// Selection menus are interactive terminal state rather than an alternative
+	// round anchor. They still need to render immediately for /model, /resume,
+	// reasoning, and similar commands.
 	if body := codexTerminalInteractionVisibleBlock(visibleSnapshot, previousVisibleSnapshot, windowStartInputText); body != "" {
 		if anchorPolicy.allowed || codexTerminalInteractionChangedSinceBaseline(visibleSnapshot, previousVisibleSnapshot, windowStartInputText) {
 			return body, true
 		}
 	}
+	if containsSubmittedInputPrompt(visibleSnapshot) {
+		return "", false
+	}
+	// Non-agent terminals do not have a Codex `›/>` composer. Preserve their
+	// existing shell/diff behavior without using it to identify an agent round.
 	if codexTerminalInteractionContextRejected(visibleSnapshot, previousVisibleSnapshot, windowStartInputText) {
 		return "", false
 	}
@@ -704,25 +786,32 @@ func currentWindowVisibleText(visibleSnapshot string, previousVisibleSnapshot st
 	return "", false
 }
 
+func visibleTextFromSubmittedInputStart(visibleSnapshot string, inputText string) string {
+	lines := strings.Split(visibleSnapshot, "\n")
+	span, ok := newestSubmittedInputAnchorSpan(lines, inputText)
+	if !ok {
+		return ""
+	}
+	return trimVisibleText(strings.Join(lines[span.start:], "\n"))
+}
+
 func currentRoundVisibleText(visibleSnapshot string, previousVisibleSnapshot string, roundReply []byte, lastInputText string, anchorPolicy notifyTextAnchorPolicy) (string, bool) {
 	visibleSnapshot = trimVisibleText(visibleSnapshot)
 	if visibleSnapshot == "" {
 		return "", false
 	}
-	if strings.TrimSpace(lastInputText) != "" && anchorPolicy.allowed && strings.TrimSpace(previousVisibleSnapshot) != "" {
+	if strings.TrimSpace(lastInputText) != "" {
 		if body := visibleTextFromLastInputWithPolicy(visibleSnapshot, previousVisibleSnapshot, lastInputText, anchorPolicy); strings.TrimSpace(body) != "" {
 			return trimVisibleText(body), true
-		}
-		if !anchorPolicy.enforceIdentity {
-			if body := visibleTextAfterLastInputPrompt(visibleSnapshot, previousVisibleSnapshot, lastInputText); strings.TrimSpace(body) != "" {
-				return trimVisibleText(body), true
-			}
 		}
 	}
 	if body := codexTerminalInteractionVisibleBlock(visibleSnapshot, previousVisibleSnapshot, lastInputText); body != "" {
 		if anchorPolicy.allowed || codexTerminalInteractionChangedSinceBaseline(visibleSnapshot, previousVisibleSnapshot, lastInputText) {
 			return body, true
 		}
+	}
+	if containsSubmittedInputPrompt(visibleSnapshot) {
+		return "", false
 	}
 	if codexTerminalInteractionContextRejected(visibleSnapshot, previousVisibleSnapshot, lastInputText) {
 		return "", false
@@ -1081,6 +1170,54 @@ func visibleTextFromInputStartWithPolicy(visibleSnapshot string, previousVisible
 	return trimVisibleText(strings.Join(lines[span.start:], "\n"))
 }
 
+// visibleTextFromWindowStartWithPolicy locates the oldest still-open input
+// when another input is submitted before the previous round has completed.
+// In a strict renderer snapshot the active composer is at the baseline cursor,
+// so the open-window anchor is the newest matching prompt before that cursor.
+func visibleTextFromWindowStartWithPolicy(visibleSnapshot string, previousVisibleSnapshot string, inputText string, anchorPolicy notifyTextAnchorPolicy) string {
+	if !anchorPolicy.enforceIdentity {
+		currentLines := strings.Split(visibleSnapshot, "\n")
+		current := inputAnchorSpans(currentLines, inputText)
+		previous := inputAnchorSpans(strings.Split(previousVisibleSnapshot, "\n"), inputText)
+		if len(previous) == 0 || len(current) < len(previous) {
+			return ""
+		}
+		// The window start is intentionally no longer the active composer. Map
+		// its newest baseline occurrence by ordinal instead of applying the
+		// current-round cursor proof used for lastInputText.
+		return trimVisibleText(strings.Join(currentLines[current[len(previous)-1].start:], "\n"))
+	}
+	currentLines := strings.Split(visibleSnapshot, "\n")
+	previousLines := strings.Split(previousVisibleSnapshot, "\n")
+	current := inputAnchorSpans(currentLines, inputText)
+	previous := inputAnchorSpans(previousLines, inputText)
+	if len(current) == 0 || len(previous) == 0 || anchorPolicy.previousCursorLine < 0 {
+		return ""
+	}
+	baselineIndex := -1
+	for i := len(previous) - 1; i >= 0; i-- {
+		if previous[i].end < anchorPolicy.previousCursorLine {
+			baselineIndex = i
+			break
+		}
+	}
+	if baselineIndex < 0 {
+		return ""
+	}
+	baseline := previous[baselineIndex]
+	matches := make([]inputAnchorSpan, 0, 1)
+	for _, candidate := range current {
+		if anchorPolicy.sameGuardRelativeLine(baseline.start, candidate.start) &&
+			anchorPolicy.sameGuardRelativeLine(baseline.end, candidate.end) {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) != 1 {
+		return ""
+	}
+	return trimVisibleText(strings.Join(currentLines[matches[0].start:], "\n"))
+}
+
 type inputAnchorSpan struct {
 	start int
 	end   int
@@ -1104,56 +1241,187 @@ func newestInputAnchorSpan(currentLines, previousLines []string, inputText strin
 }
 
 func newestInputAnchorSpanWithPolicy(currentLines, previousLines []string, inputText string, anchorPolicy notifyTextAnchorPolicy) (inputAnchorSpan, bool) {
-	if !anchorPolicy.allowed {
+	// Input prompt text is the sole boundary identity. The caller intentionally
+	// ignores renderer/baseline metadata and always chooses the newest match.
+	if span, ok := newestSubmittedInputAnchorSpan(currentLines, inputText); ok {
+		return span, true
+	}
+	// Keep prompt matching for ordinary shells, which have no Codex composer.
+	// This path is never allowed to replace a missing `›/>` agent anchor.
+	if containsSubmittedInputPrompt(strings.Join(currentLines, "\n")) || !anchorPolicy.allowed {
 		return inputAnchorSpan{}, false
 	}
 	current := inputAnchorSpans(currentLines, inputText)
 	if len(current) == 0 {
 		return inputAnchorSpan{}, false
 	}
-	if strings.TrimSpace(strings.Join(previousLines, "\n")) != "" {
-		previous := inputAnchorSpans(previousLines, inputText)
-		if anchorPolicy.enforceIdentity {
-			previous = baselineInputAnchorSpansWithCursorProof(previous, anchorPolicy.previousCursorLine)
-			if len(previous) == 0 || !inputAnchorAtActiveBaselineTail(previousLines, previous[len(previous)-1]) {
-				return inputAnchorSpan{}, false
-			}
-			baseline := previous[len(previous)-1]
-			matches := make([]inputAnchorSpan, 0, 1)
-			for _, candidate := range current {
-				if anchorPolicy.sameGuardRelativeLine(baseline.start, candidate.start) &&
-					anchorPolicy.sameGuardRelativeLine(baseline.end, candidate.end) {
-					matches = append(matches, candidate)
-				}
-			}
-			if len(matches) != 1 {
-				return inputAnchorSpan{}, false
-			}
-			return matches[0], true
-		}
-		if len(current) < len(previous) {
-			// A matching occurrence disappeared. We cannot prove that a
-			// remaining duplicate is the input that started this round.
+	previous := inputAnchorSpans(previousLines, inputText)
+	if anchorPolicy.enforceIdentity {
+		if len(previous) == 0 || anchorPolicy.previousCursorLine < 0 {
 			return inputAnchorSpan{}, false
 		}
-		if len(current) == len(previous) {
-			if len(previous) == 0 || !inputAnchorAtActiveBaselineTail(previousLines, previous[len(previous)-1]) {
-				// Equal occurrence counts are usable only when the newest baseline
-				// occurrence is the active composer line captured immediately before
-				// Enter. Otherwise it is merely historical scrollback.
-				return inputAnchorSpan{}, false
-			}
-			return current[len(previous)-1], true
+		baseline := previous[len(previous)-1]
+		if baseline.end != anchorPolicy.previousCursorLine {
+			return inputAnchorSpan{}, false
 		}
-		// Select the first occurrence added since the baseline. A response may
-		// quote the user's input again later, so blindly taking the last match
-		// could cut into the reply itself.
-		return current[len(previous)], true
+		matches := make([]inputAnchorSpan, 0, 1)
+		for _, candidate := range current {
+			if anchorPolicy.sameGuardRelativeLine(baseline.start, candidate.start) &&
+				anchorPolicy.sameGuardRelativeLine(baseline.end, candidate.end) {
+				matches = append(matches, candidate)
+			}
+		}
+		if len(matches) != 1 {
+			return inputAnchorSpan{}, false
+		}
+		return matches[0], true
 	}
-	// Without a baseline there is no evidence that any matching prompt belongs
-	// to this round rather than scrollback. Never guess, regardless of input
-	// length or whether the occurrence happens to be the first visible line.
+	if len(current) < len(previous) {
+		return inputAnchorSpan{}, false
+	}
+	if len(current) == len(previous) {
+		if len(previous) == 0 || !inputAnchorAtActiveBaselineTail(previousLines, previous[len(previous)-1]) {
+			return inputAnchorSpan{}, false
+		}
+		return current[len(previous)-1], true
+	}
+	return current[len(previous)], true
+}
+
+// newestSubmittedInputAnchorSpan implements the notification boundary in
+// three explicit passes, always scanning from the end of the terminal:
+//  1. exact one-line `›/> + full input`;
+//  2. exact full input after joining terminal soft-wrap continuation lines;
+//  3. the first 30 runes of the input, on one line or soft-wrapped.
+func newestSubmittedInputAnchorSpan(lines []string, inputText string) (inputAnchorSpan, bool) {
+	inputText = strings.TrimSpace(inputText)
+	if inputText == "" {
+		return inputAnchorSpan{}, false
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if rendered, ok := submittedInputPromptText(lines[i]); ok && anchorTextsEqual(rendered, inputText) {
+			return inputAnchorSpan{start: i, end: i}, true
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if end, ok := wrappedSubmittedInputEndAt(lines, i, inputText); ok {
+			return inputAnchorSpan{start: i, end: end}, true
+		}
+	}
+	prefix := inputAnchorText(inputText)
+	if prefix == inputText {
+		return inputAnchorSpan{}, false
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if rendered, ok := submittedInputPromptText(lines[i]); ok && anchorTextHasPrefix(rendered, prefix) {
+			return inputAnchorSpan{start: i, end: i}, true
+		}
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		if end, ok := wrappedSubmittedInputEndAt(lines, i, prefix); ok {
+			return inputAnchorSpan{start: i, end: end}, true
+		}
+	}
 	return inputAnchorSpan{}, false
+}
+
+func submittedInputPromptText(line string) (string, bool) {
+	trimmed := strings.TrimSpace(stripAnchorIgnorables(StripTerminalControls([]byte(line))))
+	for _, prompt := range []string{"›", "❯", "»", ">"} {
+		if rest, ok := trimPromptPrefix(trimmed, prompt); ok {
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+func containsSubmittedInputPrompt(text string) bool {
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if _, ok := submittedInputPromptText(line); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func wrappedSubmittedInputEndAt(lines []string, start int, inputText string) (int, bool) {
+	first, ok := submittedInputPromptText(lines[start])
+	if !ok {
+		return start, false
+	}
+	states := anchorPrefixStates(inputText, first)
+	if len(states) == 0 || anchorPrefixComplete(states) {
+		return start, false
+	}
+	for i := start + 1; i < len(lines); i++ {
+		fragment := strings.TrimSpace(lines[i])
+		if fragment == "" {
+			continue
+		}
+		states = extendAnchorPrefixStates(states, fragment)
+		if len(states) == 0 {
+			return start, false
+		}
+		if anchorPrefixComplete(states) {
+			return i, true
+		}
+	}
+	return start, false
+}
+
+func inputAnchorSpanEndsAtCursor(spans []inputAnchorSpan, cursorLine int) bool {
+	for _, span := range spans {
+		if span.end == cursorLine {
+			return true
+		}
+	}
+	return false
+}
+
+func latestCodexInputAnchorAfterGuard(lines []string, spans []inputAnchorSpan, guardLine int) (inputAnchorSpan, bool) {
+	for i := len(spans) - 1; i >= 0; i-- {
+		candidate := spans[i]
+		if candidate.end > guardLine && isCodexInputAnchorSpan(lines, candidate) {
+			return candidate, true
+		}
+	}
+	return inputAnchorSpan{}, false
+}
+
+func latestCodexInputAnchorAfterGuardWithCursorProof(lines []string, spans []inputAnchorSpan, policy notifyTextAnchorPolicy) (inputAnchorSpan, bool) {
+	if !policy.enforceIdentity || policy.currentCursorLine < 0 {
+		return inputAnchorSpan{}, false
+	}
+	return latestCodexInputAnchorAfterGuard(lines, spans, policy.currentGuardLine)
+}
+
+func submittedCodexInputAnchorInCursorWindow(lines []string, spans []inputAnchorSpan, policy notifyTextAnchorPolicy) (inputAnchorSpan, bool) {
+	if !policy.enforceIdentity || policy.previousGuardLine < 0 || policy.currentGuardLine < 0 ||
+		policy.previousCursorLine < policy.previousGuardLine || policy.currentCursorLine < 0 {
+		return inputAnchorSpan{}, false
+	}
+	projectedBaselineCursor := policy.currentGuardLine + (policy.previousCursorLine - policy.previousGuardLine)
+	if projectedBaselineCursor > policy.currentCursorLine {
+		return inputAnchorSpan{}, false
+	}
+	for i := len(spans) - 1; i >= 0; i-- {
+		candidate := spans[i]
+		if candidate.end < projectedBaselineCursor || candidate.end > policy.currentCursorLine {
+			continue
+		}
+		if isCodexInputAnchorSpan(lines, candidate) {
+			return candidate, true
+		}
+	}
+	return inputAnchorSpan{}, false
+}
+
+func isCodexInputAnchorSpan(lines []string, span inputAnchorSpan) bool {
+	if span.start < 0 || span.start >= len(lines) || span.end < span.start || span.end >= len(lines) {
+		return false
+	}
+	_, ok := agentInputPromptText(lines[span.start])
+	return ok
 }
 
 func baselineInputAnchorSpansWithCursorProof(spans []inputAnchorSpan, cursorLine int) []inputAnchorSpan {
@@ -1199,7 +1467,31 @@ func inputAnchorEndLine(lines []string, i int, lastInputText string) (int, bool)
 	if end, ok := wrappedInputEchoEndAt(lines, i, lastInputText); ok {
 		return end, true
 	}
+	// The browser normally restores xterm soft wraps before the snapshot is
+	// sent, and wrappedInputEchoEndAt handles DOM snapshots line by line. If a
+	// renderer redraw still changes or drops the tail of a long composer, use a
+	// bounded prefix as the identity anchor instead of requiring the entire
+	// submitted input to survive byte-for-byte.
+	anchorText := inputAnchorText(lastInputText)
+	if anchorText == strings.TrimSpace(lastInputText) {
+		return i, false
+	}
+	if renderedText, ok := inputEchoText(lines[i]); ok && anchorTextHasPrefix(renderedText, anchorText) {
+		return i, true
+	}
+	if end, ok := wrappedInputEchoEndAt(lines, i, anchorText); ok {
+		return end, true
+	}
 	return i, false
+}
+
+func inputAnchorText(text string) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) <= maxInputAnchorRunes {
+		return text
+	}
+	return string(runes[:maxInputAnchorRunes])
 }
 
 func visibleTextAfterLastInputPrompt(visibleSnapshot string, previousVisibleSnapshot string, lastInputText string) string {
@@ -1269,7 +1561,7 @@ func inputPromptReplyStarts(lines []string, lastInputText string) []inputPromptR
 				break
 			}
 			if startsCodexResponseBlock(candidate) {
-				if anchorTextsLikelySame(promptText, lastInputText) {
+				if inputAnchorTextsLikelySame(promptText, lastInputText) {
 					starts = append(starts, inputPromptReplyStart{responseLine: j, promptIndent: leadingHorizontalWhitespace(lines[i])})
 				}
 				break
@@ -1308,6 +1600,25 @@ func anchorTextsLikelySame(left string, right string) bool {
 	// Do not use generic edit-distance/prefix similarity here. Two adjacent
 	// user prompts commonly differ by only one word, and accepting an old 95%
 	// match is precisely how a previous reply can be mistaken for this round.
+	return false
+}
+
+func inputAnchorTextsLikelySame(renderedText string, inputText string) bool {
+	if anchorTextsLikelySame(renderedText, inputText) {
+		return true
+	}
+	anchorText := inputAnchorText(inputText)
+	return anchorText != strings.TrimSpace(inputText) && anchorTextHasPrefix(renderedText, anchorText)
+}
+
+func anchorTextHasPrefix(text string, prefix string) bool {
+	for _, textVariant := range anchorTextVariants(text) {
+		for _, prefixVariant := range anchorTextVariants(prefix) {
+			if strings.HasPrefix(textVariant, prefixVariant) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -1670,6 +1981,21 @@ func dropCodexPromptStatusLines(text string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if isPromptStatusLine(trimmed) || isTransientStatusLine(trimmed) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+// dropCodexFooterStatusLines removes only the persistent Codex footer (model,
+// effort, mode, and cwd). Unlike dropCodexPromptStatusLines it deliberately
+// keeps transient progress such as "Working (...)" for running-card refreshes.
+func dropCodexFooterStatusLines(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if isPromptStatusLine(strings.TrimSpace(line)) {
 			continue
 		}
 		kept = append(kept, line)

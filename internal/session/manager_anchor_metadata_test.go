@@ -290,7 +290,8 @@ func TestNotifyTextAnchorPolicyExposesV2GuardIdentity(t *testing.T) {
 	}
 
 	policy := rt.notifyTextAnchorPolicyLocked()
-	if !policy.allowed || !policy.enforceIdentity || policy.previousGuardLine != 23 || policy.currentGuardLine != 31 || policy.previousCursorLine != 27 {
+	if !policy.allowed || !policy.enforceIdentity || policy.previousGuardLine != 23 || policy.currentGuardLine != 31 ||
+		policy.previousCursorLine != 27 || policy.currentCursorLine != -1 {
 		t.Fatalf("unexpected v2 anchor policy: %#v", policy)
 	}
 
@@ -341,7 +342,7 @@ func TestManagerRejectsQuotedPreviousTailWhenCapacityGuardIsInactive(t *testing.
 	}
 }
 
-func TestManagerRejectsMarkdownQuoteAsInputWithoutBaselineCursorProof(t *testing.T) {
+func TestManagerAcceptsStructuredInputWithoutBaselineCursorProof(t *testing.T) {
 	const input = "与本轮输入完全相同"
 	responder := make(chan RuntimeEvent)
 	previousSource := anchorMetadataSourceWithBaseAndLine("browser:buffer", "21", "normal", false, true, 0) + ";cursor_line=-1"
@@ -359,8 +360,9 @@ func TestManagerRejectsMarkdownQuoteAsInputWithoutBaselineCursorProof(t *testing
 		visibleSnapshotCols:      120,
 	}
 
-	if got := rt.currentNotifyContentLocked(); got != "" {
-		t.Fatalf("a baseline Markdown quote without cursor proof must fail closed: %q", got)
+	want := "• HISTORICAL_QUOTE_MUST_NOT_AUTHORIZE_THIS_REPLY"
+	if got := rt.currentNotifyContentLocked(); got != want {
+		t.Fatalf("a matching > input prompt must not be rejected by cursor metadata: %q", got)
 	}
 }
 

@@ -2109,6 +2109,13 @@ func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenI
 	if pressEnter {
 		enterLen = len(structuredInputEnterSequence)
 	}
+	previousRoundUnfinished := false
+	if trackActivity && pressEnter {
+		// Capture this before writing the new text. The terminal echo itself can
+		// transition waiting -> running, but that must not make a completed prior
+		// round look like an overlapping unanswered round.
+		previousRoundUnfinished = rt.structuredInputPreviousRoundUnfinished()
+	}
 	log.Printf("lark reply bridge submitting structured input session=%s text_len=%d enter=%v enter_len=%d track_activity=%v", sessionID, len(text), pressEnter, enterLen, trackActivity)
 	if trackActivity && !pressEnter {
 		// Numeric/menu navigation does not submit a round. Preserve the screen
@@ -2133,7 +2140,7 @@ func submitStructuredInputWithMode(rt *RuntimeSession, text string, mentionOpenI
 		// screen that cannot contain the user's structured input.
 		rt.PrepareInputSnapshotBaselineFrom(responder)
 		rt.SetNotificationMentionOpenID(mentionOpenID)
-		rt.MarkStructuredInputActivity(text)
+		rt.markStructuredInputActivityWithPreviousRoundState(text, previousRoundUnfinished)
 	}
 	enter := structuredInputEnterSequence
 	if enter == "" {

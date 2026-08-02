@@ -224,6 +224,7 @@ const ids = [
   "cfg-conservative-waiting",
   "cfg-auto-refresh-interval",
   "cfg-lark-max-lines",
+  "cfg-lark-fallback-tail-lines",
   "cfg-lark-merge-wrapped-lines",
   "cfg-lark-app-id",
   "cfg-lark-app-secret",
@@ -417,6 +418,7 @@ const context = {
         conservative_waiting_transition_ms: 700,
         lark_auto_refresh_interval_ms: 5000,
         lark_notify_max_lines: 300,
+        lark_notify_fallback_tail_lines: 100,
         lark_notify_merge_wrapped_lines: false,
         lark_app_id: "app-id",
         lark_app_secret: "secret",
@@ -1164,6 +1166,10 @@ app.state.sessions = [{
 app.renderSessions();
 const card = elements.sessions.children[0];
 assert.ok(card.className.includes("session-running"), "running session card should have running class");
+assert.equal(elements["active-title"].textContent, "A(running)", "active title should show the latest session status");
+app.state.sessions[0].status = "waiting";
+app.renderSessions();
+assert.equal(elements["active-title"].textContent, "A(waiting)", "session refresh should update the active title status");
 const notify = card.querySelector(".notify-input");
 notify.checked = true;
 await notify.onchange({ stopPropagation() {}, target: notify });
@@ -1173,6 +1179,7 @@ await app.loadConfig();
 elements["cfg-fast-waiting"].value = "450";
 elements["cfg-conservative-waiting"].value = "900";
 elements["cfg-lark-max-lines"].value = "120";
+elements["cfg-lark-fallback-tail-lines"].value = "80";
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-app-secret"].value = "new-secret";
 elements["cfg-lark-receive-id"].value = "ou_new";
@@ -1292,6 +1299,7 @@ elements["cfg-fast-waiting"].value = "450";
 elements["cfg-conservative-waiting"].value = "";
 elements["cfg-auto-refresh-interval"].value = "6000";
 elements["cfg-lark-max-lines"].value = "";
+elements["cfg-lark-fallback-tail-lines"].value = "";
 elements["cfg-lark-merge-wrapped-lines"].checked = true;
 elements["cfg-lark-app-id"].value = "new-app";
 elements["cfg-lark-mention-enabled"].checked = false;
@@ -1319,6 +1327,7 @@ assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
 assert.equal(patchedConfig.conservative_waiting_transition_ms, 700);
 assert.equal(patchedConfig.lark_auto_refresh_interval_ms, 6000);
 assert.equal(patchedConfig.lark_notify_max_lines, 300);
+assert.equal(patchedConfig.lark_notify_fallback_tail_lines, 100);
 assert.equal(patchedConfig.lark_notify_merge_wrapped_lines, true);
 assert.equal(patchedConfig.lark_app_id, "new-app");
 assert.equal(patchedConfig.lark_mention_enabled, false);

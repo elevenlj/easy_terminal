@@ -319,7 +319,7 @@ func TestNotifyAfterStableDoesNotSendRoundReplyWhenSnapshotDoesNotShowInput(t *t
 	}
 }
 
-func TestNotifyIfStillWaitingDoesNotPatchWithUnanchoredInputOnlySnapshot(t *testing.T) {
+func TestNotifyIfStillWaitingDoesNotUseTailFallbackForUnanchoredInputOnlySnapshot(t *testing.T) {
 	notifier := &recordingNotifier{}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithWaitingTransitionDelays(20*time.Millisecond, 20*time.Millisecond), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -347,11 +347,77 @@ func TestNotifyIfStillWaitingDoesNotPatchWithUnanchoredInputOnlySnapshot(t *test
 	rt.notifyIfStillWaiting(version)
 
 	notes := notifier.notes()
-	if len(notes) != 0 {
-		t.Fatalf("input-only snapshot must not replace the card or leak terminal history, got %#v", notes)
+	if len(notes) != 1 {
+		t.Fatalf("input-only completed round should close the running card, got %#v", notes)
 	}
-	if !rt.notificationRunning {
-		t.Fatal("untrusted fallback must leave the existing running card unchanged")
+	if notes[0].MessageID != "running-card" || notes[0].Running || notes[0].Content != EmptyNotificationPlaceholder {
+		t.Fatalf("input-only completed round must not publish the input as a reply, got %#v", notes[0])
+	}
+	if rt.notificationRunning {
+		t.Fatal("input-only completed round should clear the runtime running-card state")
+	}
+}
+
+func TestNotifyIfStillWaitingClosesRunningCardWhenFilteredContentIsEmpty(t *testing.T) {
+	notifier := &recordingNotifier{messageID: "running-card"}
+	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager:               m,
+		session:               Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastNotifiedMessageID: "running-card",
+		lastNotifiedContent:   RunningNotificationPlaceholder,
+		notificationRunning:   true,
+		lastInputText:         "codex --dangerously-bypass-approvals-and-sandbox",
+		notifyVersion:         3,
+	}
+
+	rt.notifyIfStillWaitingWithMode(3, true, false)
+
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("empty completed round should close the existing running card, got %#v", notes)
+	}
+	if notes[0].MessageID != "running-card" || notes[0].Running {
+		t.Fatalf("empty completed round should patch the current card to waiting, got %#v", notes[0])
+	}
+	if notes[0].Content != EmptyNotificationPlaceholder {
+		t.Fatalf("empty completed round content = %q, want %q", notes[0].Content, EmptyNotificationPlaceholder)
+	}
+	if rt.notificationRunning {
+		t.Fatal("runtime should clear the running-card state after the empty completion patch")
+	}
+}
+
+func TestTailFallbackDoesNotPublishHistoryBeforeQueuedInputStarts(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:         NewManager(nil, nil),
+		session:         Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:   "hello",
+		visibleSnapshot: "› previous question\n• previous answer that must not become the hello reply",
+	}
+
+	rt.mu.Lock()
+	_, _, ok := rt.fallbackTailWaitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if ok {
+		t.Fatal("tail fallback must wait until the queued input has terminal evidence")
+	}
+}
+
+func TestTailFallbackAllowsStartedRoundWhenInputAnchorHasRolledOut(t *testing.T) {
+	rt := &RuntimeSession{
+		manager:         NewManager(nil, nil),
+		session:         Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:   "a long request whose input anchor rolled out",
+		roundReply:      []byte("current round produced terminal output"),
+		visibleSnapshot: "• current reply tail one\n• current reply tail two",
+	}
+
+	rt.mu.Lock()
+	n, _, ok := rt.fallbackTailWaitingNotificationCandidateLocked()
+	rt.mu.Unlock()
+	if !ok || n.Content != rt.visibleSnapshot {
+		t.Fatalf("a started round with a rolled-out input anchor should use the visible tail, got %#v", n)
 	}
 }
 
@@ -754,7 +820,7 @@ func TestWaitingNotificationUsesRoundStartSnapshotBeforeLastNotificationSnapshot
 	}
 }
 
-func TestWaitingNotificationFailsClosedWhenRoundBaselineIsEmpty(t *testing.T) {
+func TestWaitingNotificationUsesInputAnchorWhenRoundBaselineIsEmpty(t *testing.T) {
 	rt := &RuntimeSession{
 		manager:                     NewManager(nil, nil),
 		session:                     Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
@@ -770,8 +836,8 @@ func TestWaitingNotificationFailsClosedWhenRoundBaselineIsEmpty(t *testing.T) {
 	rt.mu.Lock()
 	n, _, ok := rt.waitingNotificationLocked()
 	rt.mu.Unlock()
-	if ok || n.Content != "" {
-		t.Fatalf("empty round baseline must not recover terminal history: ok=%v content=%q", ok, n.Content)
+	if !ok || n.Content != "first\nsecond" {
+		t.Fatalf("an explicit input prompt must work without a round baseline: ok=%v content=%q", ok, n.Content)
 	}
 }
 
@@ -850,7 +916,7 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 }
 
-func TestRefreshNotificationMessageFailsClosedWhenRoundBaselineIsEmpty(t *testing.T) {
+func TestRefreshNotificationMessageUsesInputAnchorWhenRoundBaselineIsEmpty(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -874,9 +940,9 @@ func TestRefreshNotificationMessageFailsClosedWhenRoundBaselineIsEmpty(t *testin
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	want := "当前轮暂无内容"
+	want := "first\nsecond"
 	if notes[0].Content != want {
-		t.Fatalf("manual refresh must not recover terminal history without a round baseline:\n%q\nwant:\n%q", notes[0].Content, want)
+		t.Fatalf("manual refresh should use the explicit input anchor without a round baseline:\n%q\nwant:\n%q", notes[0].Content, want)
 	}
 }
 
@@ -915,7 +981,7 @@ func TestRefreshNotificationMessageKeepsLongerContentWhenSnapshotRegressesToPref
 	}
 }
 
-func TestRefreshNotificationMessageRejectsStaleSnapshot(t *testing.T) {
+func TestRefreshNotificationMessageUsesCachedTailWhenFreshSnapshotIsUnavailable(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -930,15 +996,16 @@ func TestRefreshNotificationMessageRejectsStaleSnapshot(t *testing.T) {
 		visibleSnapshotVersion:  2,
 	}
 
-	if err := rt.RefreshNotificationMessage("bot-card", 1); err == nil {
-		t.Fatal("manual refresh should reject a stale current-round snapshot")
+	if err := rt.RefreshNotificationMessage("bot-card", 1); err != nil {
+		t.Fatal(err)
 	}
-	if got := notifier.count(); got != 0 {
-		t.Fatalf("stale manual refresh should not patch notification, got %d notes", got)
+	notes := notifier.notes()
+	if len(notes) != 1 || notes[0].Content != "> next question" {
+		t.Fatalf("stale manual refresh must use the cached visible tail instead of returning nothing, got %#v", notes)
 	}
 }
 
-func TestRefreshNotificationMessageDoesNotFallBackToUnchangedVisibleHistory(t *testing.T) {
+func TestRefreshNotificationMessageFallsBackToUnchangedVisibleTail(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	visible := "$ echo hello\nhello\n$"
@@ -958,15 +1025,12 @@ func TestRefreshNotificationMessageDoesNotFallBackToUnchangedVisibleHistory(t *t
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	if notes[0].Content != "当前轮暂无内容" {
-		t.Fatalf("empty diff should fail closed instead of leaking visible history, got %#v", notes[0])
-	}
-	if strings.Contains(notes[0].Content, "echo hello") || strings.Contains(notes[0].Content, "hello") {
-		t.Fatalf("unchanged visible history leaked into the refreshed card: %#v", notes[0])
+	if notes[0].Content != visible {
+		t.Fatalf("empty diff should use the latest visible tail, got %#v", notes[0])
 	}
 }
 
-func TestRefreshNotificationMessageShowsNoCurrentContentForUnbaselinedOrdinaryRound(t *testing.T) {
+func TestRefreshNotificationMessageUsesVisibleTailForUnbaselinedOrdinaryRound(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	m := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
 	rt := &RuntimeSession{
@@ -987,11 +1051,9 @@ func TestRefreshNotificationMessageShowsNoCurrentContentForUnbaselinedOrdinaryRo
 	if len(notes) != 1 {
 		t.Fatalf("expected one manual refresh update, got %#v", notes)
 	}
-	if notes[0].Content != "当前轮暂无内容" {
-		t.Fatalf("an unbaselined manual refresh must show the empty-round placeholder, got %#v", notes[0])
-	}
-	if strings.Contains(notes[0].Content, "OLD_HISTORY_MUST_NOT_LEAK") || strings.Contains(notes[0].Content, "untrusted reply") {
-		t.Fatalf("unbaselined terminal history leaked into the refreshed card: %#v", notes[0])
+	want := "• untrusted reply"
+	if notes[0].Content != want {
+		t.Fatalf("an unbaselined manual refresh should use the explicit input anchor, got %#v", notes[0])
 	}
 }
 
@@ -1123,8 +1185,8 @@ func TestInputAnchorDoesNotCrossRendererWhenBaselineChanged(t *testing.T) {
 	if got := content(firstRenderer); got != "• CURRENT_REPLY_ONLY" {
 		t.Fatalf("same-renderer input anchor should remain available, got %q", got)
 	}
-	if got := content(secondRenderer); got != "" {
-		t.Fatalf("a different renderer cannot prove that an input occurrence is new: %q", got)
+	if got := content(secondRenderer); got != "• CURRENT_REPLY_ONLY" {
+		t.Fatalf("renderer identity must not veto an explicit input occurrence: %q", got)
 	}
 }
 
@@ -3237,7 +3299,7 @@ func TestNotifyIfStillWaitingRetriesUntilCurrentRoundIsReady(t *testing.T) {
 	}
 }
 
-func TestManualRefreshSkipsCodexTUIStatusOnlySnapshot(t *testing.T) {
+func TestManualRefreshKeepsWorkingBelowInputAnchor(t *testing.T) {
 	notifier := &recordingNotifier{messageID: "bot-card"}
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil, WithNotifier(notifier)),
@@ -3262,8 +3324,43 @@ func TestManualRefreshSkipsCodexTUIStatusOnlySnapshot(t *testing.T) {
 	if len(notes) != 1 {
 		t.Fatalf("status-only manual refresh should update the card once, got %#v", notes)
 	}
-	if notes[0].Content != "当前轮暂无内容" {
-		t.Fatalf("status-only manual refresh should fail closed with the empty-round placeholder, got %#v", notes[0])
+	want := strings.Join([]string{
+		"• Working (1s • esc to interrupt)",
+		"1 background terminal running · /ps to view · /stop to close",
+		"› Run /review on my current changes",
+	}, "\n")
+	if notes[0].Content != want {
+		t.Fatalf("manual refresh must keep the terminal state below the input anchor:\n%q\nwant:\n%q", notes[0].Content, want)
+	}
+}
+
+func TestManualRefreshEmptyAnchorReturnsConfiguredLastOneHundredLines(t *testing.T) {
+	SetLarkNotifyFallbackTailLines(100)
+	t.Cleanup(func() { SetLarkNotifyFallbackTailLines(defaultFallbackTailLines) })
+	notifier := &recordingNotifier{messageID: "bot-card"}
+	lines := make([]string, 105)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("visible terminal line %03d", i+1)
+	}
+	rt := &RuntimeSession{
+		manager:                NewManager(nil, nil, WithNotifier(notifier)),
+		session:                Session{ID: "sess-1", Name: "A", Status: StatusWaiting, Live: true, NotifyOnWaiting: true},
+		lastInputText:          "missing anchor input",
+		lastNotifiedMessageID:  "bot-card",
+		visibleSnapshot:        strings.Join(lines, "\n"),
+		visibleSnapshotVersion: 1,
+	}
+
+	if err := rt.RefreshNotificationMessage("bot-card"); err != nil {
+		t.Fatal(err)
+	}
+	notes := notifier.notes()
+	if len(notes) != 1 {
+		t.Fatalf("expected one refresh update, got %#v", notes)
+	}
+	gotLines := strings.Split(notes[0].Content, "\n")
+	if len(gotLines) != 100 || gotLines[0] != "visible terminal line 006" || gotLines[99] != "visible terminal line 105" {
+		t.Fatalf("manual refresh fallback must contain the newest 100 lines, got first=%q last=%q count=%d", gotLines[0], gotLines[len(gotLines)-1], len(gotLines))
 	}
 }
 

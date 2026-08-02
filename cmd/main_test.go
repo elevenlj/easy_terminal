@@ -108,8 +108,8 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("LARK_NOTIFY_MERGE_WRAPPED_LINES", "")
 
 	cfg := loadConfig(filepath.Join(t.TempDir(), "config.local.json"))
-	if cfg.FastWaitingTransitionMs != 500 || cfg.ConservativeWaitingTransitionMs != 500 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 200 {
-		t.Fatalf("numeric defaults = %d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines)
+	if cfg.FastWaitingTransitionMs != 500 || cfg.ConservativeWaitingTransitionMs != 500 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 200 || cfg.LarkNotifyFallbackTailLines != 100 {
+		t.Fatalf("numeric defaults = %d,%d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines, cfg.LarkNotifyFallbackTailLines)
 	}
 	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
 		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)
@@ -235,6 +235,7 @@ func TestConfigDirMissingFileDoesNotFallBackToDefaultConfig(t *testing.T) {
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
+		LarkNotifyFallbackTailLines:     defaultLarkNotifyFallbackTailLines,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -262,6 +263,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		ConservativeWaitingTransitionMs: 700,
 		LarkAutoRefreshIntervalMs:       5000,
 		LarkNotifyMaxLines:              300,
+		LarkNotifyFallbackTailLines:     100,
 	}
 	mgr := session.NewManager(nil, nil)
 	svc := &appConfigService{path: path, cfg: &cfg, manager: mgr}
@@ -278,6 +280,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		ConservativeWaitingTransitionMs: 900,
 		LarkAutoRefreshIntervalMs:       6000,
 		LarkNotifyMaxLines:              120,
+		LarkNotifyFallbackTailLines:     80,
 		LarkNotifyMergeWrappedLines:     true,
 		LarkNotifyDropLineRules: session.LarkNotifyDropLineRules{
 			{Title: "noise", Kind: "block_head", Pattern: "noise", Action: "keep_head"},
@@ -292,7 +295,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" || got.LarkAutoSummaryPrompt != "总结上一轮输出" || !got.LarkNotifyMergeWrappedLines {
+	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkNotifyFallbackTailLines != 80 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" || got.LarkAutoSummaryPrompt != "总结上一轮输出" || !got.LarkNotifyMergeWrappedLines {
 		t.Fatalf("unexpected runtime config: %#v", got)
 	}
 	b, err := os.ReadFile(path)
@@ -303,7 +306,7 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if err := json.Unmarshal(b, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.FastWaitingTransitionMs != 450 || saved.LarkAutoRefreshIntervalMs != 6000 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
+	if saved.FastWaitingTransitionMs != 450 || saved.LarkAutoRefreshIntervalMs != 6000 || saved.LarkNotifyFallbackTailLines != 80 || saved.SessionPreStartCommand != "source ~/.zshrc" || saved.LarkAppSecret != "secret" {
 		t.Fatalf("config file was not updated: %#v", saved)
 	}
 	if saved.LarkIgnoreMessagePrefix != "/silent" {

@@ -192,4 +192,7 @@ type WaitingRunningNotifier interface {
 	UpdateWaitingRunning(WaitingNotification, bool) error
 }
 
-const RunningNotificationPlaceholder = "正在执行中，请稍等。"
+const (
+	RunningNotificationPlaceholder = "正在执行中，请稍等。"
+	EmptyNotificationPlaceholder   = "当前轮暂无内容"
+)
