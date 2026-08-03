@@ -118,6 +118,9 @@ func run() error {
 	}
 	wd, _ := os.Getwd()
 	log.Printf("easy_terminal runtime_logic=%s pid=%d cwd=%s", runtimeLogicVersion, os.Getpid(), wd)
+	if err := session.EnsureCodexTurnHook(); err != nil {
+		log.Printf("failed to install Codex turn hook: %v", err)
+	}
 
 	st, err := store.Open(dbPath)
 	if err != nil {

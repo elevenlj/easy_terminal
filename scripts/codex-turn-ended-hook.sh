@@ -17,6 +17,15 @@ if [ "$#" -gt 0 ] && [ -n "$1" ]; then
   "$original_notify" "$@" >/dev/null 2>&1 &
 fi
 
+payload='{}'
+for arg in "$@"; do
+  payload="$arg"
+done
+case "$payload" in
+  \{*\}) ;;
+  *) payload='{}' ;;
+esac
+
 if [ -z "${EASY_TERMINAL_HOOK_URL:-}" ] || [ -z "${EASY_TERMINAL_SESSION_ID:-}" ] || [ -z "${EASY_TERMINAL_HOOK_TOKEN:-}" ]; then
 	log_hook "callback skipped: Easy Terminal environment is unavailable"
   exit 0
@@ -26,5 +35,5 @@ status=$(/usr/bin/curl --silent --show-error --max-time 2 -o /dev/null -w '%{htt
   -X POST "${EASY_TERMINAL_HOOK_URL}/api/sessions/${EASY_TERMINAL_SESSION_ID}/hook/turn-ended" \
   -H "Authorization: Bearer ${EASY_TERMINAL_HOOK_TOKEN}" \
   -H "Content-Type: application/json" \
-  --data '{}' 2>/dev/null || true)
+  --data-binary "$payload" 2>/dev/null || true)
 log_hook "callback completed: HTTP ${status:-000}"

@@ -4,6 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -17,6 +21,98 @@ func newRecoveryKey() string {
 		return hex.EncodeToString(b[:])
 	}
 	return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+}
+
+const easyTerminalCodexStopHookCommand = `if [ -z "${EASY_TERMINAL_HOOK_URL:-}" ] || [ -z "${EASY_TERMINAL_SESSION_ID:-}" ] || [ -z "${EASY_TERMINAL_HOOK_TOKEN:-}" ]; then exit 0; fi; /usr/bin/curl --silent --max-time 2 -o /dev/null -X POST "${EASY_TERMINAL_HOOK_URL}/api/sessions/${EASY_TERMINAL_SESSION_ID}/hook/turn-ended" -H "X-Easy-Terminal-Hook-Token: ${EASY_TERMINAL_HOOK_TOKEN}" -H 'Content-Type: application/json' --data-binary @- >/dev/null 2>&1 || true`
+
+// EnsureCodexTurnHook adds an idempotent Stop hook without replacing any
+// existing Codex hooks. The hook is inert outside Easy Terminal because the
+// required per-terminal environment variables are absent.
+func EnsureCodexTurnHook() error {
+	home := defaultCodexHome()
+	if home == "" {
+		return errors.New("cannot resolve default Codex home")
+	}
+	path := filepath.Join(home, "hooks.json")
+	mode := os.FileMode(0o600)
+	root := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if info, statErr := os.Stat(path); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := json.Unmarshal(data, &root); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok {
+		if _, exists := root["hooks"]; exists {
+			return fmt.Errorf("parse %s: hooks must be an object", path)
+		}
+		hooks = map[string]any{}
+		root["hooks"] = hooks
+	}
+	stop, ok := hooks["Stop"].([]any)
+	if !ok {
+		if _, exists := hooks["Stop"]; exists {
+			return fmt.Errorf("parse %s: hooks.Stop must be an array", path)
+		}
+		stop = []any{}
+	}
+	if containsCodexTurnHook(stop) {
+		return nil
+	}
+	hooks["Stop"] = append(stop, map[string]any{
+		"hooks": []any{map[string]any{
+			"type":    "command",
+			"command": easyTerminalCodexStopHookCommand,
+			"timeout": 5,
+		}},
+	})
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(home, ".hooks.json.easy-terminal-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func containsCodexTurnHook(groups []any) bool {
+	for _, group := range groups {
+		groupMap, _ := group.(map[string]any)
+		handlers, _ := groupMap["hooks"].([]any)
+		for _, handler := range handlers {
+			handlerMap, _ := handler.(map[string]any)
+			command, _ := handlerMap["command"].(string)
+			if command == easyTerminalCodexStopHookCommand {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (rt *RuntimeSession) MarkAgentExitActivity() {
@@ -459,23 +555,6 @@ func joinEnvAssignments(args []string) string {
 	return strings.Join(parts, " ")
 }
 
-func ensureCodexSessionHome(codexHome string) error {
-	codexHome = strings.TrimSpace(codexHome)
-	if codexHome == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Join(codexHome, "sessions"), 0o755); err != nil {
-		return err
-	}
-	source := sourceCodexHome(codexHome)
-	for _, name := range []string{"auth.json", "config.toml", "skills", "plugins"} {
-		if err := linkAgentHomeEntry(source, codexHome, name); err != nil {
-			log.Printf("codex home link skipped name=%s: %v", name, err)
-		}
-	}
-	return nil
-}
-
 func ensureClaudeSessionHome(claudeHome string) error {
 	claudeHome = strings.TrimSpace(claudeHome)
 	if claudeHome == "" {
@@ -496,11 +575,234 @@ func ensureClaudeSessionHome(claudeHome string) error {
 	return nil
 }
 
-func sourceCodexHome(target string) string {
-	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" && filepath.Clean(dir) != filepath.Clean(target) {
-		return dir
+func defaultCodexHome() string {
+	home := strings.TrimSpace(userHomeDir())
+	if home == "" || home == "." {
+		return ""
 	}
-	return filepath.Join(userHomeDir(), ".codex")
+	return filepath.Join(home, ".codex")
+}
+
+func codexHomeIsLegacy(home string) bool {
+	home = strings.TrimSpace(home)
+	defaultHome := defaultCodexHome()
+	return home != "" && defaultHome != "" && filepath.Clean(home) != filepath.Clean(defaultHome)
+}
+
+func (m *Manager) prepareCodexRecovery(sess Session) (Session, error) {
+	if strings.TrimSpace(sess.LastAgentKind) != "codex" || strings.TrimSpace(sess.LastAgentResumeCommand) == "" {
+		return sess, nil
+	}
+	defaultHome := defaultCodexHome()
+	if defaultHome == "" {
+		return sess, errors.New("cannot resolve default Codex home")
+	}
+	legacyHome := strings.TrimSpace(sess.LastAgentHome)
+	if legacyHome == "" || filepath.Clean(legacyHome) == filepath.Clean(defaultHome) {
+		sess.LastAgentHome = defaultHome
+		return sess, nil
+	}
+
+	wantedID := codexResumeThreadID(sess.LastAgentResumeCommand)
+	rollout, threadID, err := findCodexRollout(legacyHome, wantedID)
+	if err != nil {
+		return sess, err
+	}
+	if err := migrateCodexRollout(legacyHome, defaultHome, rollout); err != nil {
+		return sess, err
+	}
+	if wantedID == "" {
+		command, ok := pinCodexResumeCommand(sess.LastAgentResumeCommand, threadID)
+		if !ok {
+			return sess, fmt.Errorf("cannot pin Codex recovery command %q", sess.LastAgentResumeCommand)
+		}
+		sess.LastAgentResumeCommand = command
+	}
+	sess.LastAgentHome = defaultHome
+	return sess, nil
+}
+
+type codexSessionMeta struct {
+	Payload struct {
+		SessionID    string          `json:"session_id"`
+		ThreadSource json.RawMessage `json:"thread_source"`
+	} `json:"payload"`
+}
+
+func findCodexRollout(codexHome, wantedID string) (string, string, error) {
+	root := filepath.Join(codexHome, "sessions")
+	var selectedPath, selectedID string
+	var selectedTime time.Time
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
+		}
+		id := codexThreadIDFromRolloutName(entry.Name())
+		if id == "" || (wantedID != "" && id != wantedID) {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		var meta codexSessionMeta
+		decodeErr := json.NewDecoder(file).Decode(&meta)
+		_ = file.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if meta.Payload.SessionID != "" {
+			id = meta.Payload.SessionID
+		}
+		if !validCodexThreadID(id) || (wantedID != "" && id != wantedID) {
+			return nil
+		}
+		if wantedID == "" && strings.Contains(strings.ToLower(string(meta.Payload.ThreadSource)), "subagent") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if selectedPath == "" || info.ModTime().After(selectedTime) {
+			selectedPath, selectedID, selectedTime = path, id, info.ModTime()
+		}
+		return nil
+	})
+	if err != nil {
+		return "", "", err
+	}
+	if selectedPath == "" {
+		if wantedID != "" {
+			return "", "", fmt.Errorf("Codex session %s not found under %s", wantedID, root)
+		}
+		return "", "", fmt.Errorf("no Codex session found under %s", root)
+	}
+	return selectedPath, selectedID, nil
+}
+
+func codexThreadIDFromRolloutName(name string) string {
+	name = strings.TrimSuffix(name, ".jsonl")
+	if len(name) < 36 {
+		return ""
+	}
+	id := name[len(name)-36:]
+	if validCodexThreadID(id) {
+		return id
+	}
+	return ""
+}
+
+func validCodexThreadID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := range id {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if id[i] != '-' {
+				return false
+			}
+			continue
+		}
+		if !((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f') || (id[i] >= 'A' && id[i] <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func codexResumeThreadID(command string) string {
+	argv := shellFields(command)
+	for i, arg := range argv {
+		if arg != "resume" {
+			continue
+		}
+		for _, candidate := range argv[i+1:] {
+			if validCodexThreadID(candidate) {
+				return candidate
+			}
+		}
+		break
+	}
+	return ""
+}
+
+func pinCodexResumeCommand(command, threadID string) (string, bool) {
+	if !validCodexThreadID(threadID) {
+		return command, false
+	}
+	argv := shellFields(command)
+	envEnd := 0
+	for envEnd < len(argv) && isShellEnvAssignment(argv[envEnd]) {
+		envEnd++
+	}
+	if envEnd >= len(argv) || shellCommandBase(argv[envEnd]) != "codex" {
+		return command, false
+	}
+	replaced := false
+	for i := envEnd + 1; i < len(argv); i++ {
+		if argv[i] == "--last" {
+			argv[i] = threadID
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		return command, false
+	}
+	result := joinShellCommand(argv[envEnd:])
+	if envEnd > 0 {
+		result = strings.TrimSpace(joinEnvAssignments(argv[:envEnd]) + " " + result)
+	}
+	return result, true
+}
+
+func migrateCodexRollout(legacyHome, defaultHome, source string) error {
+	rel, err := filepath.Rel(filepath.Join(legacyHome, "sessions"), source)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("invalid legacy Codex rollout path %s", source)
+	}
+	target := filepath.Join(defaultHome, "sessions", rel)
+	if _, err := os.Stat(target); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if err := os.Link(source, target); err == nil {
+		return nil
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(target)
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	}
+	return nil
 }
 
 func sourceClaudeHome(target string) string {

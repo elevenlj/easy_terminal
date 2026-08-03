@@ -24,6 +24,8 @@ func TestRecoveryTracksCDChain(t *testing.T) {
 }
 
 func TestRecoveryRecordsCodexResumeCommandWithFlags(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	base := filepath.Join(t.TempDir(), "sessions")
 	manager := NewManager(nil, nil, WithRecoveryBaseDir(base))
 	rt := &RuntimeSession{
@@ -43,7 +45,7 @@ func TestRecoveryRecordsCodexResumeCommandWithFlags(t *testing.T) {
 	if !strings.Contains(s.LastAgentResumeCommand, "--dangerously-bypass-approvals-and-sandbox") || !strings.Contains(s.LastAgentResumeCommand, "gpt-5.5") {
 		t.Fatalf("resume command did not preserve flags: %q", s.LastAgentResumeCommand)
 	}
-	if !strings.HasSuffix(s.LastAgentHome, filepath.Join("rk", "codex_home")) {
+	if s.LastAgentHome != filepath.Join(home, ".codex") {
 		t.Fatalf("LastAgentHome = %q", s.LastAgentHome)
 	}
 }
@@ -74,14 +76,13 @@ func TestRecoveryRecordsClaudeResumeCommandWithHome(t *testing.T) {
 }
 
 func TestRecoveryBaseDirIsAbsolute(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	manager := NewManager(nil, nil, WithRecoveryBaseDir(filepath.Join("conf", "data", "sessions")))
 	got := manager.sessionCodexHome(Session{RecoveryKey: "rk"})
 
-	if !filepath.IsAbs(got) {
-		t.Fatalf("codex home = %q, want absolute path", got)
-	}
-	if !strings.HasSuffix(got, filepath.Join("conf", "data", "sessions", "rk", "codex_home")) {
-		t.Fatalf("codex home = %q, want recovery path suffix", got)
+	if got != filepath.Join(home, ".codex") {
+		t.Fatalf("codex home = %q, want default Codex home", got)
 	}
 	got = manager.sessionClaudeHome(Session{RecoveryKey: "rk"})
 	if !filepath.IsAbs(got) {
@@ -101,10 +102,80 @@ func TestRecoveryEnvironmentExportsAgentHomes(t *testing.T) {
 	}
 
 	writes := launcher.terminals[0].writes()
-	for _, want := range []string{"export CODEX_HOME=", "CLAUDE_CONFIG_DIR=", "codex_home", "claude_home"} {
+	for _, want := range []string{"unset CODEX_HOME", "CLAUDE_CONFIG_DIR=", "claude_home"} {
 		if !strings.Contains(writes, want) {
 			t.Fatalf("recovery environment writes = %q, want %q", writes, want)
 		}
+	}
+	if strings.Contains(writes, "export CODEX_HOME=") || strings.Contains(writes, "codex_home") {
+		t.Fatalf("recovery environment must leave Codex on its default home, got %q", writes)
+	}
+}
+
+func TestEnsureCodexTurnHookPreservesExistingHooksAndIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(codexHome, "hooks.json")
+	existing := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"existing-stop","timeout":30}]}],"PostToolUse":[{"matcher":".*","hooks":[]}]}}`
+	if err := os.WriteFile(path, []byte(existing), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureCodexTurnHook(); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureCodexTurnHook(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Count(text, "/hook/turn-ended") != 1 || !strings.Contains(text, "existing-stop") || !strings.Contains(text, "PostToolUse") {
+		t.Fatalf("hooks.json was not merged idempotently: %s", text)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("hooks.json mode = %v", info.Mode().Perm())
+	}
+}
+
+func TestPrepareCodexRecoveryMigratesAndPinsLegacyRollout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	legacyHome := filepath.Join(t.TempDir(), "codex_home")
+	rel := filepath.Join("2026", "07", "11", "rollout-2026-07-11T21-17-30-019f5153-6e7f-7742-9f61-3ffe1530d61c.jsonl")
+	rollout := filepath.Join(legacyHome, "sessions", rel)
+	if err := os.MkdirAll(filepath.Dir(rollout), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"type":"session_meta","payload":{"session_id":"019f5153-6e7f-7742-9f61-3ffe1530d61c","thread_source":"user"}}` + "\n"
+	if err := os.WriteFile(rollout, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := NewManager(nil, nil).prepareCodexRecovery(Session{
+		LastAgentKind:          "codex",
+		LastAgentHome:          legacyHome,
+		LastAgentResumeCommand: "codex resume --last --dangerously-bypass-approvals-and-sandbox",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.LastAgentHome != filepath.Join(home, ".codex") || strings.Contains(sess.LastAgentResumeCommand, "--last") ||
+		!strings.Contains(sess.LastAgentResumeCommand, "019f5153-6e7f-7742-9f61-3ffe1530d61c") {
+		t.Fatalf("legacy recovery was not migrated and pinned: %#v", sess)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "sessions", rel)); err != nil {
+		t.Fatalf("migrated rollout missing: %v", err)
 	}
 }
 

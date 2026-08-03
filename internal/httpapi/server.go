@@ -224,7 +224,20 @@ func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request, session
 			token = strings.TrimSpace(strings.TrimPrefix(authorization, bearerPrefix))
 		}
 	}
-	sess, accepted, err := s.manager.CompleteAgentTurn(r.Context(), sessionID, token)
+	var payload struct {
+		SessionID string `json:"session_id"`
+		ThreadID  string `json:"thread-id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	codexThreadID := strings.TrimSpace(payload.SessionID)
+	if codexThreadID == "" {
+		codexThreadID = strings.TrimSpace(payload.ThreadID)
+	}
+	sess, accepted, err := s.manager.CompleteAgentTurn(r.Context(), sessionID, token, codexThreadID)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err)
 		return

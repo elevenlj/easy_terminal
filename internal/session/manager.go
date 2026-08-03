@@ -384,14 +384,14 @@ func (m *Manager) sessionClaudeHome(sess Session) string {
 }
 
 func (m *Manager) sessionAgentHome(sess Session, kind string) string {
-	dir := m.sessionRecoveryDir(sess)
-	if dir == "" {
-		return ""
-	}
 	switch strings.TrimSpace(kind) {
 	case "codex":
-		return filepath.Join(dir, "codex_home")
+		return defaultCodexHome()
 	case "claude":
+		dir := m.sessionRecoveryDir(sess)
+		if dir == "" {
+			return ""
+		}
 		return filepath.Join(dir, "claude_home")
 	default:
 		return ""
@@ -458,6 +458,11 @@ func (m *Manager) RecoverRuntime(ctx context.Context, id string) (*RuntimeSessio
 	}
 	if strings.TrimSpace(sess.LastCWD) == "" {
 		sess.LastCWD = m.defaultWorkingDir()
+	}
+	if migrated, err := m.prepareCodexRecovery(sess); err != nil {
+		log.Printf("codex recovery migration skipped session=%s: %v", sess.ID, err)
+	} else {
+		sess = migrated
 	}
 	handle, err := m.launcher.Launch(context.Background())
 	if err != nil {
@@ -1099,13 +1104,6 @@ func (rt *RuntimeSession) runRecoveryEnvironmentSetup() {
 	sess := rt.session
 	rt.mu.Unlock()
 	var exports []string
-	codexHome := rt.manager.sessionCodexHome(sess)
-	if codexHome != "" {
-		if err := ensureCodexSessionHome(codexHome); err != nil {
-			log.Printf("recovery codex home setup failed session=%s: %v", sess.ID, err)
-		}
-		exports = append(exports, "CODEX_HOME="+shellQuote(codexHome))
-	}
 	claudeHome := rt.manager.sessionClaudeHome(sess)
 	if claudeHome != "" {
 		if err := ensureClaudeSessionHome(claudeHome); err != nil {
@@ -1120,10 +1118,20 @@ func (rt *RuntimeSession) runRecoveryEnvironmentSetup() {
 			"EASY_TERMINAL_HOOK_TOKEN="+shellQuote(sess.RecoveryKey),
 		)
 	}
-	if len(exports) == 0 {
+	command := ""
+	if strings.TrimSpace(rt.manager.recoveryBaseDir) != "" {
+		command = "unset CODEX_HOME"
+	}
+	if len(exports) > 0 {
+		if command != "" {
+			command += "; "
+		}
+		command += "export " + strings.Join(exports, " ")
+	}
+	if command == "" {
 		return
 	}
-	command := "export " + strings.Join(exports, " ") + "\r"
+	command += "\r"
 	if _, err := rt.terminal.Write([]byte(command)); err != nil {
 		log.Printf("recovery environment setup failed session=%s: %v", sess.ID, err)
 	}
@@ -1145,6 +1153,9 @@ func (rt *RuntimeSession) runRecoveryCommand() {
 		return
 	}
 	command := strings.TrimSpace(sess.LastAgentResumeCommand)
+	if strings.TrimSpace(sess.LastAgentKind) == "codex" && codexHomeIsLegacy(sess.LastAgentHome) {
+		command = "CODEX_HOME=" + shellQuote(sess.LastAgentHome) + " " + command
+	}
 	if !strings.HasSuffix(command, "\r") && !strings.HasSuffix(command, "\n") {
 		command += "\r"
 	}
@@ -2819,15 +2830,15 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 // CompleteAgentTurn marks the current Codex round as complete after a local
 // hook callback. The recovery key is a per-session bearer credential injected
 // only into that session's shell environment.
-func (m *Manager) CompleteAgentTurn(ctx context.Context, sessionID, token string) (Session, bool, error) {
+func (m *Manager) CompleteAgentTurn(ctx context.Context, sessionID, token, codexThreadID string) (Session, bool, error) {
 	rt, ok := m.GetRuntime(strings.TrimSpace(sessionID))
 	if !ok {
 		return Session{}, false, nil
 	}
-	return rt.completeAgentTurn(ctx, token)
+	return rt.completeAgentTurn(ctx, token, codexThreadID)
 }
 
-func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token string) (Session, bool, error) {
+func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token, codexThreadID string) (Session, bool, error) {
 	if rt == nil || rt.manager == nil {
 		return Session{}, false, nil
 	}
@@ -2846,9 +2857,18 @@ func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token string) (
 		rt.mu.Unlock()
 		return s, false, nil
 	}
+	pinnedRecovery := false
+	if command, ok := pinCodexResumeCommand(rt.session.LastAgentResumeCommand, strings.TrimSpace(codexThreadID)); ok {
+		rt.session.LastAgentResumeCommand = command
+		rt.session.LastAgentHome = defaultCodexHome()
+		pinnedRecovery = true
+	}
 	if rt.session.Status == StatusWaiting {
 		s := rt.session
 		rt.mu.Unlock()
+		if pinnedRecovery {
+			_ = rt.manager.persist(ctx, s)
+		}
 		return s, false, nil
 	}
 	rt.agentTurnHookVerified = true

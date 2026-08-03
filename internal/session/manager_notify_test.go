@@ -43,25 +43,29 @@ func TestCompleteAgentTurnUsesAuthenticatedHookWithIdleFallback(t *testing.T) {
 	rt := &RuntimeSession{
 		manager: manager,
 		session: Session{
-			ID:            "sess-1",
-			Status:        StatusRunning,
-			Live:          true,
-			RecoveryKey:   "hook-token",
-			LastMode:      SessionModeAgent,
-			LastAgentKind: "codex",
+			ID:                     "sess-1",
+			Status:                 StatusRunning,
+			Live:                   true,
+			RecoveryKey:            "hook-token",
+			LastMode:               SessionModeAgent,
+			LastAgentKind:          "codex",
+			LastAgentResumeCommand: "codex resume --last --dangerously-bypass-approvals-and-sandbox",
 		},
 	}
 	manager.sessions[rt.session.ID] = rt
 
-	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "wrong-token"); err == nil || accepted {
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "wrong-token", ""); err == nil || accepted {
 		t.Fatalf("invalid token should be rejected, accepted=%v err=%v", accepted, err)
 	}
-	got, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token")
+	got, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "019f5153-6e7f-7742-9f61-3ffe1530d61c")
 	if err != nil || !accepted {
 		t.Fatalf("authenticated hook result accepted=%v err=%v", accepted, err)
 	}
 	if got.Status != StatusWaiting || rt.Snapshot().Status != StatusWaiting || !rt.agentTurnHookVerified {
 		t.Fatalf("hook should complete the Codex turn, session=%#v verified=%v", got, rt.agentTurnHookVerified)
+	}
+	if !strings.Contains(got.LastAgentResumeCommand, "019f5153-6e7f-7742-9f61-3ffe1530d61c") || strings.Contains(got.LastAgentResumeCommand, "--last") {
+		t.Fatalf("hook should pin Codex recovery to the reported session id, got %q", got.LastAgentResumeCommand)
 	}
 
 	rt.HandleOutput([]byte("late terminal output"))
