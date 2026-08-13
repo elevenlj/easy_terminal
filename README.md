@@ -118,9 +118,11 @@ make tidy         # go mod tidy
 - macOS 或 Linux shell 环境
 - 可交互 shell；默认使用 `/bin/zsh -i`
 
-可选环境：
+无人值守通知：
 
-- Chrome、Chromium 或 Microsoft Edge：可选，用于浏览器端查看和辅助快照同步
+- 页面关闭后仍要把终端内容推送到飞书时，服务器必须安装 Chrome、Chromium 或 Microsoft Edge；Easy Terminal 会自动启动无头浏览器生成终端快照
+- Linux 可执行 `sudo apt-get install -y chromium`；如果浏览器不在 `PATH` 中，通过 `CHROME_BIN=/path/to/chromium easy-terminal` 指定
+- 建议以普通用户运行 Easy Terminal；容器内以 root 运行时会自动为无头浏览器添加 `--no-sandbox`
 
 飞书联动需要：
 

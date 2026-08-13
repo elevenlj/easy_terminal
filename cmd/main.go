@@ -618,6 +618,7 @@ func (m *headlessBrowserManager) Ensure(sessionID string) {
 	}
 	pageURL := "http://localhost:" + m.port + "/?session=" + url.QueryEscape(sessionID) + "&headless=1"
 	cmd := exec.Command(chrome, headlessChromeArgs(profile, pageURL)...)
+	cmd.Stderr = log.Writer()
 	configureHeadlessCommand(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
@@ -682,7 +683,11 @@ func (m *headlessBrowserManager) StopAll() {
 }
 
 func headlessChromeArgs(profile, pageURL string) []string {
-	return []string{
+	return headlessChromeArgsForUID(profile, pageURL, os.Geteuid())
+}
+
+func headlessChromeArgsForUID(profile, pageURL string, uid int) []string {
+	args := []string{
 		"--headless=new",
 		"--disable-gpu",
 		"--no-first-run",
@@ -692,8 +697,11 @@ func headlessChromeArgs(profile, pageURL string) []string {
 		"--force-device-scale-factor=1",
 		"--hide-scrollbars",
 		"--user-data-dir=" + profile,
-		pageURL,
 	}
+	if uid == 0 {
+		args = append(args, "--no-sandbox")
+	}
+	return append(args, pageURL)
 }
 
 func findChrome() string {

@@ -69,7 +69,7 @@ func TestParseStartupOptionsVersion(t *testing.T) {
 }
 
 func TestHeadlessChromeArgsUseStableViewport(t *testing.T) {
-	args := headlessChromeArgs("/tmp/profile", "http://localhost:8080/?session=sess-1")
+	args := headlessChromeArgsForUID("/tmp/profile", "http://localhost:8080/?session=sess-1", 1000)
 	for _, want := range []string{
 		"--window-size=1440,1000",
 		"--force-device-scale-factor=1",
@@ -80,6 +80,13 @@ func TestHeadlessChromeArgsUseStableViewport(t *testing.T) {
 		if !slices.Contains(args, want) {
 			t.Fatalf("headless args missing %q: %#v", want, args)
 		}
+	}
+}
+
+func TestHeadlessChromeArgsAllowRootContainer(t *testing.T) {
+	args := headlessChromeArgsForUID("/tmp/profile", "http://localhost:8080/", 0)
+	if !slices.Contains(args, "--no-sandbox") {
+		t.Fatalf("root headless args missing --no-sandbox: %#v", args)
 	}
 }
 
