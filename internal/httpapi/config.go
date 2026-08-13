@@ -25,6 +25,7 @@ type RuntimeConfig struct {
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
+	HeadlessSnapshotTimeoutMs       int                                   `json:"headless_snapshot_timeout_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
 	LarkNotifyFallbackTailLines     int                                   `json:"lark_notify_fallback_tail_lines"`
 	LarkNotifyMergeWrappedLines     bool                                  `json:"lark_notify_merge_wrapped_lines"`

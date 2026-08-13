@@ -25,6 +25,7 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
 		LarkAutoRefreshIntervalMs:       5000,
+		HeadlessSnapshotTimeoutMs:       10000,
 		LarkNotifyMaxLines:              300,
 		LarkNotifyFallbackTailLines:     100,
 		LarkNotifyMergeWrappedLines:     false,
@@ -41,7 +42,7 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 		t.Fatalf("GET status = %d", rec.Code)
 	}
 
-	body := `{"lark_app_id":"new-app","lark_app_secret":"new-secret","lark_notify_receive_id":"ou_new","lark_mention_enabled":false,"lark_default_session_name":"默认","lark_session_chat_prefix":"DEV ·","lark_ignore_message_prefix":"/silent","lark_auto_summary_prompt":"总结上一轮输出","fast_waiting_transition_ms":450,"conservative_waiting_transition_ms":900,"lark_auto_refresh_interval_ms":6000,"lark_notify_max_lines":120,"lark_notify_fallback_tail_lines":80,"lark_notify_merge_wrapped_lines":true,"lark_notify_drop_line_patterns":["noise"],"lark_custom_shortcuts":[{"label":"状态","command":"git status"}],"onboarding_completed":true,"session_pre_start_command":"source ~/.zshrc","session_start_presets":{"1":{"commands":["codex"]}},"session_name_presets":{"会话 A":{"commands":["pwd"]}}}`
+	body := `{"lark_app_id":"new-app","lark_app_secret":"new-secret","lark_notify_receive_id":"ou_new","lark_mention_enabled":false,"lark_default_session_name":"默认","lark_session_chat_prefix":"DEV ·","lark_ignore_message_prefix":"/silent","lark_auto_summary_prompt":"总结上一轮输出","fast_waiting_transition_ms":450,"conservative_waiting_transition_ms":900,"lark_auto_refresh_interval_ms":6000,"headless_snapshot_timeout_ms":15000,"lark_notify_max_lines":120,"lark_notify_fallback_tail_lines":80,"lark_notify_merge_wrapped_lines":true,"lark_notify_drop_line_patterns":["noise"],"lark_custom_shortcuts":[{"label":"状态","command":"git status"}],"onboarding_completed":true,"session_pre_start_command":"source ~/.zshrc","session_start_presets":{"1":{"commands":["codex"]}},"session_name_presets":{"会话 A":{"commands":["pwd"]}}}`
 	req = httptest.NewRequest(http.MethodPatch, "/api/config", strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -57,6 +58,9 @@ func TestConfigEndpointGetAndPatch(t *testing.T) {
 	}
 	if got.LarkNotifyFallbackTailLines != 80 {
 		t.Fatalf("fallback tail lines = %d", got.LarkNotifyFallbackTailLines)
+	}
+	if got.HeadlessSnapshotTimeoutMs != 15000 {
+		t.Fatalf("headless snapshot timeout = %d", got.HeadlessSnapshotTimeoutMs)
 	}
 	if got.LarkSessionChatPrefix != "DEV ·" {
 		t.Fatalf("chat prefix = %q", got.LarkSessionChatPrefix)

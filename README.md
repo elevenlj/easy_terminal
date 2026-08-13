@@ -122,6 +122,7 @@ make tidy         # go mod tidy
 
 - 页面关闭后仍要把终端内容推送到飞书时，服务器必须安装 Chrome、Chromium 或 Microsoft Edge；Easy Terminal 会自动启动无头浏览器生成终端快照
 - Linux 可执行 `sudo apt-get install -y chromium`；如果浏览器不在 `PATH` 中，通过 `CHROME_BIN=/path/to/chromium easy-terminal` 指定
+- 无头浏览器冷启动快照默认等待 10000ms，可在“等待与通知”的“无头快照超时(ms)”中调整，或通过 `HEADLESS_SNAPSHOT_TIMEOUT_MS` 覆盖
 - 建议以普通用户运行 Easy Terminal；容器内以 root 运行时会自动为无头浏览器添加 `--no-sandbox`
 
 飞书联动需要：

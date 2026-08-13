@@ -3354,6 +3354,7 @@ func TestRequestFreshSnapshotRestartsStaleHeadlessWhenNoSubscriber(t *testing.T)
 	events := make(chan string, 2)
 	rt := &RuntimeSession{
 		manager: NewManager(nil, nil,
+			WithHeadlessSnapshotTimeout(80*time.Millisecond),
 			WithBrowserStopped(func(sessionID string) {
 				events <- "stop:" + sessionID
 			}),
@@ -3367,7 +3368,7 @@ func TestRequestFreshSnapshotRestartsStaleHeadlessWhenNoSubscriber(t *testing.T)
 
 	done := make(chan bool, 1)
 	go func() {
-		done <- rt.RequestFreshSnapshot(80 * time.Millisecond)
+		done <- rt.RequestFreshSnapshot(10 * time.Millisecond)
 	}()
 
 	want := []string{"stop:sess-1", "start:sess-1"}
@@ -3380,6 +3381,11 @@ func TestRequestFreshSnapshotRestartsStaleHeadlessWhenNoSubscriber(t *testing.T)
 		case <-time.After(time.Second):
 			t.Fatalf("expected browser event %q", expected)
 		}
+	}
+	select {
+	case <-done:
+		t.Fatal("configured headless startup timeout should extend the caller deadline")
+	case <-time.After(20 * time.Millisecond):
 	}
 	select {
 	case fresh := <-done:

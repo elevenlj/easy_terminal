@@ -934,6 +934,7 @@ function renderConfig() {
   $("cfg-fast-waiting").value = cfg.fast_waiting_transition_ms;
   $("cfg-conservative-waiting").value = cfg.conservative_waiting_transition_ms;
   $("cfg-auto-refresh-interval").value = cfg.lark_auto_refresh_interval_ms || 5000;
+  $("cfg-headless-snapshot-timeout").value = cfg.headless_snapshot_timeout_ms || 10000;
   $("cfg-lark-max-lines").value = cfg.lark_notify_max_lines;
   $("cfg-lark-fallback-tail-lines").value = cfg.lark_notify_fallback_tail_lines || 100;
   $("cfg-lark-merge-wrapped-lines").checked = Boolean(cfg.lark_notify_merge_wrapped_lines);
@@ -1060,6 +1061,7 @@ function readConfigForm() {
     fast_waiting_transition_ms: readNumber("cfg-fast-waiting", state.config?.fast_waiting_transition_ms || 1000),
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting", state.config?.conservative_waiting_transition_ms || 3000),
     lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval", state.config?.lark_auto_refresh_interval_ms || 5000),
+    headless_snapshot_timeout_ms: readNumber("cfg-headless-snapshot-timeout", state.config?.headless_snapshot_timeout_ms || 10000),
     lark_notify_max_lines: readNumber("cfg-lark-max-lines", state.config?.lark_notify_max_lines || 100),
     lark_notify_fallback_tail_lines: readNumber("cfg-lark-fallback-tail-lines", state.config?.lark_notify_fallback_tail_lines || 100),
     lark_notify_merge_wrapped_lines: $("cfg-lark-merge-wrapped-lines").checked,

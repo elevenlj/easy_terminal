@@ -115,8 +115,8 @@ func TestLoadConfigUsesCurrentDefaultsWhenFieldsMissing(t *testing.T) {
 	t.Setenv("LARK_NOTIFY_MERGE_WRAPPED_LINES", "")
 
 	cfg := loadConfig(filepath.Join(t.TempDir(), "config.local.json"))
-	if cfg.FastWaitingTransitionMs != 500 || cfg.ConservativeWaitingTransitionMs != 500 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.LarkNotifyMaxLines != 200 || cfg.LarkNotifyFallbackTailLines != 100 {
-		t.Fatalf("numeric defaults = %d,%d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.LarkNotifyMaxLines, cfg.LarkNotifyFallbackTailLines)
+	if cfg.FastWaitingTransitionMs != 500 || cfg.ConservativeWaitingTransitionMs != 500 || cfg.LarkAutoRefreshIntervalMs != 5000 || cfg.HeadlessSnapshotTimeoutMs != 10000 || cfg.LarkNotifyMaxLines != 200 || cfg.LarkNotifyFallbackTailLines != 100 {
+		t.Fatalf("numeric defaults = %d,%d,%d,%d,%d,%d", cfg.FastWaitingTransitionMs, cfg.ConservativeWaitingTransitionMs, cfg.LarkAutoRefreshIntervalMs, cfg.HeadlessSnapshotTimeoutMs, cfg.LarkNotifyMaxLines, cfg.LarkNotifyFallbackTailLines)
 	}
 	if cfg.LarkDefaultSessionName != "默认会话" || cfg.LarkSessionChatPrefix != "ET ·" {
 		t.Fatalf("lark defaults = name %q prefix %q", cfg.LarkDefaultSessionName, cfg.LarkSessionChatPrefix)

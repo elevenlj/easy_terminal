@@ -34,6 +34,7 @@ const (
 	defaultFastWaitingTransitionMs         = 500
 	defaultConservativeWaitingTransitionMs = 500
 	defaultLarkAutoRefreshIntervalMs       = 5000
+	defaultHeadlessSnapshotTimeoutMs       = 10000
 	defaultLarkNotifyMaxLines              = 200
 	defaultLarkNotifyFallbackTailLines     = 100
 	runtimeLogicVersion                    = "card-refresh-no-running-patch-v2"
@@ -67,6 +68,7 @@ type Config struct {
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
+	HeadlessSnapshotTimeoutMs       int                                   `json:"headless_snapshot_timeout_ms"`
 	LarkNotifyMaxLines              int                                   `json:"lark_notify_max_lines"`
 	LarkNotifyFallbackTailLines     int                                   `json:"lark_notify_fallback_tail_lines"`
 	LarkNotifyMergeWrappedLines     bool                                  `json:"lark_notify_merge_wrapped_lines"`
@@ -141,6 +143,7 @@ func run() error {
 			time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond,
 		),
 		session.WithAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs)*time.Millisecond),
+		session.WithHeadlessSnapshotTimeout(time.Duration(cfg.HeadlessSnapshotTimeoutMs)*time.Millisecond),
 		session.WithBrowserNeeded(headless.Ensure),
 		session.WithBrowserActive(headless.Stop),
 		session.WithBrowserStopped(headless.Stop),
@@ -248,6 +251,11 @@ func loadConfig(path string) Config {
 			cfg.LarkNotifyMergeWrappedLines = parsed
 		}
 	}
+	if v := os.Getenv("HEADLESS_SNAPSHOT_TIMEOUT_MS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			cfg.HeadlessSnapshotTimeoutMs = parsed
+		}
+	}
 	if cfg.FastWaitingTransitionMs <= 0 {
 		cfg.FastWaitingTransitionMs = defaultFastWaitingTransitionMs
 	}
@@ -256,6 +264,9 @@ func loadConfig(path string) Config {
 	}
 	if cfg.LarkAutoRefreshIntervalMs <= 0 {
 		cfg.LarkAutoRefreshIntervalMs = defaultLarkAutoRefreshIntervalMs
+	}
+	if cfg.HeadlessSnapshotTimeoutMs <= 0 {
+		cfg.HeadlessSnapshotTimeoutMs = defaultHeadlessSnapshotTimeoutMs
 	}
 	if cfg.LarkNotifyMaxLines <= 0 {
 		cfg.LarkNotifyMaxLines = defaultLarkNotifyMaxLines
@@ -326,6 +337,7 @@ func defaultConfig() Config {
 		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
+		HeadlessSnapshotTimeoutMs:       defaultHeadlessSnapshotTimeoutMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
 		LarkNotifyFallbackTailLines:     defaultLarkNotifyFallbackTailLines,
 		LarkNotifyMergeWrappedLines:     true,
@@ -424,7 +436,13 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	defer s.mu.Unlock()
 	oldCfg := *s.cfg
 	cfg := *s.cfg
-	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.LarkNotifyMaxLines <= 0 || req.LarkNotifyFallbackTailLines <= 0 {
+	if req.HeadlessSnapshotTimeoutMs <= 0 {
+		req.HeadlessSnapshotTimeoutMs = cfg.HeadlessSnapshotTimeoutMs
+		if req.HeadlessSnapshotTimeoutMs <= 0 {
+			req.HeadlessSnapshotTimeoutMs = defaultHeadlessSnapshotTimeoutMs
+		}
+	}
+	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.HeadlessSnapshotTimeoutMs <= 0 || req.LarkNotifyMaxLines <= 0 || req.LarkNotifyFallbackTailLines <= 0 {
 		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
 	}
 	if req.SessionStartPresets == nil {
@@ -444,6 +462,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
 	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
+	cfg.HeadlessSnapshotTimeoutMs = req.HeadlessSnapshotTimeoutMs
 	cfg.LarkNotifyMaxLines = req.LarkNotifyMaxLines
 	cfg.LarkNotifyFallbackTailLines = req.LarkNotifyFallbackTailLines
 	cfg.LarkNotifyMergeWrappedLines = req.LarkNotifyMergeWrappedLines
@@ -467,6 +486,7 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.LarkReplyBridge, reconnectLark bool) error {
 	manager.SetWaitingTransitionDelays(time.Duration(cfg.FastWaitingTransitionMs)*time.Millisecond, time.Duration(cfg.ConservativeWaitingTransitionMs)*time.Millisecond)
 	manager.SetAutoRefreshInterval(time.Duration(cfg.LarkAutoRefreshIntervalMs) * time.Millisecond)
+	manager.SetHeadlessSnapshotTimeout(time.Duration(cfg.HeadlessSnapshotTimeoutMs) * time.Millisecond)
 	manager.SetPreStartCommand(cfg.SessionPreStartCommand)
 	notifier := session.NewLarkAppNotifier(cfg.LarkAppID, cfg.LarkAppSecret, cfg.LarkNotifyReceiveID, cfg.LarkMentionEnabled)
 	notifier.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -505,6 +525,7 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		FastWaitingTransitionMs:         cfg.FastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: cfg.ConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       cfg.LarkAutoRefreshIntervalMs,
+		HeadlessSnapshotTimeoutMs:       cfg.HeadlessSnapshotTimeoutMs,
 		LarkNotifyMaxLines:              cfg.LarkNotifyMaxLines,
 		LarkNotifyFallbackTailLines:     cfg.LarkNotifyFallbackTailLines,
 		LarkNotifyMergeWrappedLines:     cfg.LarkNotifyMergeWrappedLines,

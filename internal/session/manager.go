@@ -30,6 +30,7 @@ const (
 	defaultNotifySnapshotTimeout         = 1200 * time.Millisecond
 	defaultNotifySnapshotDeadline        = 2500 * time.Millisecond
 	defaultInputBaselineSnapshotDeadline = 2500 * time.Millisecond
+	defaultHeadlessSnapshotTimeout       = 10 * time.Second
 	defaultStartupPresetSettleDelay      = 2 * time.Second
 	defaultStartupInputQueueWindow       = 30 * time.Second
 	defaultNotificationSendAttempts      = 3
@@ -62,37 +63,39 @@ type Store interface {
 }
 
 type Manager struct {
-	mu                  sync.RWMutex
-	store               Store
-	launcher            Launcher
-	notifier            WaitingNotifier
-	idCounter           atomic.Int64
-	fastWaiting         time.Duration
-	conservativeWaiting time.Duration
-	autoRefreshInterval time.Duration
-	updateCoalesce      time.Duration
-	preStartCommand     string
-	recoveryBaseDir     string
-	agentTurnHookURL    string
-	sessions            map[string]*RuntimeSession
-	onBrowserNeeded     func(string)
-	onBrowserActive     func(string)
-	onBrowserStopped    func(string)
-	onNotificationSent  func(string)
-	onSessionEnded      func(string)
+	mu                   sync.RWMutex
+	store                Store
+	launcher             Launcher
+	notifier             WaitingNotifier
+	idCounter            atomic.Int64
+	fastWaiting          time.Duration
+	conservativeWaiting  time.Duration
+	autoRefreshInterval  time.Duration
+	headlessSnapshotWait time.Duration
+	updateCoalesce       time.Duration
+	preStartCommand      string
+	recoveryBaseDir      string
+	agentTurnHookURL     string
+	sessions             map[string]*RuntimeSession
+	onBrowserNeeded      func(string)
+	onBrowserActive      func(string)
+	onBrowserStopped     func(string)
+	onNotificationSent   func(string)
+	onSessionEnded       func(string)
 }
 
 type ManagerOption func(*Manager)
 
 func NewManager(store Store, launcher Launcher, opts ...ManagerOption) *Manager {
 	m := &Manager{
-		store:               store,
-		launcher:            launcher,
-		fastWaiting:         defaultFastWaitingTransition,
-		conservativeWaiting: defaultConservativeWaitingTransition,
-		autoRefreshInterval: defaultAutoRefreshInterval,
-		updateCoalesce:      defaultNotificationUpdateCoalesce,
-		sessions:            make(map[string]*RuntimeSession),
+		store:                store,
+		launcher:             launcher,
+		fastWaiting:          defaultFastWaitingTransition,
+		conservativeWaiting:  defaultConservativeWaitingTransition,
+		autoRefreshInterval:  defaultAutoRefreshInterval,
+		headlessSnapshotWait: defaultHeadlessSnapshotTimeout,
+		updateCoalesce:       defaultNotificationUpdateCoalesce,
+		sessions:             make(map[string]*RuntimeSession),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -136,6 +139,14 @@ func WithAutoRefreshInterval(interval time.Duration) ManagerOption {
 	return func(m *Manager) {
 		if interval > 0 {
 			m.autoRefreshInterval = interval
+		}
+	}
+}
+
+func WithHeadlessSnapshotTimeout(timeout time.Duration) ManagerOption {
+	return func(m *Manager) {
+		if timeout > 0 {
+			m.headlessSnapshotWait = timeout
 		}
 	}
 }
@@ -204,6 +215,23 @@ func (m *Manager) SetAutoRefreshInterval(interval time.Duration) {
 	if interval > 0 {
 		m.autoRefreshInterval = interval
 	}
+}
+
+func (m *Manager) SetHeadlessSnapshotTimeout(timeout time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if timeout > 0 {
+		m.headlessSnapshotWait = timeout
+	}
+}
+
+func (m *Manager) headlessSnapshotTimeout() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.headlessSnapshotWait <= 0 {
+		return defaultHeadlessSnapshotTimeout
+	}
+	return m.headlessSnapshotWait
 }
 
 func (m *Manager) autoRefreshDelay() time.Duration {
@@ -1892,6 +1920,7 @@ func (rt *RuntimeSession) requestFreshSnapshotAttempt(timeout time.Duration, for
 	rt.mu.Unlock()
 	if needsBrowser {
 		rt.manager.RestartBrowser(sessionID)
+		timeout = rt.manager.headlessSnapshotTimeout()
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

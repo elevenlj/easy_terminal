@@ -223,6 +223,7 @@ const ids = [
   "cfg-fast-waiting",
   "cfg-conservative-waiting",
   "cfg-auto-refresh-interval",
+  "cfg-headless-snapshot-timeout",
   "cfg-lark-max-lines",
   "cfg-lark-fallback-tail-lines",
   "cfg-lark-merge-wrapped-lines",
@@ -417,6 +418,7 @@ const context = {
         fast_waiting_transition_ms: 300,
         conservative_waiting_transition_ms: 700,
         lark_auto_refresh_interval_ms: 5000,
+        headless_snapshot_timeout_ms: 10000,
         lark_notify_max_lines: 300,
         lark_notify_fallback_tail_lines: 100,
         lark_notify_merge_wrapped_lines: false,
@@ -1298,6 +1300,7 @@ elements["startup-json-preview"].oninput();
 elements["cfg-fast-waiting"].value = "450";
 elements["cfg-conservative-waiting"].value = "";
 elements["cfg-auto-refresh-interval"].value = "6000";
+elements["cfg-headless-snapshot-timeout"].value = "15000";
 elements["cfg-lark-max-lines"].value = "";
 elements["cfg-lark-fallback-tail-lines"].value = "";
 elements["cfg-lark-merge-wrapped-lines"].checked = true;
@@ -1326,6 +1329,7 @@ const patchedConfig = JSON.parse(configPatch.options.body);
 assert.equal(patchedConfig.fast_waiting_transition_ms, 450);
 assert.equal(patchedConfig.conservative_waiting_transition_ms, 700);
 assert.equal(patchedConfig.lark_auto_refresh_interval_ms, 6000);
+assert.equal(patchedConfig.headless_snapshot_timeout_ms, 15000);
 assert.equal(patchedConfig.lark_notify_max_lines, 300);
 assert.equal(patchedConfig.lark_notify_fallback_tail_lines, 100);
 assert.equal(patchedConfig.lark_notify_merge_wrapped_lines, true);
