@@ -771,6 +771,8 @@ type RuntimeSession struct {
 	lastConsumedTerminalInteractionID string
 	lastTerminalAgentContext          *TerminalAgentContext
 	agentTurnHookVerified             bool
+	hookCompletedCurrentRound         bool
+	hookCompletionTipClaimed          bool
 	suppressRunningMarker             bool
 	requireLarkChat                   bool
 	notificationPatchVersion          int64
@@ -2136,6 +2138,8 @@ func (rt *RuntimeSession) markInputActivityLockedWithPreviousRoundState(submitte
 		rt.lastNotifiedContent = ""
 		rt.notificationUpdateNo = 0
 		rt.notificationRunning = false
+		rt.hookCompletedCurrentRound = false
+		rt.hookCompletionTipClaimed = false
 		rt.suppressRunningMarker = false
 	}
 	rt.session.Status = StatusRunning
@@ -2872,6 +2876,10 @@ func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token, codexThr
 		return s, false, nil
 	}
 	rt.agentTurnHookVerified = true
+	if !rt.hookCompletedCurrentRound {
+		rt.hookCompletedCurrentRound = true
+		rt.hookCompletionTipClaimed = false
+	}
 	rt.stopNotifyTimerLocked()
 	rt.stopNotifyStableTimerLocked()
 	rt.session.Status = StatusWaiting
@@ -3213,6 +3221,7 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 			n.SessionID, version, currentPatchVersion, n.NotificationVersion)
 		return
 	}
+	claimHookCompletionTip := rt.applyHookCompletionTipPolicyLocked(&n)
 	rt.mu.Unlock()
 	result, err := rt.notifyWaitingWithRetry(n)
 	rt.notificationPatchMu.Unlock()
@@ -3222,6 +3231,9 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 	}
 	log.Printf("waiting notification sent session=%s version=%d hash=%s", n.SessionID, version, shortNotifyHash(contentHash))
 	rt.mu.Lock()
+	if claimHookCompletionTip && rt.notifyVersion == version && rt.hookCompletedCurrentRound {
+		rt.hookCompletionTipClaimed = true
+	}
 	boundInteractionMessageID := n.MessageID
 	if result.MessageID != "" {
 		boundInteractionMessageID = result.MessageID
@@ -3259,6 +3271,21 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 	rt.mu.Unlock()
 	defaultLarkMessageRegistry.rememberLatest(n.SessionID)
 	rt.manager.notificationSent(n.SessionID)
+}
+
+// applyHookCompletionTipPolicyLocked allows at most one completion-tip write
+// after a Hook completes the current round. A renderer reconnect may produce
+// another valid snapshot and card patch, but that patch must not announce the
+// same completion again. Submitting the next input resets both flags.
+func (rt *RuntimeSession) applyHookCompletionTipPolicyLocked(note *WaitingNotification) bool {
+	if note == nil || !rt.hookCompletedCurrentRound {
+		return false
+	}
+	if rt.hookCompletionTipClaimed || note.Running {
+		note.SuppressUpdateTip = true
+		return false
+	}
+	return true
 }
 
 func (rt *RuntimeSession) waitForNotificationUpdateCoalesce(version int64, delay time.Duration) bool {

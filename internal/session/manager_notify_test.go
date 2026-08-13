@@ -78,6 +78,74 @@ func TestCompleteAgentTurnUsesAuthenticatedHookWithIdleFallback(t *testing.T) {
 	if timer == nil {
 		t.Fatal("verified Agent hook should retain the idle completion fallback")
 	}
+	rt.mu.Lock()
+	rt.hookCompletionTipClaimed = true
+	rt.mu.Unlock()
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", ""); err != nil || !accepted {
+		t.Fatalf("same-round repeated hook completion accepted=%v err=%v", accepted, err)
+	}
+	rt.mu.Lock()
+	claimedAfterRepeatedHook := rt.hookCompletionTipClaimed
+	rt.mu.Unlock()
+	if !claimedAfterRepeatedHook {
+		t.Fatal("a repeated Hook in the same round must not reopen the completion tip")
+	}
+}
+
+func TestHookCompletionTipIsClaimedOncePerRound(t *testing.T) {
+	notifier := &recordingNotifier{}
+	manager := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{
+			ID:                     "sess-1",
+			Name:                   "A",
+			Status:                 StatusRunning,
+			Live:                   true,
+			NotifyOnWaiting:        true,
+			RecoveryKey:            "hook-token",
+			LastMode:               SessionModeAgent,
+			LastAgentKind:          "codex",
+			LastAgentResumeCommand: "codex resume --last",
+		},
+		subscribers: make(map[chan RuntimeEvent]runtimeSubscriber),
+	}
+	manager.sessions[rt.session.ID] = rt
+	rt.SetVisibleSnapshot("old answer\n›")
+	rt.MarkInputActivity("fix bug\r")
+	rt.SetVisibleSnapshot("› fix bug\n• first answer")
+	rt.mu.Lock()
+	rt.lastNotifiedMessageID = "card-1"
+	rt.lastNotifiedContent = RunningNotificationPlaceholder
+	rt.notificationRunning = true
+	rt.mu.Unlock()
+
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", ""); err != nil || !accepted {
+		t.Fatalf("hook completion accepted=%v err=%v", accepted, err)
+	}
+	first := waitForNotifierNotes(t, notifier, 1)
+	if first[0].SuppressUpdateTip {
+		t.Fatal("the Hook completion write should be allowed to send the first completion tip")
+	}
+	// A browser reload can provide a different valid rendering of the same
+	// completed round. The card may still be patched, but completion is not a
+	// new event and must not emit another tip.
+	rt.SetVisibleSnapshot("› fix bug\n• first answer\n• final detail")
+	rt.mu.Lock()
+	version := rt.notifyVersion
+	rt.mu.Unlock()
+	rt.notifyIfStillWaitingWithMode(version, true, false)
+	second := waitForNotifierNotes(t, notifier, 2)
+	if !second[1].SuppressUpdateTip {
+		t.Fatal("same-round renderer refresh should suppress the repeated completion tip")
+	}
+
+	rt.MarkInputActivity("next round\r")
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.hookCompletedCurrentRound || rt.hookCompletionTipClaimed {
+		t.Fatal("new input should reset Hook completion-tip idempotency")
+	}
 }
 
 func TestAgentIdleFallbackDoesNotRecompleteWaitingTurn(t *testing.T) {
