@@ -423,6 +423,24 @@ func TestPickLarkNotifyFallbackTailContentAppliesConfiguredFilters(t *testing.T)
 	}
 }
 
+func TestPickLarkNotifyHookAssistantContentAppliesConfiguredFilters(t *testing.T) {
+	if err := SetLarkNotifyDropLineRules([]LarkNotifyDropLineRule{{
+		Kind: "line", Pattern: `.*PostToolUse.*`,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := SetLarkNotifyDropLineRules(nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	got := pickLarkNotifyHookAssistantContent("PostToolUse noisy status\n本轮最终回复")
+	if got != "本轮最终回复" {
+		t.Fatalf("filtered Hook assistant content = %q", got)
+	}
+}
+
 func TestPickNotifyContentRejectsReflowWithOnlyWeakCommonFooter(t *testing.T) {
 	previous := strings.Join([]string{
 		"OLD_SENTINEL first historical line",

@@ -773,6 +773,7 @@ type RuntimeSession struct {
 	agentTurnHookVerified             bool
 	hookCompletedCurrentRound         bool
 	hookCompletionTipClaimed          bool
+	hookLastAssistantMessage          string
 	suppressRunningMarker             bool
 	requireLarkChat                   bool
 	notificationPatchVersion          int64
@@ -1482,8 +1483,15 @@ func (rt *RuntimeSession) previousNotifySnapshotLocked() string {
 }
 
 func (rt *RuntimeSession) currentNotifyContentLocked() string {
+	if content := rt.hookAssistantNotifyContentLocked(); content != "" {
+		return content
+	}
 	content := pickNotifyContentWithWindowAnchorPolicy(rt.visibleSnapshot, rt.previousNotifySnapshotLocked(), rt.roundReply, rt.lastInputText, rt.notificationWindowInputText, rt.notifyTextAnchorPolicyLocked())
 	return rt.cleanLarkNotifyContentForAgentLocked(content)
+}
+
+func (rt *RuntimeSession) hookAssistantNotifyContentLocked() string {
+	return pickLarkNotifyHookAssistantContent(rt.hookLastAssistantMessage)
 }
 
 func (rt *RuntimeSession) cleanLarkNotifyContentForAgentLocked(content string) string {
@@ -2140,6 +2148,7 @@ func (rt *RuntimeSession) markInputActivityLockedWithPreviousRoundState(submitte
 		rt.notificationRunning = false
 		rt.hookCompletedCurrentRound = false
 		rt.hookCompletionTipClaimed = false
+		rt.hookLastAssistantMessage = ""
 		rt.suppressRunningMarker = false
 	}
 	rt.session.Status = StatusRunning
@@ -2834,15 +2843,15 @@ func (rt *RuntimeSession) HandleOutput(chunk []byte) {
 // CompleteAgentTurn marks the current Codex round as complete after a local
 // hook callback. The recovery key is a per-session bearer credential injected
 // only into that session's shell environment.
-func (m *Manager) CompleteAgentTurn(ctx context.Context, sessionID, token, codexThreadID string) (Session, bool, error) {
+func (m *Manager) CompleteAgentTurn(ctx context.Context, sessionID, token, codexThreadID, lastAssistantMessage string) (Session, bool, error) {
 	rt, ok := m.GetRuntime(strings.TrimSpace(sessionID))
 	if !ok {
 		return Session{}, false, nil
 	}
-	return rt.completeAgentTurn(ctx, token, codexThreadID)
+	return rt.completeAgentTurn(ctx, token, codexThreadID, lastAssistantMessage)
 }
 
-func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token, codexThreadID string) (Session, bool, error) {
+func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token, codexThreadID, lastAssistantMessage string) (Session, bool, error) {
 	if rt == nil || rt.manager == nil {
 		return Session{}, false, nil
 	}
@@ -2867,13 +2876,34 @@ func (rt *RuntimeSession) completeAgentTurn(ctx context.Context, token, codexThr
 		rt.session.LastAgentHome = defaultCodexHome()
 		pinnedRecovery = true
 	}
+	lastAssistantMessage = strings.TrimSpace(lastAssistantMessage)
+	newAssistantMessage := lastAssistantMessage != "" && lastAssistantMessage != rt.hookLastAssistantMessage
+	if newAssistantMessage {
+		rt.hookLastAssistantMessage = lastAssistantMessage
+	}
 	if rt.session.Status == StatusWaiting {
+		if !newAssistantMessage {
+			s := rt.session
+			rt.mu.Unlock()
+			if pinnedRecovery {
+				_ = rt.manager.persist(ctx, s)
+			}
+			return s, false, nil
+		}
+		rt.agentTurnHookVerified = true
+		rt.stopNotifyTimerLocked()
+		rt.stopNotifyStableTimerLocked()
+		if !rt.hookCompletedCurrentRound {
+			rt.hookCompletedCurrentRound = true
+			rt.hookCompletionTipClaimed = rt.lastNotifiedMessageID != "" && !rt.notificationRunning
+		}
+		rt.notifyVersion++
+		version := rt.notifyVersion
 		s := rt.session
 		rt.mu.Unlock()
-		if pinnedRecovery {
-			_ = rt.manager.persist(ctx, s)
-		}
-		return s, false, nil
+		_ = rt.manager.persist(ctx, s)
+		go rt.notifyIfStillWaitingImmediately(version)
+		return s, true, nil
 	}
 	rt.agentTurnHookVerified = true
 	if !rt.hookCompletedCurrentRound {
@@ -3106,8 +3136,9 @@ func (rt *RuntimeSession) notifyIfStillWaitingWithMode(version int64, immediate,
 		rt.mu.Unlock()
 		return
 	}
+	hasHookAssistantMessage := rt.hookAssistantNotifyContentLocked() != ""
 	rt.mu.Unlock()
-	if requestFreshSnapshot {
+	if requestFreshSnapshot && !hasHookAssistantMessage {
 		rt.RequestFreshSnapshot(defaultNotifySnapshotTimeout)
 	}
 	rt.mu.Lock()
@@ -3487,6 +3518,16 @@ func (rt *RuntimeSession) updateWaitingRunningWithRetry(notifier WaitingRunningN
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {
 	if rt.requireLarkChat && strings.TrimSpace(rt.session.LarkChatID) == "" {
 		return WaitingNotification{}, "", false, "waiting_for_lark_chat"
+	}
+	hookContent := rt.hookAssistantNotifyContentLocked()
+	if hookContent != "" {
+		contentHash := notifyContentHash(hookContent)
+		if contentHash == rt.lastNotifiedRoundHash {
+			return WaitingNotification{}, "", false, "duplicate_hash"
+		}
+		interaction := rt.notificationInteractionLocked(rt.lastNotifiedMessageID)
+		agentContext := rt.notificationAgentContextLocked()
+		return WaitingNotification{SessionID: rt.session.ID, Name: rt.session.Name, Content: hookContent, ChatID: rt.session.LarkChatID, MentionOpenID: rt.notificationMentionOpenID, AutoSummaryEnabled: rt.autoSummaryEnabled, MentionModeEnabled: rt.session.LarkMentionModeEnabled, SnapshotSource: "codex_hook:last_assistant_message", Interaction: interaction, AgentContext: agentContext}, contentHash, true, "ready"
 	}
 	if rt.visibleSnapshotStaleForCurrentRoundLocked() {
 		return WaitingNotification{}, "", false, "stale_visible_snapshot"

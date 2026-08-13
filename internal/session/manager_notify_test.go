@@ -54,10 +54,10 @@ func TestCompleteAgentTurnUsesAuthenticatedHookWithIdleFallback(t *testing.T) {
 	}
 	manager.sessions[rt.session.ID] = rt
 
-	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "wrong-token", ""); err == nil || accepted {
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "wrong-token", "", ""); err == nil || accepted {
 		t.Fatalf("invalid token should be rejected, accepted=%v err=%v", accepted, err)
 	}
-	got, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "019f5153-6e7f-7742-9f61-3ffe1530d61c")
+	got, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "019f5153-6e7f-7742-9f61-3ffe1530d61c", "")
 	if err != nil || !accepted {
 		t.Fatalf("authenticated hook result accepted=%v err=%v", accepted, err)
 	}
@@ -81,7 +81,7 @@ func TestCompleteAgentTurnUsesAuthenticatedHookWithIdleFallback(t *testing.T) {
 	rt.mu.Lock()
 	rt.hookCompletionTipClaimed = true
 	rt.mu.Unlock()
-	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", ""); err != nil || !accepted {
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "", ""); err != nil || !accepted {
 		t.Fatalf("same-round repeated hook completion accepted=%v err=%v", accepted, err)
 	}
 	rt.mu.Lock()
@@ -116,16 +116,19 @@ func TestHookCompletionTipIsClaimedOncePerRound(t *testing.T) {
 	rt.SetVisibleSnapshot("› fix bug\n• first answer")
 	rt.mu.Lock()
 	rt.lastNotifiedMessageID = "card-1"
-	rt.lastNotifiedContent = RunningNotificationPlaceholder
+	rt.lastNotifiedContent = "上一轮误识别出来的很长历史内容，不能覆盖 Hook 最终回复"
 	rt.notificationRunning = true
 	rt.mu.Unlock()
 
-	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", ""); err != nil || !accepted {
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "", "本轮最终回复"); err != nil || !accepted {
 		t.Fatalf("hook completion accepted=%v err=%v", accepted, err)
 	}
 	first := waitForNotifierNotes(t, notifier, 1)
 	if first[0].SuppressUpdateTip {
 		t.Fatal("the Hook completion write should be allowed to send the first completion tip")
+	}
+	if first[0].Content != "本轮最终回复" || first[0].SnapshotSource != "codex_hook:last_assistant_message" {
+		t.Fatalf("Hook completion should prefer its final assistant message, got %#v", first[0])
 	}
 	// A browser reload can provide a different valid rendering of the same
 	// completed round. The card may still be patched, but completion is not a
@@ -135,16 +138,61 @@ func TestHookCompletionTipIsClaimedOncePerRound(t *testing.T) {
 	version := rt.notifyVersion
 	rt.mu.Unlock()
 	rt.notifyIfStillWaitingWithMode(version, true, false)
-	second := waitForNotifierNotes(t, notifier, 2)
-	if !second[1].SuppressUpdateTip {
-		t.Fatal("same-round renderer refresh should suppress the repeated completion tip")
+	if notes := notifier.notes(); len(notes) != 1 {
+		t.Fatalf("same-round renderer refresh should not rewrite authoritative Hook content, got %#v", notes)
 	}
 
 	rt.MarkInputActivity("next round\r")
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.hookCompletedCurrentRound || rt.hookCompletionTipClaimed {
+	if rt.hookCompletedCurrentRound || rt.hookCompletionTipClaimed || rt.hookLastAssistantMessage != "" {
 		t.Fatal("new input should reset Hook completion-tip idempotency")
+	}
+}
+
+func TestLateHookAssistantMessageCorrectsIdleFallback(t *testing.T) {
+	notifier := &recordingNotifier{}
+	manager := NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0))
+	rt := &RuntimeSession{
+		manager: manager,
+		session: Session{
+			ID:              "sess-1",
+			Name:            "A",
+			Status:          StatusWaiting,
+			Live:            true,
+			NotifyOnWaiting: true,
+			RecoveryKey:     "hook-token",
+			LastMode:        SessionModeAgent,
+			LastAgentKind:   "codex",
+		},
+		lastInputText:            "修复问题",
+		lastNotifiedMessageID:    "card-1",
+		lastNotifiedContent:      "历史内容\n历史内容\n错误兜底",
+		lastNotifiedRoundHash:    notifyContentHash("历史内容\n历史内容\n错误兜底"),
+		notificationRunning:      false,
+		snapshotAtRoundStartSet:  true,
+		snapshotAtRoundVersion:   2,
+		visibleSnapshotVersion:   1,
+		notifyVersion:            3,
+		hookCompletionTipClaimed: true,
+	}
+	manager.sessions[rt.session.ID] = rt
+
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "", "本轮权威最终回复"); err != nil || !accepted {
+		t.Fatalf("late Hook completion accepted=%v err=%v", accepted, err)
+	}
+	notes := waitForNotifierNotes(t, notifier, 1)
+	if notes[0].Content != "本轮权威最终回复" || notes[0].MessageID != "card-1" {
+		t.Fatalf("late Hook should replace the fallback content, got %#v", notes[0])
+	}
+	if !notes[0].SuppressUpdateTip {
+		t.Fatal("late Hook correction must not announce completion again")
+	}
+	if _, accepted, err := manager.CompleteAgentTurn(context.Background(), rt.session.ID, "hook-token", "", "本轮权威最终回复"); err != nil || accepted {
+		t.Fatalf("duplicate late Hook accepted=%v err=%v", accepted, err)
+	}
+	if notes := notifier.notes(); len(notes) != 1 {
+		t.Fatalf("duplicate late Hook must not rewrite the card, got %#v", notes)
 	}
 }
 
@@ -1028,6 +1076,36 @@ func TestRefreshNotificationMessageUsesCurrentRoundSnapshot(t *testing.T) {
 	}
 	if rt.notificationUpdateNo != 2 {
 		t.Fatalf("runtime update marker should not increase on manual refresh, got %d", rt.notificationUpdateNo)
+	}
+}
+
+func TestRefreshBeforeStopHookStillUsesVisibleTail(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refresh func(*RuntimeSession) error
+	}{
+		{name: "manual", refresh: func(rt *RuntimeSession) error { return rt.RefreshNotificationMessage("bot-card") }},
+		{name: "auto", refresh: func(rt *RuntimeSession) error { return rt.AutoRefreshNotificationMessage("bot-card") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			notifier := &recordingNotifier{messageID: "bot-card"}
+			rt := &RuntimeSession{
+				manager:               NewManager(nil, nil, WithNotifier(notifier), WithNotificationUpdateCoalesce(0)),
+				session:               Session{ID: "sess-1", Name: "A", Status: StatusRunning, Live: true, NotifyOnWaiting: true, LastMode: SessionModeAgent, LastAgentKind: "codex"},
+				lastInputText:         "正在执行的任务",
+				lastNotifiedMessageID: "bot-card",
+				roundReply:            []byte("current round produced terminal output"),
+				visibleSnapshot:       "历史内容\n• 本轮尚未结束时的可见进度",
+			}
+
+			if err := tc.refresh(rt); err != nil {
+				t.Fatal(err)
+			}
+			notes := notifier.notes()
+			if len(notes) != 1 || !strings.Contains(notes[0].Content, "本轮尚未结束时的可见进度") {
+				t.Fatalf("refresh before Stop Hook must keep the visible-tail fallback, got %#v", notes)
+			}
+		})
 	}
 }
 

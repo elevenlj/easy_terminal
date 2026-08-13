@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"easy_terminal/internal/session"
 )
 
 func TestEmbeddedStaticAssetsDisableStaleBrowserCaching(t *testing.T) {
@@ -29,5 +33,35 @@ func TestEmbeddedStaticAssetsDisableStaleBrowserCaching(t *testing.T) {
 				t.Fatalf("GET %s Expires = %q, want %q", path, got, want)
 			}
 		})
+	}
+}
+
+func TestAgentStopHookAcceptsLastAssistantMessage(t *testing.T) {
+	terminal := newWSBridgeTestTerminal()
+	manager := session.NewManager(nil, wsBridgeTestLauncher{terminal: terminal})
+	sess, err := manager.CreateSession(context.Background(), "hook-content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, ok := manager.GetRuntime(sess.ID)
+	if !ok {
+		t.Fatal("runtime session missing")
+	}
+	defer rt.Close()
+	rt.RecordShellCommandForRecovery("codex --dangerously-bypass-approvals-and-sandbox")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/"+sess.ID+"/hook/turn-ended", strings.NewReader(`{
+		"session_id":"019f5153-6e7f-7742-9f61-3ffe1530d61c",
+		"last_assistant_message":"本轮 Hook 最终回复"
+	}`))
+	req.Header.Set("X-Easy-Terminal-Hook-Token", sess.RecoveryKey)
+	rec := httptest.NewRecorder()
+	NewServer(manager, "").Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("hook status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rt.CachedCurrentRoundContent(); got != "本轮 Hook 最终回复" {
+		t.Fatalf("hook content = %q", got)
 	}
 }

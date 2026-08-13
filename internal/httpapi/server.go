@@ -225,8 +225,10 @@ func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request, session
 		}
 	}
 	var payload struct {
-		SessionID string `json:"session_id"`
-		ThreadID  string `json:"thread-id"`
+		SessionID                  string `json:"session_id"`
+		ThreadID                   string `json:"thread-id"`
+		LastAssistantMessage       string `json:"last_assistant_message"`
+		LegacyLastAssistantMessage string `json:"last-assistant-message"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
@@ -237,7 +239,11 @@ func (s *Server) handleAgentHook(w http.ResponseWriter, r *http.Request, session
 	if codexThreadID == "" {
 		codexThreadID = strings.TrimSpace(payload.ThreadID)
 	}
-	sess, accepted, err := s.manager.CompleteAgentTurn(r.Context(), sessionID, token, codexThreadID)
+	lastAssistantMessage := strings.TrimSpace(payload.LastAssistantMessage)
+	if lastAssistantMessage == "" {
+		lastAssistantMessage = strings.TrimSpace(payload.LegacyLastAssistantMessage)
+	}
+	sess, accepted, err := s.manager.CompleteAgentTurn(r.Context(), sessionID, token, codexThreadID, lastAssistantMessage)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err)
 		return

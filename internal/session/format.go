@@ -119,6 +119,16 @@ func truncateForLark(text string) string {
 	return truncateRunesFromTail(text, maxLarkTextRunes, larkTruncatedPrefix)
 }
 
+func pickLarkNotifyHookAssistantContent(message string) string {
+	body := trimVisibleText(message)
+	body = applyConfiguredLarkNotifyFilters(body)
+	body = trimVisibleText(body)
+	if body == "" {
+		return ""
+	}
+	return truncateForLark(sanitizeForLarkAudit(body))
+}
+
 // pickLarkNotifyFallbackTailContent is the explicit no-anchor fallback. It
 // keeps the newest configured number of visible lines while still applying
 // the same prompt cleanup, user filters, audit sanitization, and hard card
