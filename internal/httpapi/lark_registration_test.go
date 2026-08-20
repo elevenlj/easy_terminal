@@ -57,6 +57,7 @@ func TestLarkRegistrationBeginFormRequestsMessageAndCardCapabilities(t *testing.
 	}
 	events := form.Get("events")
 	for _, want := range []string{
+		"im.chat.member.bot.added_v1",
 		"im.message.receive_v1",
 		"im.message.message_read_v1",
 		"im.message.reaction.created_v1",

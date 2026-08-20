@@ -76,6 +76,95 @@ func TestLarkReplyBridgeAddsProcessingReactionForP2Message(t *testing.T) {
 	}
 }
 
+func TestLarkReplyBridgeBotAddedCreatesBoundMentionModeAgentSession(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	bridge.SetStartPresets(map[string]SessionStartPreset{
+		"999999": {Commands: []string{"codex --dangerously-bypass-approvals-and-sandbox"}},
+	})
+	var chatMessages []string
+	bridge.sendChatText = func(_ context.Context, chatID, text string) error {
+		chatMessages = append(chatMessages, chatID+":"+text)
+		return nil
+	}
+	external := false
+	event := &larkim.P2ChatMemberBotAddedV1{Event: &larkim.P2ChatMemberBotAddedV1Data{
+		ChatId:     strPtr("oc-project-group"),
+		Name:       strPtr("项目开发群"),
+		External:   &external,
+		OperatorId: &larkim.UserId{OpenId: strPtr("ou-owner")},
+	}}
+
+	if err := bridge.HandleP2ChatMemberBotAdded(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := manager.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	sess := sessions[0]
+	if sess.Name != "项目开发群" || sess.LarkChatID != "oc-project-group" || !sess.LarkMentionModeEnabled || !sess.NotifyOnWaiting {
+		t.Fatalf("unexpected auto-created session: %#v", sess)
+	}
+	if sess.LastMode != SessionModeAgent || sess.LastAgentKind != "codex" {
+		t.Fatalf("session should enter configured agent mode: %#v", sess)
+	}
+	writes := launcher.terminals[0].writeParts()
+	wantWrites := []string{
+		"mkdir -p ${HOME}/'Easy_Terminal_Workspace/项目开发群'\r",
+		"cd ${HOME}/'Easy_Terminal_Workspace/项目开发群'\r",
+		"codex --dangerously-bypass-approvals-and-sandbox\r",
+	}
+	if len(writes) < len(wantWrites) {
+		t.Fatalf("terminal writes = %#v, want suffix %#v", writes, wantWrites)
+	}
+	writes = writes[len(writes)-len(wantWrites):]
+	for i := range wantWrites {
+		if writes[i] != wantWrites[i] {
+			t.Fatalf("terminal write[%d] = %q, want %q", i, writes[i], wantWrites[i])
+		}
+	}
+	wantMessage := "oc-project-group:已创建并绑定会话「项目开发群」，请 @机器人发送任务。"
+	if len(chatMessages) != 1 || chatMessages[0] != wantMessage {
+		t.Fatalf("chat messages = %#v, want %q", chatMessages, wantMessage)
+	}
+	if strings.Contains(chatMessages[0], "Easy_Terminal_Workspace") || strings.Contains(chatMessages[0], "codex") {
+		t.Fatalf("intro should not expose workspace or agent: %q", chatMessages[0])
+	}
+
+	if err := bridge.HandleP2ChatMemberBotAdded(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 1 || len(chatMessages) != 1 {
+		t.Fatalf("duplicate event created side effects: terminals=%d messages=%#v", len(launcher.terminals), chatMessages)
+	}
+}
+
+func TestLarkReplyBridgeBotAddedIgnoresExternalGroup(t *testing.T) {
+	resetLarkRegistryForTest()
+	launcher := &recordingLauncher{}
+	manager := NewManager(nil, launcher)
+	bridge := NewLarkReplyBridge("app", "secret", manager, t.TempDir())
+	external := true
+	event := &larkim.P2ChatMemberBotAddedV1{Event: &larkim.P2ChatMemberBotAddedV1Data{
+		ChatId:   strPtr("oc-external"),
+		Name:     strPtr("外部群"),
+		External: &external,
+	}}
+
+	if err := bridge.HandleP2ChatMemberBotAdded(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if len(launcher.terminals) != 0 {
+		t.Fatalf("external group should not create a terminal, got %d", len(launcher.terminals))
+	}
+}
+
 func TestLarkReplyBridgeIgnoresConfiguredP2PrefixWithFollowingSpace(t *testing.T) {
 	resetLarkRegistryForTest()
 	launcher := &recordingLauncher{}

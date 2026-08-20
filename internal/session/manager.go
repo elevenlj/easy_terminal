@@ -611,6 +611,31 @@ func (m *Manager) ToggleLarkMentionMode(ctx context.Context, id string) (Session
 	return s, true, err
 }
 
+func (m *Manager) UpdateLarkMentionMode(ctx context.Context, id string, enabled bool) (Session, bool, error) {
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return Session{}, exists, err
+		}
+		s.LarkMentionModeEnabled = enabled
+		s.UpdatedAt = time.Now().UTC()
+		if m.store != nil {
+			err = m.store.UpdateSession(ctx, s)
+		}
+		s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+		return s, true, err
+	}
+	rt.mu.Lock()
+	rt.session.LarkMentionModeEnabled = enabled
+	rt.session.UpdatedAt = time.Now().UTC()
+	s := rt.session
+	rt.mu.Unlock()
+	err := m.persist(ctx, s)
+	s.NotificationsAvailable = m.notifier != nil && m.notifier.Available()
+	return s, true, err
+}
+
 func (m *Manager) BindLarkChat(ctx context.Context, id string, chatID string) (Session, bool, error) {
 	chatID = strings.TrimSpace(chatID)
 	rt, ok := m.GetRuntime(id)

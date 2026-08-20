@@ -40,6 +40,7 @@ type LarkReplyBridge struct {
 	customShortcuts         []LarkCustomShortcut
 	botIdentity             larkBotIdentity
 	mu                      sync.Mutex
+	groupSessionMu          sync.Mutex
 	seenMessages            map[string]time.Time
 	pendingFiles            map[string][]pendingLarkAttachment
 	pipelines               map[string][]larkPipelineInput
@@ -194,6 +195,9 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 		b.startMu.Unlock()
 	}()
 	handler := dispatcher.NewEventDispatcher("", "").
+		OnP2ChatMemberBotAddedV1(func(ctx context.Context, event *larkim.P2ChatMemberBotAddedV1) error {
+			return b.HandleP2ChatMemberBotAdded(ctx, event)
+		}).
 		OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 			return b.HandleP2MessageReceive(ctx, event)
 		}).
@@ -644,6 +648,58 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		return err
 	}
 	log.Printf("lark reply bridge routed message %s to %s", valueOf(msg.MessageId), sessionID)
+	return nil
+}
+
+func (b *LarkReplyBridge) HandleP2ChatMemberBotAdded(ctx context.Context, event *larkim.P2ChatMemberBotAddedV1) error {
+	if b == nil || b.manager == nil || event == nil || event.Event == nil {
+		return nil
+	}
+	if event.Event.External != nil && *event.Event.External {
+		log.Printf("lark reply bridge ignored bot-added event chat=%s reason=external_group", valueOf(event.Event.ChatId))
+		return nil
+	}
+	chatID := strings.TrimSpace(valueOf(event.Event.ChatId))
+	name := strings.TrimSpace(valueOf(event.Event.Name))
+	if chatID == "" || name == "" {
+		return fmt.Errorf("lark bot-added event missing chat id or name")
+	}
+
+	b.groupSessionMu.Lock()
+	defer b.groupSessionMu.Unlock()
+	if sess, ok, err := b.manager.FindSessionByLarkChatID(ctx, chatID); err != nil {
+		return err
+	} else if ok {
+		if !sess.LarkMentionModeEnabled {
+			_, _, err = b.manager.UpdateLarkMentionMode(ctx, sess.ID, true)
+		}
+		return err
+	}
+
+	sess, err := b.createLarkSessionForMessage(ctx, name, larkRouteContext{
+		ChatID:       chatID,
+		ChatType:     "group",
+		SenderOpenID: larkUserOpenID(event.Event.OperatorId),
+	})
+	if err != nil {
+		return err
+	}
+	if updated, ok, updateErr := b.manager.UpdateLarkMentionMode(ctx, sess.ID, true); updateErr != nil {
+		log.Printf("lark reply bridge failed to enable mention mode session=%s chat=%s: %v", sess.ID, chatID, updateErr)
+	} else if ok {
+		sess = updated
+	}
+	if err := b.runDefaultWorkspacePreset(sess); err != nil {
+		log.Printf("lark bot-added workspace preset failed session=%s name=%q: %v", sess.ID, sess.Name, err)
+	} else if err := b.runSessionStartPresets(sess, "999999"); err != nil {
+		log.Printf("lark bot-added agent preset failed session=%s name=%q: %v", sess.ID, sess.Name, err)
+	}
+	if b.sendChatText != nil {
+		if err := b.sendChatText(ctx, chatID, fmt.Sprintf("已创建并绑定会话「%s」，请 @机器人发送任务。", sess.Name)); err != nil {
+			log.Printf("lark bot-added intro failed session=%s chat=%s: %v", sess.ID, chatID, err)
+		}
+	}
+	log.Printf("lark reply bridge created group session=%s chat=%s name=%q", sess.ID, chatID, sess.Name)
 	return nil
 }
 
@@ -2013,6 +2069,13 @@ func larkSenderOpenID(sender *larkim.EventSender) string {
 		return ""
 	}
 	return *sender.SenderId.OpenId
+}
+
+func larkUserOpenID(user *larkim.UserId) string {
+	if user == nil {
+		return ""
+	}
+	return valueOf(user.OpenId)
 }
 
 func cleanLarkText(text string) string {

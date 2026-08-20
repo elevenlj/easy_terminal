@@ -46,6 +46,7 @@ var (
 		"cardkit:card:write",
 	}
 	larkRegistrationEvents = []string{
+		"im.chat.member.bot.added_v1",
 		"im.message.receive_v1",
 		"im.message.message_read_v1",
 		"im.message.reaction.created_v1",
