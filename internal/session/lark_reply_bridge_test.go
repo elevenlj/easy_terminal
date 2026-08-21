@@ -73,10 +73,6 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ToggleLarkAlertMode ok=%v err=%v", ok, err)
 	}
-	controllerRT.mu.Lock()
-	controllerRT.session.LarkAlertCursorMillis = time.Now().Add(-2 * larkAlertCardSettleDelay).UnixMilli()
-	controller = controllerRT.session
-	controllerRT.mu.Unlock()
 	bridge := NewLarkReplyBridge("cli_easy", "secret", manager, t.TempDir())
 	bridge.SetAlertConfig("codex", "告警专用 PE", `^cli_kepler$`, `L2告警`, time.Second, time.Hour)
 	createdAt := controller.LarkAlertCursorMillis + 1
@@ -105,11 +101,6 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 				Sender: &larkim.Sender{Id: strPtr("cli_argos"), SenderType: strPtr("app")},
 				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】其他应用"}}}`)},
 			},
-			{
-				MessageId: strPtr("om-alert-still-updating"), CreateTime: strPtr(strconv.FormatInt(time.Now().UnixMilli(), 10)), MsgType: strPtr("interactive"),
-				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】分析中"}}}`)},
-			},
 		}, nil
 	}
 	if err := bridge.pollLarkAlertsOnce(context.Background()); err != nil {
@@ -124,9 +115,6 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 	}
 	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-other-app"); err != nil || found {
 		t.Fatalf("non-matching app id should be ignored found=%v err=%v", found, err)
-	}
-	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-still-updating"); err != nil || found {
-		t.Fatalf("fresh card should wait for asynchronous updates found=%v err=%v", found, err)
 	}
 	if alert.LarkThreadID != "omt-alert-1" || alert.LarkTopicRootID != "om-alert-1" || alert.LarkAlertParentSessionID != controller.ID {
 		t.Fatalf("unexpected alert routing metadata: %#v", alert)

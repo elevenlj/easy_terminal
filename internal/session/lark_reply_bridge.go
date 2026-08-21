@@ -72,7 +72,6 @@ const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
 const larkDisabledCardToastContent = "已失效，请点击最新卡片的按钮"
 const defaultWorkspaceRootDir = "Easy_Terminal_Workspace"
-const larkAlertCardSettleDelay = time.Minute
 
 var larkAlertAgentStartupDelay = 1200 * time.Millisecond
 
@@ -331,9 +330,6 @@ func (b *LarkReplyBridge) pollLarkAlertsOnce(ctx context.Context) error {
 			createdAt, _ := strconv.ParseInt(valueOf(message.CreateTime), 10, 64)
 			if createdAt <= cursor {
 				continue
-			}
-			if b.isExternalLarkAlertCard(message) && time.Since(time.UnixMilli(createdAt)) < larkAlertCardSettleDelay {
-				break
 			}
 			if createdAt > nextCursor {
 				nextCursor = createdAt
