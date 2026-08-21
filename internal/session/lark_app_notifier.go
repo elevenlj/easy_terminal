@@ -162,7 +162,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 		elements = append(elements, contextElement)
 	}
 	if !note.Disabled {
-		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.MentionModeEnabled, note.AlertModeAvailable, note.AlertModeEnabled)...)
+		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.MentionModeEnabled, note.AlertModeAvailable, note.AlertModeEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 			elements = append(elements, map[string]any{"tag": "hr"})
 			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
@@ -402,10 +402,9 @@ func larkTerminalPlainText(content string) string {
 	return content
 }
 
-func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, mentionModeEnabled bool, alertMode ...bool) []map[string]any {
+func larkShortcutActionElements(sessionID string, updateNo int, mentionModeEnabled bool, alertMode ...bool) []map[string]any {
 	columns := []map[string]any{
 		larkRefreshButtonColumn(sessionID, updateNo),
-		larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
 		larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
 		larkShortcutButtonColumn("Ctrl-C", "default", sessionID, "ctrl_c"),
 		larkShortcutButtonColumn("Esc", "default", sessionID, "esc"),
@@ -487,37 +486,6 @@ func larkMentionModeButtonColumn(sessionID string, updateNo int, enabled bool) m
 						"type": "callback",
 						"value": map[string]any{
 							"easy_terminal_action": "toggle_mention_mode",
-							"session_id":           sessionID,
-							"update_no":            updateNo,
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-func larkAutoRefreshButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
-	label := "自动刷新"
-	if enabled {
-		label = "停自动"
-	}
-	return map[string]any{
-		"tag":              "column",
-		"width":            "auto",
-		"vertical_spacing": "8px",
-		"elements": []map[string]any{
-			{
-				"tag":   "button",
-				"type":  "default",
-				"size":  "tiny",
-				"width": "default",
-				"text":  map[string]any{"tag": "plain_text", "content": label},
-				"behaviors": []map[string]any{
-					{
-						"type": "callback",
-						"value": map[string]any{
-							"easy_terminal_action": "toggle_auto_refresh",
 							"session_id":           sessionID,
 							"update_no":            updateNo,
 						},
