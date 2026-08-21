@@ -2212,6 +2212,10 @@ $("lark-copy-permission-json").onclick = () => copyText(larkGroupMessagePermissi
 $("cfg-agent-preset").onchange = () => {
   renderAgentPresetControls();
   setAgentPresetStatus("");
+  if ($("cfg-agent-preset").value === "custom" && !$("cfg-agent-custom-command").value.trim()) {
+    $("cfg-agent-custom-command").focus();
+    return;
+  }
   ensureDefaultAgentPreset();
 };
 
