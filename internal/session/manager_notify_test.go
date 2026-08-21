@@ -2395,23 +2395,26 @@ func TestLarkUpdateWaitingSendsTaskCompletedTip(t *testing.T) {
 	notifier := &LarkAppNotifier{}
 	notifier.client = fakeLarkSuccessClient(t)
 	var sent int
-	notifier.tipSender = func(messageID, chatID string, updateNo int) error {
+	var replyTo string
+	notifier.tipSender = func(messageID, chatID, replyToMessageID string, updateNo int) error {
 		sent++
+		replyTo = replyToMessageID
 		return nil
 	}
 
 	result, err := notifier.updateWaiting(WaitingNotification{
-		SessionID: "sess-1",
-		Name:      "A",
-		Content:   "updated",
-		MessageID: "msg-1",
-		UpdateNo:  2,
+		SessionID:        "sess-1",
+		Name:             "A",
+		Content:          "updated",
+		MessageID:        "msg-1",
+		ReplyToMessageID: "om-topic-root",
+		UpdateNo:         2,
 	}, "{}")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.TipSent || sent != 1 {
-		t.Fatalf("card completion should create one completion-tip message, got result=%#v sent=%d", result, sent)
+	if !result.TipSent || sent != 1 || replyTo != "om-topic-root" {
+		t.Fatalf("card completion should create one topic completion-tip message, got result=%#v sent=%d reply_to=%q", result, sent, replyTo)
 	}
 	content, err := larkUpdateTipCardContent(2, "", false)
 	if err != nil || !strings.Contains(content, `"content":"任务已完成"`) || strings.Contains(content, "已更新") {

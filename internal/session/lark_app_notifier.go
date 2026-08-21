@@ -40,7 +40,7 @@ type LarkAppNotifier struct {
 	customShortcuts  []LarkCustomShortcut
 	tipMu            sync.Mutex
 	tipSent          map[string]map[int]bool
-	tipSender        func(string, string, int) error
+	tipSender        func(string, string, string, int) error
 }
 
 func NewLarkAppNotifier(appID, appSecret, receiveID string, mention bool) *LarkAppNotifier {
@@ -718,7 +718,7 @@ func (n *LarkAppNotifier) updateWaiting(note WaitingNotification, content string
 	}
 	tipSent := false
 	if note.UpdateNo > 0 && !note.SuppressUpdateTip {
-		if err := n.sendUpdateTipOnce(note.MessageID, note.ChatID, note.UpdateNo, larkNotificationMentionID(note, n.receiveID)); err == nil {
+		if err := n.sendUpdateTipOnce(note.MessageID, note.ChatID, note.ReplyToMessageID, note.UpdateNo, larkNotificationMentionID(note, n.receiveID)); err == nil {
 			tipSent = true
 		}
 	}
@@ -752,7 +752,7 @@ func (n *LarkAppNotifier) UpdateWaitingRunning(note WaitingNotification, running
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, updateNo int, mentionID string) error {
+func (n *LarkAppNotifier) sendUpdateTipOnce(messageID, chatID, replyToMessageID string, updateNo int, mentionID string) error {
 	if messageID == "" || updateNo <= 0 {
 		return nil
 	}
@@ -773,11 +773,11 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 
 	send := n.sendUpdateTip
 	if n.tipSender != nil {
-		send = func(messageID string, chatID string, updateNo int, _ string) error {
-			return n.tipSender(messageID, chatID, updateNo)
+		send = func(messageID, chatID, replyToMessageID string, updateNo int, _ string) error {
+			return n.tipSender(messageID, chatID, replyToMessageID, updateNo)
 		}
 	}
-	if err := retryLarkVoid(func() error { return send(messageID, chatID, updateNo, mentionID) }); err != nil {
+	if err := retryLarkVoid(func() error { return send(messageID, chatID, replyToMessageID, updateNo, mentionID) }); err != nil {
 		return err
 	}
 
@@ -790,10 +790,28 @@ func (n *LarkAppNotifier) sendUpdateTipOnce(messageID string, chatID string, upd
 	return nil
 }
 
-func (n *LarkAppNotifier) sendUpdateTip(messageID string, chatID string, updateNo int, mentionID string) error {
+func (n *LarkAppNotifier) sendUpdateTip(messageID, chatID, replyToMessageID string, updateNo int, mentionID string) error {
 	content, err := larkUpdateTipCardContent(updateNo, mentionID, n.mention)
 	if err != nil {
 		return err
+	}
+	if replyToMessageID = strings.TrimSpace(replyToMessageID); replyToMessageID != "" {
+		req := larkim.NewReplyMessageReqBuilder().
+			MessageId(replyToMessageID).
+			Body(larkim.NewReplyMessageReqBodyBuilder().
+				MsgType("interactive").
+				Content(content).
+				ReplyInThread(true).
+				Build()).
+			Build()
+		resp, err := n.client.Im.V1.Message.Reply(context.Background(), req)
+		if err != nil {
+			return err
+		}
+		if !resp.Success() {
+			return fmt.Errorf("lark completion tip reply API returned code %d: %s", resp.Code, resp.Msg)
+		}
+		return nil
 	}
 	receiveID := strings.TrimSpace(chatID)
 	receiveIDType := "chat_id"

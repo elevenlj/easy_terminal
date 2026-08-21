@@ -73,6 +73,10 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ToggleLarkAlertMode ok=%v err=%v", ok, err)
 	}
+	controllerRT.mu.Lock()
+	controllerRT.session.LarkAlertCursorMillis = time.Now().Add(-2 * larkAlertCardSettleDelay).UnixMilli()
+	controller = controllerRT.session
+	controllerRT.mu.Unlock()
 	bridge := NewLarkReplyBridge("cli_easy", "secret", manager, t.TempDir())
 	bridge.SetAlertConfig("codex", "告警专用 PE", `^cli_kepler$`, `L2告警`, time.Second, time.Hour)
 	createdAt := controller.LarkAlertCursorMillis + 1
@@ -89,7 +93,7 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 			{
 				MessageId: strPtr("om-alert-1"), ThreadId: strPtr("omt-alert-1"), CreateTime: strPtr(strconv.FormatInt(createdAt, 10)), MsgType: strPtr("interactive"),
 				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】支付失败"}},"body":{"elements":[{"tag":"div","text":{"tag":"lark_md","content":"服务：pay.api"}}]}}`)},
+				Body:   &larkim.MessageBody{Content: strPtr(`{"title":"【L2告警】支付失败","elements":[[{"tag":"text","text":"服务：pay.api"}],[{"tag":"text","text":"🎯 根因结论"},{"tag":"a","text":"查看详情","href":"https://example.com/alert/1"}]]}`)},
 			},
 			{
 				MessageId: strPtr("om-alert-ignored"), CreateTime: strPtr(strconv.FormatInt(createdAt+1, 10)), MsgType: strPtr("interactive"),
@@ -100,6 +104,11 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 				MessageId: strPtr("om-alert-other-app"), CreateTime: strPtr(strconv.FormatInt(createdAt+2, 10)), MsgType: strPtr("interactive"),
 				Sender: &larkim.Sender{Id: strPtr("cli_argos"), SenderType: strPtr("app")},
 				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】其他应用"}}}`)},
+			},
+			{
+				MessageId: strPtr("om-alert-still-updating"), CreateTime: strPtr(strconv.FormatInt(time.Now().UnixMilli(), 10)), MsgType: strPtr("interactive"),
+				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
+				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】分析中"}}}`)},
 			},
 		}, nil
 	}
@@ -116,6 +125,9 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-other-app"); err != nil || found {
 		t.Fatalf("non-matching app id should be ignored found=%v err=%v", found, err)
 	}
+	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-still-updating"); err != nil || found {
+		t.Fatalf("fresh card should wait for asynchronous updates found=%v err=%v", found, err)
+	}
 	if alert.LarkThreadID != "omt-alert-1" || alert.LarkTopicRootID != "om-alert-1" || alert.LarkAlertParentSessionID != controller.ID {
 		t.Fatalf("unexpected alert routing metadata: %#v", alert)
 	}
@@ -127,7 +139,7 @@ func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	writes := launcher.terminals[1].writes()
-	for _, want := range []string{"cd '/srv/project'\r", "codex\r", "告警专用 PE", "【L2告警】支付失败", "服务：pay.api"} {
+	for _, want := range []string{"cd '/srv/project'\r", "codex\r", "告警专用 PE", "【L2告警】支付失败", "服务：pay.api", "🎯 根因结论", "https://example.com/alert/1"} {
 		if !strings.Contains(writes, want) {
 			t.Fatalf("alert terminal writes missing %q: %q", want, writes)
 		}
@@ -226,7 +238,7 @@ func TestLarkAlertNotificationRepliesInsideSourceTopic(t *testing.T) {
 		return httpJSONResponse(`{"code":0,"data":{"message_id":"om-result","root_id":"om-source"}}`), nil
 	})}
 	t.Cleanup(func() { http.DefaultClient = oldClient })
-	notifier := NewLarkAppNotifier("app", "secret", "ou-default", false)
+	notifier := NewLarkAppNotifier("app", "secret", "ou-default", true)
 	result, err := notifier.createWaiting(WaitingNotification{
 		SessionID: "sess-alert", Content: "done", ReplyToMessageID: "om-source",
 	}, `{"schema":"2.0"}`)
@@ -238,6 +250,13 @@ func TestLarkAlertNotificationRepliesInsideSourceTopic(t *testing.T) {
 	}
 	if result.MessageID != "om-result" || result.RootID != "om-source" {
 		t.Fatalf("topic reply result = %#v", result)
+	}
+	replyPath, replyBody = "", ""
+	if err := notifier.sendUpdateTip("om-result", "", "om-source", 1, "ou-user"); err != nil {
+		t.Fatal(err)
+	}
+	if replyPath != "/open-apis/im/v1/messages/om-source/reply" || !strings.Contains(replyBody, `"reply_in_thread":true`) || !strings.Contains(replyBody, "ou-user") || strings.Contains(replyBody, "receive_id") {
+		t.Fatalf("topic completion request path=%q body=%s", replyPath, replyBody)
 	}
 }
 
@@ -1781,6 +1800,25 @@ func TestLarkReplyBridgeCardDeleteSessionRemovesBotFromChat(t *testing.T) {
 	if _, err := os.Stat(uploadPath); !os.IsNotExist(err) {
 		t.Fatalf("delete should remove session upload dir, err=%v", err)
 	}
+
+	alert, err := manager.CreateSession(context.Background(), "Alert")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.ConfigureLarkAlertSession(context.Background(), alert.ID, "sess-parent", "omt-alert", "om-source", "om-source", "告警"); err != nil || !ok {
+		t.Fatalf("ConfigureLarkAlertSession ok=%v err=%v", ok, err)
+	}
+	defaultLarkMessageRegistry.remember(alert.ID, "alert-card")
+	removedChats = nil
+	event.Event.Action.Value["session_id"] = alert.ID
+	event.Event.Context.OpenMessageID = "alert-card"
+	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Toast == nil || resp.Toast.Content != "会话已删除" || len(removedChats) != 0 {
+		t.Fatalf("deleting alert session must keep bot in parent chat, response=%#v removed=%#v", resp, removedChats)
+	}
 }
 
 func TestLarkReplyBridgeCardDeleteSessionReportsBotRemovalFailure(t *testing.T) {
@@ -3295,7 +3333,7 @@ func httpJSONResponse(body string) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Status:     "200 OK",
-		Header:     make(http.Header),
+		Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }

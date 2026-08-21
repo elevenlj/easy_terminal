@@ -72,6 +72,7 @@ const larkProcessingReactionEmoji = "THINKING"
 const defaultLarkSessionChatPrefix = "ET · "
 const larkDisabledCardToastContent = "已失效，请点击最新卡片的按钮"
 const defaultWorkspaceRootDir = "Easy_Terminal_Workspace"
+const larkAlertCardSettleDelay = time.Minute
 
 var larkAlertAgentStartupDelay = 1200 * time.Millisecond
 
@@ -331,6 +332,9 @@ func (b *LarkReplyBridge) pollLarkAlertsOnce(ctx context.Context) error {
 			if createdAt <= cursor {
 				continue
 			}
+			if b.isExternalLarkAlertCard(message) && time.Since(time.UnixMilli(createdAt)) < larkAlertCardSettleDelay {
+				break
+			}
 			if createdAt > nextCursor {
 				nextCursor = createdAt
 			}
@@ -583,7 +587,7 @@ func collectLarkAlertCardText(value any, parts *[]string) {
 			collectLarkAlertCardText(item, parts)
 		}
 	case map[string]any:
-		for _, key := range []string{"header", "title", "subtitle", "body", "elements", "columns", "fields", "text", "content"} {
+		for _, key := range []string{"header", "title", "subtitle", "body", "elements", "columns", "fields", "text", "content", "href"} {
 			collectLarkAlertCardText(x[key], parts)
 		}
 	case string:
@@ -755,6 +759,7 @@ func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map
 		return blocked, nil
 	}
 	sess := rt.Snapshot()
+	removeBot := strings.TrimSpace(sess.LarkAlertSourceMessageID) == ""
 	chatID := strings.TrimSpace(sess.LarkChatID)
 	if chatID == "" {
 		chatID = strings.TrimSpace(openChatID)
@@ -769,7 +774,7 @@ func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map
 		return nil, err
 	}
 	log.Printf("lark card deleted session=%s message=%s chat=%s", sessionID, openMessageID, chatID)
-	if chatID != "" && b.removeBotFromChat != nil {
+	if removeBot && chatID != "" && b.removeBotFromChat != nil {
 		if err := b.removeBotFromChat(ctx, chatID); err != nil {
 			log.Printf("lark card deleted session but failed to remove bot from chat session=%s chat=%s: %v", sessionID, chatID, err)
 			return larkCardToast("warning", "会话已删除，但机器人移出群聊失败，请手动移除机器人"), nil
