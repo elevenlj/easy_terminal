@@ -22,6 +22,12 @@ type RuntimeConfig struct {
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
 	LarkAutoSummaryPrompt           string                                `json:"lark_auto_summary_prompt"`
+	LarkAlertAgentCommand           string                                `json:"lark_alert_agent_command"`
+	LarkAlertPrompt                 string                                `json:"lark_alert_prompt"`
+	LarkAlertAppIDPattern           string                                `json:"lark_alert_app_id_pattern"`
+	LarkAlertCardTitlePattern       string                                `json:"lark_alert_card_title_pattern"`
+	LarkAlertPollIntervalMs         int                                   `json:"lark_alert_poll_interval_ms"`
+	LarkAlertSessionTimeoutMinutes  int                                   `json:"lark_alert_session_timeout_minutes"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`

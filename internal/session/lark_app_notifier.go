@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -161,7 +162,7 @@ func larkNotificationCardContent(note WaitingNotification, receiveID string, men
 		elements = append(elements, contextElement)
 	}
 	if !note.Disabled {
-		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.MentionModeEnabled)...)
+		elements = append(elements, larkShortcutActionElements(note.SessionID, note.UpdateNo, note.AutoRefreshEnabled, note.MentionModeEnabled, note.AlertModeAvailable, note.AlertModeEnabled)...)
 		if shortcuts := normalizeLarkCustomShortcuts(customShortcuts); len(shortcuts) > 0 {
 			elements = append(elements, map[string]any{"tag": "hr"})
 			elements = append(elements, larkCustomShortcutActionElements(note.SessionID, shortcuts)...)
@@ -401,18 +402,49 @@ func larkTerminalPlainText(content string) string {
 	return content
 }
 
-func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, mentionModeEnabled bool) []map[string]any {
+func larkShortcutActionElements(sessionID string, updateNo int, autoRefreshEnabled bool, mentionModeEnabled bool, alertMode ...bool) []map[string]any {
+	columns := []map[string]any{
+		larkRefreshButtonColumn(sessionID, updateNo),
+		larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
+		larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
+		larkShortcutButtonColumn("Ctrl-C", "default", sessionID, "ctrl_c"),
+		larkShortcutButtonColumn("Esc", "default", sessionID, "esc"),
+		larkShortcutButtonColumn("Enter", "default", sessionID, "enter"),
+		larkShortcutButtonColumn("退出agent", "default", sessionID, "exit_agent"),
+		larkDeleteSessionButtonColumn(sessionID),
+	}
+	if len(alertMode) >= 2 && alertMode[0] {
+		columns = append(columns, larkAlertModeButtonColumn(sessionID, updateNo, alertMode[1]))
+	}
 	return []map[string]any{
-		larkFlowShortcutActionElement(
-			larkRefreshButtonColumn(sessionID, updateNo),
-			larkAutoRefreshButtonColumn(sessionID, updateNo, autoRefreshEnabled),
-			larkMentionModeButtonColumn(sessionID, updateNo, mentionModeEnabled),
-			larkShortcutButtonColumn("Ctrl-C", "default", sessionID, "ctrl_c"),
-			larkShortcutButtonColumn("Esc", "default", sessionID, "esc"),
-			larkShortcutButtonColumn("Enter", "default", sessionID, "enter"),
-			larkShortcutButtonColumn("退出agent", "default", sessionID, "exit_agent"),
-			larkDeleteSessionButtonColumn(sessionID),
-		),
+		larkFlowShortcutActionElement(columns...),
+	}
+}
+
+func larkAlertModeButtonColumn(sessionID string, updateNo int, enabled bool) map[string]any {
+	label := "告警模式-关"
+	if enabled {
+		label = "告警模式-开"
+	}
+	return map[string]any{
+		"tag":              "column",
+		"width":            "auto",
+		"vertical_spacing": "8px",
+		"elements": []map[string]any{{
+			"tag":   "button",
+			"type":  "default",
+			"size":  "tiny",
+			"width": "default",
+			"text":  map[string]any{"tag": "plain_text", "content": label},
+			"behaviors": []map[string]any{{
+				"type": "callback",
+				"value": map[string]any{
+					"easy_terminal_action": "toggle_alert_mode",
+					"session_id":           sessionID,
+					"update_no":            updateNo,
+				},
+			}},
+		}},
 	}
 }
 
@@ -648,21 +680,26 @@ func (n *LarkAppNotifier) createWaiting(note WaitingNotification, content string
 	// Card creation already obtains a fresh token directly. Reuse it for later
 	// PATCH requests so they do not fall back to the SDK's stale global cache.
 	n.rememberTenantToken(token)
-	receiveID := n.receiveID
-	receiveIDType := "open_id"
-	if note.ChatID != "" {
-		receiveID = note.ChatID
-		receiveIDType = "chat_id"
+	endpoint := ""
+	payloadBody := map[string]any{"msg_type": "interactive", "content": string(content)}
+	if replyTo := strings.TrimSpace(note.ReplyToMessageID); replyTo != "" {
+		endpoint = "https://open.feishu.cn/open-apis/im/v1/messages/" + url.PathEscape(replyTo) + "/reply"
+		payloadBody["reply_in_thread"] = true
+	} else {
+		receiveID := n.receiveID
+		receiveIDType := "open_id"
+		if note.ChatID != "" {
+			receiveID = note.ChatID
+			receiveIDType = "chat_id"
+		}
+		if receiveID == "" {
+			return WaitingNotificationResult{}, errors.New("lark notification receiver is not configured")
+		}
+		endpoint = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=" + receiveIDType
+		payloadBody["receive_id"] = receiveID
 	}
-	if receiveID == "" {
-		return WaitingNotificationResult{}, errors.New("lark notification receiver is not configured")
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"receive_id": receiveID,
-		"msg_type":   "interactive",
-		"content":    string(content),
-	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type="+receiveIDType, bytes.NewReader(payload))
+	payload, _ := json.Marshal(payloadBody)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return WaitingNotificationResult{}, err
 	}

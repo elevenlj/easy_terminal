@@ -636,6 +636,169 @@ func (m *Manager) UpdateLarkMentionMode(ctx context.Context, id string, enabled 
 	return s, true, err
 }
 
+func (m *Manager) ToggleLarkAlertMode(ctx context.Context, id string) (Session, bool, error) {
+	now := time.Now().UTC()
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return Session{}, exists, err
+		}
+		s.LarkAlertModeEnabled = !s.LarkAlertModeEnabled
+		s.LarkAlertCursorMillis = now.UnixMilli()
+		s.UpdatedAt = now
+		if m.store != nil {
+			err = m.store.UpdateSession(ctx, s)
+		}
+		return s, true, err
+	}
+	rt.mu.Lock()
+	rt.session.LarkAlertModeEnabled = !rt.session.LarkAlertModeEnabled
+	rt.session.LarkAlertCursorMillis = now.UnixMilli()
+	rt.session.UpdatedAt = now
+	s := rt.session
+	rt.mu.Unlock()
+	return s, true, m.persist(ctx, s)
+}
+
+func (m *Manager) UpdateLarkAlertCursor(ctx context.Context, id string, cursorMillis int64) error {
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return err
+		}
+		if cursorMillis <= s.LarkAlertCursorMillis {
+			return nil
+		}
+		s.LarkAlertCursorMillis = cursorMillis
+		if m.store != nil {
+			return m.store.UpdateSession(ctx, s)
+		}
+		return nil
+	}
+	rt.mu.Lock()
+	if cursorMillis <= rt.session.LarkAlertCursorMillis {
+		rt.mu.Unlock()
+		return nil
+	}
+	rt.session.LarkAlertCursorMillis = cursorMillis
+	s := rt.session
+	rt.mu.Unlock()
+	return m.persist(ctx, s)
+}
+
+func (m *Manager) ConfigureLarkAlertSession(ctx context.Context, id, parentSessionID, threadID, topicRootID, sourceMessageID, sourceContent string) (Session, bool, error) {
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		s, exists, err := m.GetSession(ctx, id)
+		if err != nil || !exists {
+			return Session{}, exists, err
+		}
+		s.LarkAlertParentSessionID = strings.TrimSpace(parentSessionID)
+		s.LarkThreadID = strings.TrimSpace(threadID)
+		s.LarkTopicRootID = strings.TrimSpace(topicRootID)
+		s.LarkAlertSourceMessageID = strings.TrimSpace(sourceMessageID)
+		s.LarkAlertSourceContent = strings.TrimSpace(sourceContent)
+		s.UpdatedAt = time.Now().UTC()
+		if m.store != nil {
+			err = m.store.UpdateSession(ctx, s)
+		}
+		return s, true, err
+	}
+	rt.mu.Lock()
+	rt.session.LarkAlertParentSessionID = strings.TrimSpace(parentSessionID)
+	rt.session.LarkThreadID = strings.TrimSpace(threadID)
+	rt.session.LarkTopicRootID = strings.TrimSpace(topicRootID)
+	rt.session.LarkAlertSourceMessageID = strings.TrimSpace(sourceMessageID)
+	rt.session.LarkAlertSourceContent = strings.TrimSpace(sourceContent)
+	rt.session.UpdatedAt = time.Now().UTC()
+	s := rt.session
+	rt.mu.Unlock()
+	return s, true, m.persist(ctx, s)
+}
+
+func (m *Manager) FindLarkAlertSession(ctx context.Context, ids ...string) (Session, bool, error) {
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return Session{}, false, nil
+	}
+	matches := func(s Session) bool {
+		if strings.TrimSpace(s.LarkAlertSourceMessageID) == "" {
+			return false
+		}
+		for _, id := range []string{s.LarkThreadID, s.LarkTopicRootID, s.LarkAlertSourceMessageID} {
+			if _, ok := wanted[strings.TrimSpace(id)]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	m.mu.RLock()
+	var closed Session
+	for _, rt := range m.sessions {
+		s := rt.Snapshot()
+		if !matches(s) {
+			continue
+		}
+		if s.Live && s.Status != StatusExited && s.Status != StatusFailed {
+			m.mu.RUnlock()
+			return s, true, nil
+		}
+		if closed.ID == "" || s.CreatedAt.After(closed.CreatedAt) {
+			closed = s
+		}
+	}
+	m.mu.RUnlock()
+	if m.store != nil {
+		list, err := m.store.ListSessions(ctx)
+		if err != nil {
+			return Session{}, false, err
+		}
+		for _, s := range list {
+			if !matches(s) {
+				continue
+			}
+			if s.Live && s.Status != StatusExited && s.Status != StatusFailed {
+				return s, true, nil
+			}
+			if closed.ID == "" || s.CreatedAt.After(closed.CreatedAt) {
+				closed = s
+			}
+		}
+	}
+	return closed, closed.ID != "", nil
+}
+
+func (m *Manager) CloseSession(ctx context.Context, id string) error {
+	rt, ok := m.GetRuntime(id)
+	if !ok {
+		return nil
+	}
+	rt.mu.Lock()
+	now := time.Now().UTC()
+	code := 0
+	rt.session.Status = StatusExited
+	rt.session.Live = false
+	rt.session.ExitCode = &code
+	rt.session.UpdatedAt = now
+	s := rt.session
+	rt.mu.Unlock()
+	if err := m.persist(ctx, s); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	rt.Close()
+	return nil
+}
+
 func (m *Manager) BindLarkChat(ctx context.Context, id string, chatID string) (Session, bool, error) {
 	chatID = strings.TrimSpace(chatID)
 	rt, ok := m.GetRuntime(id)
@@ -3540,6 +3703,7 @@ func (rt *RuntimeSession) notifyWaitingWithRetry(note WaitingNotification) (Wait
 	if rt == nil || rt.manager == nil || rt.manager.notifier == nil {
 		return WaitingNotificationResult{}, errors.New("lark notifier is not configured")
 	}
+	note = rt.enrichLarkNotification(note)
 	var lastErr error
 	for attempt := 1; attempt <= defaultNotificationSendAttempts; attempt++ {
 		result, err := rt.manager.notifier.NotifyWaiting(note)
@@ -3555,6 +3719,7 @@ func (rt *RuntimeSession) notifyWaitingWithRetry(note WaitingNotification) (Wait
 }
 
 func (rt *RuntimeSession) updateWaitingRunningWithRetry(notifier WaitingRunningNotifier, note WaitingNotification, running bool) error {
+	note = rt.enrichLarkNotification(note)
 	var lastErr error
 	for attempt := 1; attempt <= defaultNotificationSendAttempts; attempt++ {
 		if err := notifier.UpdateWaitingRunning(note, running); err != nil {
@@ -3567,6 +3732,20 @@ func (rt *RuntimeSession) updateWaitingRunningWithRetry(notifier WaitingRunningN
 		return nil
 	}
 	return lastErr
+}
+
+func (rt *RuntimeSession) enrichLarkNotification(note WaitingNotification) WaitingNotification {
+	if rt == nil {
+		return note
+	}
+	sess := rt.Snapshot()
+	if note.ChatID == "" {
+		note.ChatID = sess.LarkChatID
+	}
+	note.ReplyToMessageID = strings.TrimSpace(sess.LarkTopicRootID)
+	note.AlertModeAvailable = strings.TrimSpace(sess.LarkChatID) != "" && strings.TrimSpace(sess.LarkAlertSourceMessageID) == ""
+	note.AlertModeEnabled = sess.LarkAlertModeEnabled
+	return note
 }
 
 func (rt *RuntimeSession) waitingNotificationCandidateLocked() (WaitingNotification, string, bool, string) {

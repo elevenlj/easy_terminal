@@ -50,6 +50,13 @@ func (s *SQLite) migrate(ctx context.Context) error {
 			bridge_enabled INTEGER NOT NULL DEFAULT 0,
 			lark_chat_id TEXT NOT NULL DEFAULT '',
 			lark_mention_mode_enabled INTEGER NOT NULL DEFAULT 0,
+			lark_alert_mode_enabled INTEGER NOT NULL DEFAULT 0,
+			lark_alert_cursor_millis INTEGER NOT NULL DEFAULT 0,
+			lark_thread_id TEXT NOT NULL DEFAULT '',
+			lark_topic_root_id TEXT NOT NULL DEFAULT '',
+			lark_alert_source_message_id TEXT NOT NULL DEFAULT '',
+			lark_alert_source_content TEXT NOT NULL DEFAULT '',
+			lark_alert_parent_session_id TEXT NOT NULL DEFAULT '',
 			history_size INTEGER NOT NULL DEFAULT 0,
 			recovery_key TEXT NOT NULL DEFAULT '',
 			last_mode TEXT NOT NULL DEFAULT '',
@@ -87,6 +94,13 @@ func (s *SQLite) migrate(ctx context.Context) error {
 		{"bridge_enabled", "INTEGER NOT NULL DEFAULT 0"},
 		{"lark_chat_id", "TEXT NOT NULL DEFAULT ''"},
 		{"lark_mention_mode_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"lark_alert_mode_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"lark_alert_cursor_millis", "INTEGER NOT NULL DEFAULT 0"},
+		{"lark_thread_id", "TEXT NOT NULL DEFAULT ''"},
+		{"lark_topic_root_id", "TEXT NOT NULL DEFAULT ''"},
+		{"lark_alert_source_message_id", "TEXT NOT NULL DEFAULT ''"},
+		{"lark_alert_source_content", "TEXT NOT NULL DEFAULT ''"},
+		{"lark_alert_parent_session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"history_size", "INTEGER NOT NULL DEFAULT 0"},
 		{"recovery_key", "TEXT NOT NULL DEFAULT ''"},
 		{"last_mode", "TEXT NOT NULL DEFAULT ''"},
@@ -128,19 +142,19 @@ func (s *SQLite) ensureSessionColumn(ctx context.Context, name, typ string) erro
 }
 
 func (s *SQLite) CreateSession(ctx context.Context, sess session.Session) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		sess.ID, sess.Name, sess.Status, sess.CreatedAt, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, boolInt(sess.LarkMentionModeEnabled), sess.HistorySize, sess.RecoveryKey, sess.LastMode, sess.LastCWD, sess.LastPrevCWD, sess.LastAgentKind, sess.LastAgentStartCommand, sess.LastAgentResumeCommand, sess.LastAgentHome)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,lark_alert_mode_enabled,lark_alert_cursor_millis,lark_thread_id,lark_topic_root_id,lark_alert_source_message_id,lark_alert_source_content,lark_alert_parent_session_id,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		sess.ID, sess.Name, sess.Status, sess.CreatedAt, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, boolInt(sess.LarkMentionModeEnabled), boolInt(sess.LarkAlertModeEnabled), sess.LarkAlertCursorMillis, sess.LarkThreadID, sess.LarkTopicRootID, sess.LarkAlertSourceMessageID, sess.LarkAlertSourceContent, sess.LarkAlertParentSessionID, sess.HistorySize, sess.RecoveryKey, sess.LastMode, sess.LastCWD, sess.LastPrevCWD, sess.LastAgentKind, sess.LastAgentStartCommand, sess.LastAgentResumeCommand, sess.LastAgentHome)
 	return err
 }
 
 func (s *SQLite) UpdateSession(ctx context.Context, sess session.Session) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET name=?,status=?,updated_at=?,exit_code=?,live=?,notify_on_waiting=?,peer_session_id=?,bridge_enabled=?,lark_chat_id=?,lark_mention_mode_enabled=?,history_size=?,recovery_key=?,last_mode=?,last_cwd=?,last_prev_cwd=?,last_agent_kind=?,last_agent_start_command=?,last_agent_resume_command=?,last_agent_home=? WHERE id=?`,
-		sess.Name, sess.Status, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, boolInt(sess.LarkMentionModeEnabled), sess.HistorySize, sess.RecoveryKey, sess.LastMode, sess.LastCWD, sess.LastPrevCWD, sess.LastAgentKind, sess.LastAgentStartCommand, sess.LastAgentResumeCommand, sess.LastAgentHome, sess.ID)
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET name=?,status=?,updated_at=?,exit_code=?,live=?,notify_on_waiting=?,peer_session_id=?,bridge_enabled=?,lark_chat_id=?,lark_mention_mode_enabled=?,lark_alert_mode_enabled=?,lark_alert_cursor_millis=?,lark_thread_id=?,lark_topic_root_id=?,lark_alert_source_message_id=?,lark_alert_source_content=?,lark_alert_parent_session_id=?,history_size=?,recovery_key=?,last_mode=?,last_cwd=?,last_prev_cwd=?,last_agent_kind=?,last_agent_start_command=?,last_agent_resume_command=?,last_agent_home=? WHERE id=?`,
+		sess.Name, sess.Status, sess.UpdatedAt, sess.ExitCode, boolInt(sess.Live), boolInt(sess.NotifyOnWaiting), sess.PeerSessionID, boolInt(sess.BridgeEnabled), sess.LarkChatID, boolInt(sess.LarkMentionModeEnabled), boolInt(sess.LarkAlertModeEnabled), sess.LarkAlertCursorMillis, sess.LarkThreadID, sess.LarkTopicRootID, sess.LarkAlertSourceMessageID, sess.LarkAlertSourceContent, sess.LarkAlertParentSessionID, sess.HistorySize, sess.RecoveryKey, sess.LastMode, sess.LastCWD, sess.LastPrevCWD, sess.LastAgentKind, sess.LastAgentStartCommand, sess.LastAgentResumeCommand, sess.LastAgentHome, sess.ID)
 	return err
 }
 
 func (s *SQLite) ListSessions(ctx context.Context) ([]session.Session, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home FROM sessions ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,lark_alert_mode_enabled,lark_alert_cursor_millis,lark_thread_id,lark_topic_root_id,lark_alert_source_message_id,lark_alert_source_content,lark_alert_parent_session_id,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home FROM sessions ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +171,7 @@ func (s *SQLite) ListSessions(ctx context.Context) ([]session.Session, error) {
 }
 
 func (s *SQLite) GetSession(ctx context.Context, id string) (session.Session, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home FROM sessions WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id,name,status,created_at,updated_at,exit_code,live,notify_on_waiting,peer_session_id,bridge_enabled,lark_chat_id,lark_mention_mode_enabled,lark_alert_mode_enabled,lark_alert_cursor_millis,lark_thread_id,lark_topic_root_id,lark_alert_source_message_id,lark_alert_source_content,lark_alert_parent_session_id,history_size,recovery_key,last_mode,last_cwd,last_prev_cwd,last_agent_kind,last_agent_start_command,last_agent_resume_command,last_agent_home FROM sessions WHERE id=?`, id)
 	sess, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return session.Session{}, false, nil
@@ -247,8 +261,8 @@ type sessionScanner interface {
 func scanSession(row sessionScanner) (session.Session, error) {
 	var sess session.Session
 	var exit sql.NullInt64
-	var live, notify, bridge, mentionMode int
-	if err := row.Scan(&sess.ID, &sess.Name, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt, &exit, &live, &notify, &sess.PeerSessionID, &bridge, &sess.LarkChatID, &mentionMode, &sess.HistorySize, &sess.RecoveryKey, &sess.LastMode, &sess.LastCWD, &sess.LastPrevCWD, &sess.LastAgentKind, &sess.LastAgentStartCommand, &sess.LastAgentResumeCommand, &sess.LastAgentHome); err != nil {
+	var live, notify, bridge, mentionMode, alertMode int
+	if err := row.Scan(&sess.ID, &sess.Name, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt, &exit, &live, &notify, &sess.PeerSessionID, &bridge, &sess.LarkChatID, &mentionMode, &alertMode, &sess.LarkAlertCursorMillis, &sess.LarkThreadID, &sess.LarkTopicRootID, &sess.LarkAlertSourceMessageID, &sess.LarkAlertSourceContent, &sess.LarkAlertParentSessionID, &sess.HistorySize, &sess.RecoveryKey, &sess.LastMode, &sess.LastCWD, &sess.LastPrevCWD, &sess.LastAgentKind, &sess.LastAgentStartCommand, &sess.LastAgentResumeCommand, &sess.LastAgentHome); err != nil {
 		return session.Session{}, err
 	}
 	if exit.Valid {
@@ -258,6 +272,7 @@ func scanSession(row sessionScanner) (session.Session, error) {
 	sess.Live = live != 0
 	sess.NotifyOnWaiting = notify != 0
 	sess.BridgeEnabled = bridge != 0
+	sess.LarkAlertModeEnabled = alertMode != 0
 	sess.LarkMentionModeEnabled = mentionMode != 0
 	return sess, nil
 }

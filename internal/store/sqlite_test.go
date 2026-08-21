@@ -41,6 +41,13 @@ func TestSQLiteSessionLifecycle(t *testing.T) {
 		t.Fatalf("mention mode should default to disabled: %#v", list[0])
 	}
 	list[0].LarkMentionModeEnabled = true
+	list[0].LarkAlertModeEnabled = true
+	list[0].LarkAlertCursorMillis = 1234
+	list[0].LarkThreadID = "omt_alert"
+	list[0].LarkTopicRootID = "om_root"
+	list[0].LarkAlertSourceMessageID = "om_alert"
+	list[0].LarkAlertSourceContent = "告警内容"
+	list[0].LarkAlertParentSessionID = "sess-parent"
 	if err := st.UpdateSession(context.Background(), list[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -50,5 +57,8 @@ func TestSQLiteSessionLifecycle(t *testing.T) {
 	}
 	if !updated.LarkMentionModeEnabled {
 		t.Fatalf("mention mode should persist: %#v", updated)
+	}
+	if !updated.LarkAlertModeEnabled || updated.LarkAlertCursorMillis != 1234 || updated.LarkThreadID != "omt_alert" || updated.LarkTopicRootID != "om_root" || updated.LarkAlertSourceMessageID != "om_alert" || updated.LarkAlertSourceContent != "告警内容" || updated.LarkAlertParentSessionID != "sess-parent" {
+		t.Fatalf("alert session fields should persist: %#v", updated)
 	}
 }
