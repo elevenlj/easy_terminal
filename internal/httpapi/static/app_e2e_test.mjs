@@ -234,12 +234,6 @@ const ids = [
   "cfg-lark-session-chat-prefix",
   "cfg-lark-ignore-prefix",
   "cfg-lark-auto-summary-prompt",
-  "cfg-lark-alert-agent-command",
-  "cfg-lark-alert-prompt",
-  "cfg-lark-alert-app-id-pattern",
-  "cfg-lark-alert-card-title-pattern",
-  "cfg-lark-alert-poll-interval",
-  "cfg-lark-alert-session-timeout",
   "cfg-lark-mention-enabled",
   "cfg-prestart-command",
   "cfg-drop-patterns",
@@ -279,13 +273,13 @@ const helpTabs = ["help-start", "help-terminal"].map((targetID, index) => {
   tab.className = index === 0 ? "help-tab active" : "help-tab";
   return tab;
 });
-const configTabs = ["config-session", "config-lark", "config-alert", "config-notify", "config-startup"].map((targetID, index) => {
+const configTabs = ["config-session", "config-lark", "config-notify", "config-startup"].map((targetID, index) => {
   const tab = new FakeElement("", "button");
   tab.dataset.configTarget = targetID;
   tab.className = index === 0 ? "config-tab active" : "config-tab";
   return tab;
 });
-const configPanels = ["config-session", "config-lark", "config-alert", "config-notify", "config-startup"].map((id, index) => {
+const configPanels = ["config-session", "config-lark", "config-notify", "config-startup"].map((id, index) => {
   const panel = new FakeElement(id, "section");
   panel.className = index === 0 ? "config-panel active" : "config-panel";
   return panel;
@@ -436,12 +430,6 @@ const context = {
         lark_session_chat_prefix: "ET · ",
         lark_ignore_message_prefix: "/i",
         lark_auto_summary_prompt: "总结上一轮输出",
-        lark_alert_agent_command: "codex",
-        lark_alert_prompt: "告警 PE",
-        lark_alert_app_id_pattern: "cli_kepler|cli_argos",
-        lark_alert_card_title_pattern: "告警",
-        lark_alert_poll_interval_ms: 5000,
-        lark_alert_session_timeout_minutes: 60,
         onboarding_completed: false,
         session_pre_start_command: "",
         lark_notify_drop_line_patterns: [],
@@ -555,8 +543,7 @@ assert.ok(configTabs[0].className.includes("active"), "previous should move back
 elements["config-next"].onclick();
 elements["config-next"].onclick();
 elements["config-next"].onclick();
-elements["config-next"].onclick();
-assert.ok(configTabs[4].className.includes("active"), "next should stop at the last config tab");
+assert.ok(configTabs[3].className.includes("active"), "next should stop at the last config tab");
 assert.equal(elements["config-next"].disabled, true, "next should be disabled on last config tab");
 elements["config-dialog"].close();
 await app.maybeShowOnboarding();
@@ -1322,12 +1309,6 @@ elements["cfg-lark-mention-enabled"].checked = false;
 elements["cfg-lark-session-chat-prefix"].value = "DEV ·";
 elements["cfg-lark-ignore-prefix"].value = "/ignore";
 elements["cfg-lark-auto-summary-prompt"].value = "请总结上一轮输出";
-elements["cfg-lark-alert-agent-command"].value = "codex --model alarm";
-elements["cfg-lark-alert-prompt"].value = "处理告警";
-elements["cfg-lark-alert-app-id-pattern"].value = "cli_kepler|cli_argos";
-elements["cfg-lark-alert-card-title-pattern"].value = "告警";
-elements["cfg-lark-alert-poll-interval"].value = "7000";
-elements["cfg-lark-alert-session-timeout"].value = "90";
 elements["cfg-drop-patterns"].value = JSON.stringify([
   { title: "噪声", pattern: "noise" },
   { title: "调试", pattern: "debug" },
@@ -1357,12 +1338,6 @@ assert.equal(patchedConfig.lark_mention_enabled, false);
 assert.equal(patchedConfig.lark_session_chat_prefix, "DEV ·");
 assert.equal(patchedConfig.lark_ignore_message_prefix, "/ignore");
 assert.equal(patchedConfig.lark_auto_summary_prompt, "请总结上一轮输出");
-assert.equal(patchedConfig.lark_alert_agent_command, "codex --model alarm");
-assert.equal(patchedConfig.lark_alert_prompt, "处理告警");
-assert.equal(patchedConfig.lark_alert_app_id_pattern, "cli_kepler|cli_argos");
-assert.equal(patchedConfig.lark_alert_card_title_pattern, "告警");
-assert.equal(patchedConfig.lark_alert_poll_interval_ms, 7000);
-assert.equal(patchedConfig.lark_alert_session_timeout_minutes, 90);
 assert.deepEqual(patchedConfig.lark_notify_drop_line_patterns, [
   { title: "噪声", kind: "line", pattern: "noise", action: "", groups: [] },
   { title: "调试", kind: "line", pattern: "debug", action: "", groups: [] },

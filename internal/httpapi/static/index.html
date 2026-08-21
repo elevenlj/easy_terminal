@@ -85,7 +85,6 @@
         <nav class="config-tabs" aria-label="配置分组">
           <button class="config-tab active" type="button" data-config-target="config-session">会话</button>
           <button class="config-tab" type="button" data-config-target="config-lark">飞书</button>
-          <button class="config-tab" type="button" data-config-target="config-alert">告警</button>
           <button class="config-tab" type="button" data-config-target="config-notify">等待通知</button>
           <button class="config-tab" type="button" data-config-target="config-startup">启动预设</button>
         </nav>
@@ -173,21 +172,6 @@
               <button id="custom-shortcut-add" type="button">添加快捷键</button>
             </div>
             <textarea id="cfg-lark-custom-shortcuts" class="hidden" hidden spellcheck="false"></textarea>
-          </section>
-          <section id="config-alert" class="config-section config-panel">
-            <h2>告警</h2>
-            <p>群主会话开启“告警模式”后，系统会定时读取其他应用发送的消息卡片，并为每张匹配卡片创建独立的话题 Agent 会话。</p>
-            <div class="config-grid">
-              <label><span>轮询间隔(ms)</span><input id="cfg-lark-alert-poll-interval" type="number" min="1" step="1"></label>
-              <label><span>会话空闲超时(min)</span><input id="cfg-lark-alert-session-timeout" type="number" min="1" step="1"></label>
-            </div>
-            <label class="config-wide"><span>告警 Agent 启动命令</span><input id="cfg-lark-alert-agent-command" placeholder="codex"></label>
-            <div class="config-grid">
-              <label><span>App ID 正则</span><input id="cfg-lark-alert-app-id-pattern" placeholder="例如 ^cli_xxx$，留空表示全部应用"></label>
-              <label><span>卡片标题正则</span><input id="cfg-lark-alert-card-title-pattern" placeholder="留空表示全部标题"></label>
-            </div>
-            <p>两个正则同时配置时需要同时匹配。App ID 直接来自历史消息，不需要额外权限；留空运行后可在服务日志的 lark alert card observed 记录中查看。</p>
-            <label class="config-wide"><span>告警模型 PE</span><textarea id="cfg-lark-alert-prompt" rows="8" spellcheck="false"></textarea></label>
           </section>
           <section id="config-notify" class="config-section config-panel">
             <h2>等待与通知</h2>

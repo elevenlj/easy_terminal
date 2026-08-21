@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,201 +48,6 @@ func TestExtractLarkIncomingMessageWithPostAttachments(t *testing.T) {
 	}
 	if got.Attachments[1].Kind != "file" || got.Attachments[1].Key != "file_a" || got.Attachments[1].Name != "报告.pdf" {
 		t.Fatalf("second attachment = %#v, want file file_a", got.Attachments[1])
-	}
-}
-
-func TestLarkAlertCardFilterCreatesTopicAgentAndRoutesReplies(t *testing.T) {
-	resetLarkRegistryForTest()
-	oldDelay := larkAlertAgentStartupDelay
-	larkAlertAgentStartupDelay = 0
-	t.Cleanup(func() { larkAlertAgentStartupDelay = oldDelay })
-	launcher := &recordingLauncher{}
-	manager := NewManager(nil, launcher)
-	controller, err := manager.CreateSession(context.Background(), "告警群")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, err := manager.BindLarkChat(context.Background(), controller.ID, "oc-alert"); err != nil || !ok {
-		t.Fatalf("BindLarkChat ok=%v err=%v", ok, err)
-	}
-	controllerRT, _ := manager.GetRuntime(controller.ID)
-	controllerRT.RecordShellCommandForRecovery("cd /srv/project")
-	controller, ok, err := manager.ToggleLarkAlertMode(context.Background(), controller.ID)
-	if err != nil || !ok {
-		t.Fatalf("ToggleLarkAlertMode ok=%v err=%v", ok, err)
-	}
-	bridge := NewLarkReplyBridge("cli_easy", "secret", manager, t.TempDir())
-	bridge.SetAlertConfig("codex", "告警专用 PE", `^cli_kepler$`, `L2告警`, time.Second, time.Hour)
-	createdAt := controller.LarkAlertCursorMillis + 1
-	bridge.listChatMessages = func(_ context.Context, chatID string, _ int64) ([]*larkim.Message, error) {
-		if chatID != "oc-alert" {
-			t.Fatalf("chat id = %q", chatID)
-		}
-		return []*larkim.Message{
-			{
-				MessageId: strPtr("om-alert-before-enable"), CreateTime: strPtr(strconv.FormatInt(controller.LarkAlertCursorMillis-1, 10)), MsgType: strPtr("interactive"),
-				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】开启前消息"}}}`)},
-			},
-			{
-				MessageId: strPtr("om-alert-1"), ThreadId: strPtr("omt-alert-1"), CreateTime: strPtr(strconv.FormatInt(createdAt, 10)), MsgType: strPtr("interactive"),
-				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"title":"【L2告警】支付失败","elements":[[{"tag":"text","text":"服务：pay.api"}],[{"tag":"text","text":"🎯 根因结论"},{"tag":"a","text":"查看详情","href":"https://example.com/alert/1"}]]}`)},
-			},
-			{
-				MessageId: strPtr("om-alert-ignored"), CreateTime: strPtr(strconv.FormatInt(createdAt+1, 10)), MsgType: strPtr("interactive"),
-				Sender: &larkim.Sender{Id: strPtr("cli_kepler"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"普通通知"}}}`)},
-			},
-			{
-				MessageId: strPtr("om-alert-other-app"), CreateTime: strPtr(strconv.FormatInt(createdAt+2, 10)), MsgType: strPtr("interactive"),
-				Sender: &larkim.Sender{Id: strPtr("cli_argos"), SenderType: strPtr("app")},
-				Body:   &larkim.MessageBody{Content: strPtr(`{"header":{"title":{"tag":"plain_text","content":"【L2告警】其他应用"}}}`)},
-			},
-		}, nil
-	}
-	if err := bridge.pollLarkAlertsOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	alert, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-1")
-	if err != nil || !found {
-		t.Fatalf("FindLarkAlertSession found=%v err=%v", found, err)
-	}
-	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-before-enable"); err != nil || found {
-		t.Fatalf("pre-enable card should be ignored found=%v err=%v", found, err)
-	}
-	if _, found, err := manager.FindLarkAlertSession(context.Background(), "om-alert-other-app"); err != nil || found {
-		t.Fatalf("non-matching app id should be ignored found=%v err=%v", found, err)
-	}
-	if alert.LarkThreadID != "omt-alert-1" || alert.LarkTopicRootID != "om-alert-1" || alert.LarkAlertParentSessionID != controller.ID {
-		t.Fatalf("unexpected alert routing metadata: %#v", alert)
-	}
-	alertRT, ok := manager.GetRuntime(alert.ID)
-	if !ok {
-		t.Fatal("alert runtime is missing")
-	}
-	for i := 0; i < 50 && !strings.Contains(launcher.terminals[1].writes(), "告警专用 PE"); i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-	writes := launcher.terminals[1].writes()
-	for _, want := range []string{"cd '/srv/project'\r", "codex\r", "告警专用 PE", "【L2告警】支付失败", "服务：pay.api", "🎯 根因结论", "https://example.com/alert/1"} {
-		if !strings.Contains(writes, want) {
-			t.Fatalf("alert terminal writes missing %q: %q", want, writes)
-		}
-	}
-	alertRT.mu.Lock()
-	alertRT.session.Status = StatusWaiting
-	alertRT.mu.Unlock()
-	reply := p2MessageWithChat("om-user-reply", "om-alert-1", "om-alert-1", "text", `{"text":"继续检查日志"}`, "topic_group", "oc-alert", "ou-user")
-	reply.Event.Message.ThreadId = strPtr("omt-alert-1")
-	if err := bridge.HandleP2MessageReceive(context.Background(), reply); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(launcher.terminals[1].writes(), PrepareStructuredInput("继续检查日志")) {
-		t.Fatalf("topic reply was not routed to alert session: %q", launcher.terminals[1].writes())
-	}
-	if strings.Contains(launcher.terminals[0].writes(), "继续检查日志") {
-		t.Fatalf("topic reply leaked into controller session: %q", launcher.terminals[0].writes())
-	}
-}
-
-func TestLarkAlertSessionExpiresAndTopicReplyReopensIt(t *testing.T) {
-	resetLarkRegistryForTest()
-	oldDelay := larkAlertAgentStartupDelay
-	larkAlertAgentStartupDelay = 0
-	t.Cleanup(func() { larkAlertAgentStartupDelay = oldDelay })
-	launcher := &recordingLauncher{}
-	store := newMemoryStore()
-	manager := NewManager(store, launcher)
-	controller, _ := manager.CreateSession(context.Background(), "告警群")
-	controller, _, _ = manager.BindLarkChat(context.Background(), controller.ID, "oc-alert")
-	child, _ := manager.CreateSession(context.Background(), "旧告警")
-	child, _, _ = manager.ConfigureLarkAlertSession(context.Background(), child.ID, controller.ID, "omt-expired", "om-source", "om-source", "原告警内容")
-	childRT, _ := manager.GetRuntime(child.ID)
-	childRT.mu.Lock()
-	childRT.session.Status = StatusWaiting
-	childRT.session.UpdatedAt = time.Now().Add(-2 * time.Hour)
-	child = childRT.session
-	childRT.mu.Unlock()
-	_ = manager.persist(context.Background(), child)
-	bridge := NewLarkReplyBridge("cli_easy", "secret", manager, t.TempDir())
-	bridge.SetAlertConfig("codex", "告警 PE", "", "", time.Second, time.Hour)
-	if err := bridge.closeExpiredLarkAlertSessions(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := manager.GetRuntime(child.ID); ok {
-		t.Fatal("expired alert runtime should be closed")
-	}
-	reply := p2MessageWithChat("om-reopen", "om-source", "om-source", "text", `{"text":"重新检查"}`, "topic_group", "oc-alert", "ou-user")
-	reply.Event.Message.ThreadId = strPtr("omt-expired")
-	if err := bridge.HandleP2MessageReceive(context.Background(), reply); err != nil {
-		t.Fatal(err)
-	}
-	reopened, found, err := manager.FindLarkAlertSession(context.Background(), "omt-expired")
-	if err != nil || !found || reopened.ID == child.ID || !reopened.Live {
-		t.Fatalf("reopened session = %#v found=%v err=%v", reopened, found, err)
-	}
-	for i := 0; i < 50 && !strings.Contains(launcher.terminals[2].writes(), "重新检查"); i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-	writes := launcher.terminals[2].writes()
-	if !strings.Contains(writes, "原告警内容") || !strings.Contains(writes, "重新检查") {
-		t.Fatalf("reopened alert input = %q", writes)
-	}
-}
-
-func TestLarkAlertModeButtonIsRenderedOnlyForGroupController(t *testing.T) {
-	content, err := larkNotificationCardContent(WaitingNotification{
-		SessionID: "sess-1", Content: "done", AlertModeAvailable: true, AlertModeEnabled: true,
-	}, "ou_1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(content, "告警模式-开") || !strings.Contains(content, `"easy_terminal_action":"toggle_alert_mode"`) {
-		t.Fatalf("alert mode button missing: %s", content)
-	}
-	child, err := larkNotificationCardContent(WaitingNotification{SessionID: "sess-2", Content: "done"}, "ou_1", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(child, "toggle_alert_mode") {
-		t.Fatalf("alert child card should not render alert mode button: %s", child)
-	}
-}
-
-func TestLarkAlertNotificationRepliesInsideSourceTopic(t *testing.T) {
-	oldClient := http.DefaultClient
-	var replyPath string
-	var replyBody string
-	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body, _ := io.ReadAll(req.Body)
-		if strings.Contains(req.URL.Path, "tenant_access_token") {
-			return httpJSONResponse(`{"code":0,"tenant_access_token":"token"}`), nil
-		}
-		replyPath = req.URL.Path
-		replyBody = string(body)
-		return httpJSONResponse(`{"code":0,"data":{"message_id":"om-result","root_id":"om-source"}}`), nil
-	})}
-	t.Cleanup(func() { http.DefaultClient = oldClient })
-	notifier := NewLarkAppNotifier("app", "secret", "ou-default", true)
-	result, err := notifier.createWaiting(WaitingNotification{
-		SessionID: "sess-alert", Content: "done", ReplyToMessageID: "om-source",
-	}, `{"schema":"2.0"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if replyPath != "/open-apis/im/v1/messages/om-source/reply" || !strings.Contains(replyBody, `"reply_in_thread":true`) || strings.Contains(replyBody, "receive_id") {
-		t.Fatalf("topic reply request path=%q body=%s", replyPath, replyBody)
-	}
-	if result.MessageID != "om-result" || result.RootID != "om-source" {
-		t.Fatalf("topic reply result = %#v", result)
-	}
-	replyPath, replyBody = "", ""
-	if err := notifier.sendUpdateTip("om-result", "", "om-source", 1, "ou-user"); err != nil {
-		t.Fatal(err)
-	}
-	if replyPath != "/open-apis/im/v1/messages/om-source/reply" || !strings.Contains(replyBody, `"reply_in_thread":true`) || !strings.Contains(replyBody, "ou-user") || strings.Contains(replyBody, "receive_id") {
-		t.Fatalf("topic completion request path=%q body=%s", replyPath, replyBody)
 	}
 }
 
@@ -1788,25 +1591,6 @@ func TestLarkReplyBridgeCardDeleteSessionRemovesBotFromChat(t *testing.T) {
 	if _, err := os.Stat(uploadPath); !os.IsNotExist(err) {
 		t.Fatalf("delete should remove session upload dir, err=%v", err)
 	}
-
-	alert, err := manager.CreateSession(context.Background(), "Alert")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok, err := manager.ConfigureLarkAlertSession(context.Background(), alert.ID, "sess-parent", "omt-alert", "om-source", "om-source", "告警"); err != nil || !ok {
-		t.Fatalf("ConfigureLarkAlertSession ok=%v err=%v", ok, err)
-	}
-	defaultLarkMessageRegistry.remember(alert.ID, "alert-card")
-	removedChats = nil
-	event.Event.Action.Value["session_id"] = alert.ID
-	event.Event.Context.OpenMessageID = "alert-card"
-	resp, err = bridge.HandleCardActionTrigger(context.Background(), event)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp == nil || resp.Toast == nil || resp.Toast.Content != "会话已删除" || len(removedChats) != 0 {
-		t.Fatalf("deleting alert session must keep bot in parent chat, response=%#v removed=%#v", resp, removedChats)
-	}
 }
 
 func TestLarkReplyBridgeCardDeleteSessionReportsBotRemovalFailure(t *testing.T) {
@@ -3311,19 +3095,6 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
-
-func httpJSONResponse(body string) *http.Response {
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Status:     "200 OK",
-		Header:     http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
-		Body:       io.NopCloser(strings.NewReader(body)),
-	}
 }
 
 type recordingLauncher struct {

@@ -19,35 +19,28 @@ const (
 )
 
 type Session struct {
-	ID                       string    `json:"id"`
-	Name                     string    `json:"name"`
-	Status                   string    `json:"status"`
-	CreatedAt                time.Time `json:"created_at"`
-	UpdatedAt                time.Time `json:"updated_at"`
-	ExitCode                 *int      `json:"exit_code"`
-	Live                     bool      `json:"live"`
-	NotifyOnWaiting          bool      `json:"notify_on_waiting"`
-	PeerSessionID            string    `json:"peer_session_id,omitempty"`
-	BridgeEnabled            bool      `json:"bridge_enabled,omitempty"`
-	LarkChatID               string    `json:"lark_chat_id,omitempty"`
-	LarkMentionModeEnabled   bool      `json:"lark_mention_mode_enabled,omitempty"`
-	LarkAlertModeEnabled     bool      `json:"lark_alert_mode_enabled,omitempty"`
-	LarkAlertCursorMillis    int64     `json:"lark_alert_cursor_millis,omitempty"`
-	LarkThreadID             string    `json:"lark_thread_id,omitempty"`
-	LarkTopicRootID          string    `json:"lark_topic_root_id,omitempty"`
-	LarkAlertSourceMessageID string    `json:"lark_alert_source_message_id,omitempty"`
-	LarkAlertSourceContent   string    `json:"lark_alert_source_content,omitempty"`
-	LarkAlertParentSessionID string    `json:"lark_alert_parent_session_id,omitempty"`
-	HistorySize              int64     `json:"history_size,omitempty"`
-	RecoveryKey              string    `json:"recovery_key,omitempty"`
-	LastMode                 string    `json:"last_mode,omitempty"`
-	LastCWD                  string    `json:"last_cwd,omitempty"`
-	LastPrevCWD              string    `json:"last_prev_cwd,omitempty"`
-	LastAgentKind            string    `json:"last_agent_kind,omitempty"`
-	LastAgentStartCommand    string    `json:"last_agent_start_command,omitempty"`
-	LastAgentResumeCommand   string    `json:"last_agent_resume_command,omitempty"`
-	LastAgentHome            string    `json:"last_agent_home,omitempty"`
-	NotificationsAvailable   bool      `json:"notifications_available"`
+	ID                     string    `json:"id"`
+	Name                   string    `json:"name"`
+	Status                 string    `json:"status"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	ExitCode               *int      `json:"exit_code"`
+	Live                   bool      `json:"live"`
+	NotifyOnWaiting        bool      `json:"notify_on_waiting"`
+	PeerSessionID          string    `json:"peer_session_id,omitempty"`
+	BridgeEnabled          bool      `json:"bridge_enabled,omitempty"`
+	LarkChatID             string    `json:"lark_chat_id,omitempty"`
+	LarkMentionModeEnabled bool      `json:"lark_mention_mode_enabled,omitempty"`
+	HistorySize            int64     `json:"history_size,omitempty"`
+	RecoveryKey            string    `json:"recovery_key,omitempty"`
+	LastMode               string    `json:"last_mode,omitempty"`
+	LastCWD                string    `json:"last_cwd,omitempty"`
+	LastPrevCWD            string    `json:"last_prev_cwd,omitempty"`
+	LastAgentKind          string    `json:"last_agent_kind,omitempty"`
+	LastAgentStartCommand  string    `json:"last_agent_start_command,omitempty"`
+	LastAgentResumeCommand string    `json:"last_agent_resume_command,omitempty"`
+	LastAgentHome          string    `json:"last_agent_home,omitempty"`
+	NotificationsAvailable bool      `json:"notifications_available"`
 }
 
 type QuickCommand struct {
@@ -70,9 +63,6 @@ type WaitingNotification struct {
 	AutoRefreshEnabled  bool
 	AutoSummaryEnabled  bool
 	MentionModeEnabled  bool
-	AlertModeAvailable  bool
-	AlertModeEnabled    bool
-	ReplyToMessageID    string
 	SuppressUpdateTip   bool
 	NotificationVersion int64
 	SnapshotSource      string

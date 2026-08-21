@@ -266,12 +266,6 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkDefaultSessionName:          "默认会话",
 		LarkIgnoreMessagePrefix:         "/i",
 		LarkAutoSummaryPrompt:           "总结上一轮输出",
-		LarkAlertAgentCommand:           "codex --model alarm",
-		LarkAlertPrompt:                 "告警 PE",
-		LarkAlertAppIDPattern:           "cli_kepler|cli_argos",
-		LarkAlertCardTitlePattern:       "告警",
-		LarkAlertPollIntervalMs:         7000,
-		LarkAlertSessionTimeoutMinutes:  60,
 		FastWaitingTransitionMs:         300,
 		ConservativeWaitingTransitionMs: 700,
 		LarkAutoRefreshIntervalMs:       5000,
@@ -289,8 +283,6 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 		LarkDefaultSessionName:          "默认",
 		LarkIgnoreMessagePrefix:         "/silent",
 		LarkAutoSummaryPrompt:           "总结上一轮输出",
-		LarkAlertAppIDPattern:           "cli_kepler|cli_argos",
-		LarkAlertCardTitlePattern:       "告警",
 		FastWaitingTransitionMs:         450,
 		ConservativeWaitingTransitionMs: 900,
 		LarkAutoRefreshIntervalMs:       6000,
@@ -313,9 +305,6 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	if got.FastWaitingTransitionMs != 450 || got.LarkAutoRefreshIntervalMs != 6000 || got.LarkNotifyFallbackTailLines != 80 || got.LarkAppID != "app" || got.LarkIgnoreMessagePrefix != "/silent" || got.LarkAutoSummaryPrompt != "总结上一轮输出" || !got.LarkNotifyMergeWrappedLines {
 		t.Fatalf("unexpected runtime config: %#v", got)
 	}
-	if got.LarkAlertAgentCommand != "codex --model alarm" || got.LarkAlertAppIDPattern != "cli_kepler|cli_argos" || got.LarkAlertCardTitlePattern != "告警" || got.LarkAlertPollIntervalMs != 7000 || got.LarkAlertSessionTimeoutMinutes != 60 {
-		t.Fatalf("unexpected alert runtime config: %#v", got)
-	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -332,9 +321,6 @@ func TestAppConfigServiceUpdatesRuntimeConfigAndPersists(t *testing.T) {
 	}
 	if saved.LarkAutoSummaryPrompt != "总结上一轮输出" {
 		t.Fatalf("auto summary prompt was not persisted: %#v", saved)
-	}
-	if saved.LarkAlertPrompt != "告警 PE" || saved.LarkAlertAgentCommand != "codex --model alarm" || saved.LarkAlertAppIDPattern != "cli_kepler|cli_argos" {
-		t.Fatalf("alert config was not persisted: %#v", saved)
 	}
 	if !saved.LarkNotifyMergeWrappedLines {
 		t.Fatalf("merge wrapped lines was not persisted: %#v", saved)

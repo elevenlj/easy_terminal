@@ -35,7 +35,7 @@ const STANDARD_TERMINAL_LINE_HEIGHT = 1.2;
 const SNAPSHOT_CONTINUITY_VERSION = 2;
 const DEFAULT_SESSION_NAME = "默认会话";
 const DEFAULT_AGENT_PRESET_CODE = "999999";
-const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-alert", "config-notify", "config-startup"];
+const CONFIG_TAB_IDS = ["config-session", "config-lark", "config-notify", "config-startup"];
 const DROP_RULE_KINDS = [
   ["line", "行过滤"],
   ["block_head", "块首行过滤"],
@@ -945,12 +945,6 @@ function renderConfig() {
   $("cfg-lark-session-chat-prefix").value = cfg.lark_session_chat_prefix || "ET · ";
   $("cfg-lark-ignore-prefix").value = cfg.lark_ignore_message_prefix || "/i";
   $("cfg-lark-auto-summary-prompt").value = cfg.lark_auto_summary_prompt || "";
-  $("cfg-lark-alert-agent-command").value = cfg.lark_alert_agent_command || "codex";
-  $("cfg-lark-alert-prompt").value = cfg.lark_alert_prompt || "";
-  $("cfg-lark-alert-app-id-pattern").value = cfg.lark_alert_app_id_pattern || "";
-  $("cfg-lark-alert-card-title-pattern").value = cfg.lark_alert_card_title_pattern || "";
-  $("cfg-lark-alert-poll-interval").value = cfg.lark_alert_poll_interval_ms || 5000;
-  $("cfg-lark-alert-session-timeout").value = cfg.lark_alert_session_timeout_minutes || 60;
   $("cfg-lark-mention-enabled").checked = Boolean(cfg.lark_mention_enabled);
   $("cfg-prestart-command").value = cfg.session_pre_start_command || "";
   $("cfg-drop-patterns").value = JSON.stringify(normalizeDropRules(cfg.lark_notify_drop_line_patterns || []), null, 2);
@@ -1064,12 +1058,6 @@ function readConfigForm() {
     lark_session_chat_prefix: $("cfg-lark-session-chat-prefix").value.trim(),
     lark_ignore_message_prefix: $("cfg-lark-ignore-prefix").value.trim(),
     lark_auto_summary_prompt: $("cfg-lark-auto-summary-prompt").value.trim(),
-    lark_alert_agent_command: $("cfg-lark-alert-agent-command").value.trim(),
-    lark_alert_prompt: $("cfg-lark-alert-prompt").value.trim(),
-    lark_alert_app_id_pattern: $("cfg-lark-alert-app-id-pattern").value.trim(),
-    lark_alert_card_title_pattern: $("cfg-lark-alert-card-title-pattern").value.trim(),
-    lark_alert_poll_interval_ms: readNumber("cfg-lark-alert-poll-interval", state.config?.lark_alert_poll_interval_ms || 5000),
-    lark_alert_session_timeout_minutes: readNumber("cfg-lark-alert-session-timeout", state.config?.lark_alert_session_timeout_minutes || 60),
     fast_waiting_transition_ms: readNumber("cfg-fast-waiting", state.config?.fast_waiting_transition_ms || 1000),
     conservative_waiting_transition_ms: readNumber("cfg-conservative-waiting", state.config?.conservative_waiting_transition_ms || 3000),
     lark_auto_refresh_interval_ms: readNumber("cfg-auto-refresh-interval", state.config?.lark_auto_refresh_interval_ms || 5000),

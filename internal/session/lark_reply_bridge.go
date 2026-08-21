@@ -38,16 +38,9 @@ type LarkReplyBridge struct {
 	startPresets            map[string]SessionStartPreset
 	namePresets             map[string]SessionStartPreset
 	customShortcuts         []LarkCustomShortcut
-	alertAgentCommand       string
-	alertPrompt             string
-	alertPollInterval       time.Duration
-	alertSessionTimeout     time.Duration
-	alertAppIDPattern       string
-	alertCardTitlePattern   string
 	botIdentity             larkBotIdentity
 	mu                      sync.Mutex
 	groupSessionMu          sync.Mutex
-	alertMu                 sync.Mutex
 	seenMessages            map[string]time.Time
 	pendingFiles            map[string][]pendingLarkAttachment
 	pipelines               map[string][]larkPipelineInput
@@ -58,7 +51,6 @@ type LarkReplyBridge struct {
 	sendChatText            func(context.Context, string, string) error
 	removeBotFromChat       func(context.Context, string) error
 	fetchBotIdentity        func(context.Context) (larkBotIdentity, error)
-	listChatMessages        func(context.Context, string, int64) ([]*larkim.Message, error)
 	startMu                 sync.Mutex
 	cancelStart             context.CancelFunc
 	startID                 int64
@@ -73,8 +65,6 @@ const defaultLarkSessionChatPrefix = "ET · "
 const larkDisabledCardToastContent = "已失效，请点击最新卡片的按钮"
 const defaultWorkspaceRootDir = "Easy_Terminal_Workspace"
 
-var larkAlertAgentStartupDelay = 1200 * time.Millisecond
-
 type SessionStartPreset struct {
 	Commands []string `json:"commands"`
 }
@@ -88,7 +78,6 @@ type larkRouteContext struct {
 	MessageID    string
 	ParentID     string
 	RootID       string
-	ThreadID     string
 	ChatID       string
 	ChatType     string
 	SenderOpenID string
@@ -108,10 +97,6 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 		sessionChatPrefix:   defaultLarkSessionChatPrefix,
 		ignoreMessagePrefix: "/i",
 		autoSummaryPrompt:   DefaultLarkAutoSummaryPrompt,
-		alertAgentCommand:   "codex",
-		alertPrompt:         "请分析以下告警，定位可能的根因并给出可执行的排查和处理建议。先核实信息，不要编造结论。",
-		alertPollInterval:   5 * time.Second,
-		alertSessionTimeout: time.Hour,
 		seenMessages:        make(map[string]time.Time), pendingFiles: make(map[string][]pendingLarkAttachment), pipelines: make(map[string][]larkPipelineInput),
 	}
 	if manager != nil {
@@ -127,26 +112,7 @@ func NewLarkReplyBridge(appID, appSecret string, manager *Manager, uploadsDir st
 	b.sendChatText = b.sendTextToChat
 	b.removeBotFromChat = b.removeLarkBotFromChat
 	b.fetchBotIdentity = b.fetchLarkBotIdentity
-	b.listChatMessages = b.listLarkChatMessages
 	return b
-}
-
-func (b *LarkReplyBridge) SetAlertConfig(agentCommand, prompt, appIDPattern, cardTitlePattern string, pollInterval, sessionTimeout time.Duration) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.alertAgentCommand = strings.TrimSpace(agentCommand)
-	b.alertPrompt = strings.TrimSpace(prompt)
-	b.alertAppIDPattern = strings.TrimSpace(appIDPattern)
-	b.alertCardTitlePattern = strings.TrimSpace(cardTitlePattern)
-	if pollInterval > 0 {
-		b.alertPollInterval = pollInterval
-	}
-	if sessionTimeout > 0 {
-		b.alertSessionTimeout = sessionTimeout
-	}
 }
 
 func (b *LarkReplyBridge) SetStartPresets(presets map[string]SessionStartPreset) {
@@ -222,7 +188,6 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 	b.cancelStart = cancel
 	b.startMu.Unlock()
 	defer func() {
-		cancel()
 		b.startMu.Lock()
 		if b.startID == startID {
 			b.cancelStart = nil
@@ -262,352 +227,8 @@ func (b *LarkReplyBridge) Start(ctx context.Context) error {
 	b.startMu.Lock()
 	b.wsClient = client
 	b.startMu.Unlock()
-	go b.runLarkAlertMonitor(runCtx)
 	log.Printf("lark reply bridge listening for incoming messages")
 	return client.Start(runCtx)
-}
-
-func (b *LarkReplyBridge) alertConfigSnapshot() (string, string, string, string, time.Duration, time.Duration) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.alertAgentCommand, b.alertPrompt, b.alertAppIDPattern, b.alertCardTitlePattern, b.alertPollInterval, b.alertSessionTimeout
-}
-
-func (b *LarkReplyBridge) runLarkAlertMonitor(ctx context.Context) {
-	for {
-		_, _, _, _, interval, _ := b.alertConfigSnapshot()
-		if interval <= 0 {
-			interval = 5 * time.Second
-		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-		if err := b.pollLarkAlertsOnce(ctx); err != nil {
-			log.Printf("lark alert poll failed: %v", err)
-		}
-		if err := b.closeExpiredLarkAlertSessions(ctx); err != nil {
-			log.Printf("lark alert cleanup failed: %v", err)
-		}
-	}
-}
-
-func (b *LarkReplyBridge) pollLarkAlertsOnce(ctx context.Context) error {
-	if b == nil || b.manager == nil || b.listChatMessages == nil {
-		return nil
-	}
-	sessions, err := b.manager.ListSessions(ctx)
-	if err != nil {
-		return err
-	}
-	var lastErr error
-	for _, controller := range sessions {
-		if !controller.Live || !controller.LarkAlertModeEnabled || strings.TrimSpace(controller.LarkChatID) == "" || strings.TrimSpace(controller.LarkAlertSourceMessageID) != "" {
-			continue
-		}
-		cursor := controller.LarkAlertCursorMillis
-		if cursor <= 0 {
-			cursor = time.Now().UnixMilli()
-			if err := b.manager.UpdateLarkAlertCursor(ctx, controller.ID, cursor); err != nil {
-				lastErr = err
-			}
-			continue
-		}
-		messages, err := b.listChatMessages(ctx, controller.LarkChatID, cursor-1000)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		nextCursor := cursor
-		failed := false
-		for _, message := range messages {
-			if message == nil {
-				continue
-			}
-			createdAt, _ := strconv.ParseInt(valueOf(message.CreateTime), 10, 64)
-			if createdAt <= cursor {
-				continue
-			}
-			if createdAt > nextCursor {
-				nextCursor = createdAt
-			}
-			if !b.isExternalLarkAlertCard(message) {
-				continue
-			}
-			log.Printf("lark alert card observed chat=%s message=%s app_id=%s", controller.LarkChatID, valueOf(message.MessageId), valueOf(message.Sender.Id))
-			matched, matchErr := b.matchesLarkAlertFilters(message)
-			if matchErr != nil {
-				lastErr = matchErr
-				failed = true
-				break
-			}
-			if !matched {
-				continue
-			}
-			if _, found, findErr := b.manager.FindLarkAlertSession(ctx, valueOf(message.MessageId)); findErr != nil {
-				lastErr = findErr
-				failed = true
-				break
-			} else if found {
-				continue
-			}
-			if _, createErr := b.createLarkAlertSession(ctx, controller, message, ""); createErr != nil {
-				lastErr = createErr
-				failed = true
-				break
-			}
-		}
-		if !failed && nextCursor > cursor {
-			if err := b.manager.UpdateLarkAlertCursor(ctx, controller.ID, nextCursor); err != nil {
-				lastErr = err
-			}
-		}
-	}
-	return lastErr
-}
-
-func (b *LarkReplyBridge) isExternalLarkAlertCard(message *larkim.Message) bool {
-	if message == nil || message.Sender == nil || valueOf(message.Sender.SenderType) != "app" || valueOf(message.MsgType) != "interactive" {
-		return false
-	}
-	if message.Deleted != nil && *message.Deleted {
-		return false
-	}
-	b.mu.Lock()
-	appID := b.appID
-	b.mu.Unlock()
-	return strings.TrimSpace(valueOf(message.MessageId)) != "" && valueOf(message.Sender.Id) != appID
-}
-
-func (b *LarkReplyBridge) matchesLarkAlertFilters(message *larkim.Message) (bool, error) {
-	if message == nil || message.Body == nil || message.Sender == nil {
-		return false, nil
-	}
-	_, _, appPattern, titlePattern, _, _ := b.alertConfigSnapshot()
-	content := extractLarkAlertCardContent(valueOf(message.Body.Content))
-	title := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
-	if titlePattern != "" {
-		matched, err := regexp.MatchString(titlePattern, title)
-		if err != nil || !matched {
-			return false, err
-		}
-	}
-	if appPattern == "" {
-		return true, nil
-	}
-	matched, err := regexp.MatchString(appPattern, valueOf(message.Sender.Id))
-	return matched, err
-}
-
-func (b *LarkReplyBridge) listLarkChatMessages(ctx context.Context, chatID string, afterMillis int64) ([]*larkim.Message, error) {
-	if b == nil || b.apiClient == nil || strings.TrimSpace(chatID) == "" {
-		return nil, nil
-	}
-	req := larkim.NewListMessageReqBuilder().
-		ContainerIdType("chat").
-		ContainerId(chatID).
-		StartTime(strconv.FormatInt(max(afterMillis, int64(0))/1000, 10)).
-		SortType("ByCreateTimeAsc").
-		PageSize(50).
-		Limit(200).
-		Build()
-	iterator, err := b.apiClient.Im.V1.Message.ListByIterator(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	var messages []*larkim.Message
-	for {
-		hasNext, message, err := iterator.Next()
-		if err != nil {
-			return nil, err
-		}
-		if !hasNext {
-			return messages, nil
-		}
-		messages = append(messages, message)
-	}
-}
-
-func (b *LarkReplyBridge) createLarkAlertSession(ctx context.Context, controller Session, message *larkim.Message, latestMessage string) (Session, error) {
-	if message == nil || message.Body == nil {
-		return Session{}, errors.New("lark alert card is empty")
-	}
-	return b.createLarkAlertSessionFromSource(ctx, controller,
-		valueOf(message.ThreadId), valueOf(message.RootId), valueOf(message.MessageId),
-		extractLarkAlertCardContent(valueOf(message.Body.Content)), latestMessage)
-}
-
-func (b *LarkReplyBridge) createLarkAlertSessionFromSource(ctx context.Context, controller Session, threadID, topicRootID, sourceMessageID, sourceContent, latestMessage string) (Session, error) {
-	b.alertMu.Lock()
-	defer b.alertMu.Unlock()
-	sourceMessageID = strings.TrimSpace(sourceMessageID)
-	if sourceMessageID == "" {
-		return Session{}, errors.New("lark alert card has no message id")
-	}
-	if existing, found, err := b.manager.FindLarkAlertSession(ctx, threadID, topicRootID, sourceMessageID); err != nil {
-		return Session{}, err
-	} else if found && existing.Live && existing.Status != StatusExited && existing.Status != StatusFailed {
-		return existing, nil
-	}
-	agentCommand, alertPrompt, _, _, _, _ := b.alertConfigSnapshot()
-	if strings.TrimSpace(agentCommand) == "" {
-		return Session{}, errors.New("请先在配置台填写告警 Agent 启动命令")
-	}
-	sourceContent = strings.TrimSpace(sourceContent)
-	if sourceContent == "" {
-		sourceContent = "（卡片无可提取文本）"
-	}
-	if strings.TrimSpace(topicRootID) == "" {
-		topicRootID = sourceMessageID
-	}
-	name := larkAlertSessionName(sourceContent)
-	sess, err := b.manager.CreateSession(ctx, name)
-	if err != nil {
-		return Session{}, err
-	}
-	configured, ok, err := b.manager.ConfigureLarkAlertSession(ctx, sess.ID, controller.ID, threadID, topicRootID, sourceMessageID, sourceContent)
-	if err != nil || !ok {
-		_ = b.manager.DeleteSession(ctx, sess.ID)
-		return Session{}, err
-	}
-	configured, err = b.enableLarkSessionNotifications(ctx, configured)
-	if err != nil {
-		_ = b.manager.DeleteSession(ctx, sess.ID)
-		return Session{}, err
-	}
-	defaultLarkMessageRegistry.remember(configured.ID, sourceMessageID, topicRootID, threadID)
-	cwd := strings.TrimSpace(controller.LastCWD)
-	if rt, ok := b.manager.GetRuntime(controller.ID); ok {
-		if current := strings.TrimSpace(rt.Snapshot().LastCWD); current != "" {
-			cwd = current
-		}
-	}
-	go b.startLarkAlertAgent(configured, cwd, agentCommand, alertPrompt, sourceContent, latestMessage)
-	log.Printf("lark alert session created session=%s parent=%s source=%s thread=%s", configured.ID, controller.ID, sourceMessageID, threadID)
-	return configured, nil
-}
-
-func (b *LarkReplyBridge) startLarkAlertAgent(sess Session, cwd, agentCommand, alertPrompt, sourceContent, latestMessage string) {
-	rt, ok := b.manager.GetRuntime(sess.ID)
-	if !ok {
-		return
-	}
-	rt.SuppressStartupNotifications()
-	commands := make([]string, 0, 2)
-	if strings.TrimSpace(cwd) != "" {
-		commands = append(commands, "cd "+shellQuote(cwd))
-	}
-	commands = append(commands, agentCommand)
-	if err := runSessionPresetCommands(rt, SessionStartPreset{Commands: commands}, sessionStartPresetVars(sess, "alert")); err != nil {
-		log.Printf("lark alert agent start failed session=%s: %v", sess.ID, err)
-		_ = b.manager.CloseSession(context.Background(), sess.ID)
-		return
-	}
-	time.Sleep(larkAlertAgentStartupDelay)
-	input := buildLarkAlertAgentInput(alertPrompt, sourceContent, latestMessage)
-	if err := SubmitStructuredInputWithMention(rt, input, ""); err != nil {
-		log.Printf("lark alert input failed session=%s: %v", sess.ID, err)
-		_ = b.manager.CloseSession(context.Background(), sess.ID)
-		return
-	}
-	rt.FinishStartupNotifications()
-	rt.NotifyInputRunning()
-}
-
-func (b *LarkReplyBridge) closeExpiredLarkAlertSessions(ctx context.Context) error {
-	if b == nil || b.manager == nil {
-		return nil
-	}
-	_, _, _, _, _, timeout := b.alertConfigSnapshot()
-	if timeout <= 0 {
-		timeout = time.Hour
-	}
-	sessions, err := b.manager.ListSessions(ctx)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	for _, sess := range sessions {
-		if strings.TrimSpace(sess.LarkAlertSourceMessageID) == "" || !sess.Live || sess.Status == StatusRunning || now.Sub(sess.UpdatedAt) < timeout {
-			continue
-		}
-		if err := b.manager.CloseSession(ctx, sess.ID); err != nil {
-			return err
-		}
-		log.Printf("lark alert session closed after inactivity session=%s source=%s timeout=%s", sess.ID, sess.LarkAlertSourceMessageID, timeout)
-	}
-	return nil
-}
-
-func larkAlertSessionName(content string) string {
-	title := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
-	if title == "" {
-		title = "未命名告警"
-	}
-	return "告警 · " + truncateLarkInteractionText(title, 60) + " · " + time.Now().Format("01-02 15:04")
-}
-
-func buildLarkAlertAgentInput(prompt, cardContent, latestMessage string) string {
-	parts := make([]string, 0, 3)
-	if prompt = strings.TrimSpace(prompt); prompt != "" {
-		parts = append(parts, "[告警处理规则]\n"+prompt)
-	}
-	parts = append(parts, "[告警卡片内容]\n"+strings.TrimSpace(cardContent))
-	if latestMessage = strings.TrimSpace(latestMessage); latestMessage != "" {
-		parts = append(parts, "[话题最新消息]\n"+latestMessage)
-	}
-	return strings.Join(parts, "\n\n")
-}
-
-func extractLarkAlertCardContent(content string) string {
-	var raw any
-	if err := json.Unmarshal([]byte(content), &raw); err != nil {
-		return strings.TrimSpace(content)
-	}
-	var parts []string
-	collectLarkAlertCardText(raw, &parts)
-	parts = compactUniqueStrings(parts)
-	if len(parts) == 0 {
-		return strings.TrimSpace(content)
-	}
-	return strings.Join(parts, "\n")
-}
-
-func collectLarkAlertCardText(value any, parts *[]string) {
-	switch x := value.(type) {
-	case []any:
-		for _, item := range x {
-			collectLarkAlertCardText(item, parts)
-		}
-	case map[string]any:
-		for _, key := range []string{"header", "title", "subtitle", "body", "elements", "columns", "fields", "text", "content", "href"} {
-			collectLarkAlertCardText(x[key], parts)
-		}
-	case string:
-		if text := strings.TrimSpace(x); text != "" {
-			*parts = append(*parts, text)
-		}
-	}
-}
-
-func compactUniqueStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func (b *LarkReplyBridge) Stop() {
@@ -703,8 +324,6 @@ func (b *LarkReplyBridge) handleCardAction(ctx context.Context, action *callback
 		return b.handleCardToggleAutoSummary(ctx, value, openMessageID)
 	case "toggle_mention_mode":
 		return b.handleCardToggleMentionMode(ctx, value, openMessageID)
-	case "toggle_alert_mode":
-		return b.handleCardToggleAlertMode(ctx, value, openMessageID)
 	case "delete_session":
 		return b.handleCardDeleteSession(ctx, value, openMessageID, openChatID)
 	case "terminal_select":
@@ -755,7 +374,6 @@ func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map
 		return blocked, nil
 	}
 	sess := rt.Snapshot()
-	removeBot := strings.TrimSpace(sess.LarkAlertSourceMessageID) == ""
 	chatID := strings.TrimSpace(sess.LarkChatID)
 	if chatID == "" {
 		chatID = strings.TrimSpace(openChatID)
@@ -770,7 +388,7 @@ func (b *LarkReplyBridge) handleCardDeleteSession(ctx context.Context, value map
 		return nil, err
 	}
 	log.Printf("lark card deleted session=%s message=%s chat=%s", sessionID, openMessageID, chatID)
-	if removeBot && chatID != "" && b.removeBotFromChat != nil {
+	if chatID != "" && b.removeBotFromChat != nil {
 		if err := b.removeBotFromChat(ctx, chatID); err != nil {
 			log.Printf("lark card deleted session but failed to remove bot from chat session=%s chat=%s: %v", sessionID, chatID, err)
 			return larkCardToast("warning", "会话已删除，但机器人移出群聊失败，请手动移除机器人"), nil
@@ -923,41 +541,6 @@ func (b *LarkReplyBridge) handleCardToggleMentionMode(ctx context.Context, value
 	return larkCardToast("info", "已关闭艾特模式"), nil
 }
 
-func (b *LarkReplyBridge) handleCardToggleAlertMode(ctx context.Context, value map[string]interface{}, openMessageID string) (*callback.CardActionTriggerResponse, error) {
-	sessionID, rt, blocked := b.resolveCardActionRuntime(value, openMessageID)
-	if blocked != nil {
-		return blocked, nil
-	}
-	sess := rt.Snapshot()
-	if strings.TrimSpace(sess.LarkChatID) == "" || strings.TrimSpace(sess.LarkAlertSourceMessageID) != "" {
-		return larkCardToast("warning", "告警模式只能在群主会话中开启"), nil
-	}
-	agentCommand, _, _, _, _, _ := b.alertConfigSnapshot()
-	if strings.TrimSpace(agentCommand) == "" {
-		return larkCardToast("warning", "请先在配置台填写告警 Agent 启动命令"), nil
-	}
-	updated, ok, err := b.manager.ToggleLarkAlertMode(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return larkCardToast("warning", "会话不在线"), nil
-	}
-	if openMessageID != "" {
-		defaultLarkMessageRegistry.remember(sessionID, openMessageID)
-	}
-	updateNo, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value["update_no"])))
-	go func() {
-		if err := rt.RefreshNotificationMessage(openMessageID, updateNo); err != nil {
-			log.Printf("lark card alert mode toggle patch failed session=%s message=%s enabled=%v: %v", sessionID, openMessageID, updated.LarkAlertModeEnabled, err)
-		}
-	}()
-	if updated.LarkAlertModeEnabled {
-		return larkCardToast("info", "已开启告警模式"), nil
-	}
-	return larkCardToast("info", "已关闭告警模式"), nil
-}
-
 func larkCardToast(kind, content string) *callback.CardActionTriggerResponse {
 	return &callback.CardActionTriggerResponse{Toast: &callback.Toast{Type: kind, Content: content}}
 }
@@ -1034,7 +617,6 @@ func (b *LarkReplyBridge) HandleP2MessageReceive(ctx context.Context, event *lar
 		MessageID:    valueOf(msg.MessageId),
 		ParentID:     valueOf(msg.ParentId),
 		RootID:       valueOf(msg.RootId),
-		ThreadID:     valueOf(msg.ThreadId),
 		ChatID:       valueOf(msg.ChatId),
 		ChatType:     valueOf(msg.ChatType),
 		SenderOpenID: larkSenderOpenID(event.Event.Sender),
@@ -1181,7 +763,7 @@ func (b *LarkReplyBridge) mentionModeSessionID(ctx context.Context, routeCtx lar
 	if len(parts) > 0 {
 		text = parts[0]
 	}
-	return b.resolveSessionID(ctx, text, routeCtx.ParentID, routeCtx.RootID, routeCtx.ChatID, routeCtx.ChatType, routeCtx.ThreadID)
+	return b.resolveSessionID(ctx, text, routeCtx.ParentID, routeCtx.RootID, routeCtx.ChatID, routeCtx.ChatType)
 }
 
 func (b *LarkReplyBridge) routeContextMentionsBot(ctx context.Context, routeCtx larkRouteContext) bool {
@@ -1303,30 +885,6 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		return "", nil
 	}
 	text := cleanLarkText(incoming.Text)
-	if alertSess, found, err := b.manager.FindLarkAlertSession(ctx, routeCtx.ThreadID, rootID, parentID); err != nil {
-		return "", err
-	} else if found && (!alertSess.Live || alertSess.Status == StatusExited || alertSess.Status == StatusFailed) {
-		controller, ok, getErr := b.manager.GetSession(ctx, alertSess.LarkAlertParentSessionID)
-		if getErr != nil {
-			return "", getErr
-		}
-		if !ok {
-			controller = Session{ID: alertSess.LarkAlertParentSessionID, LastCWD: alertSess.LastCWD}
-		}
-		threadID := routeCtx.ThreadID
-		if threadID == "" {
-			threadID = alertSess.LarkThreadID
-		}
-		topicRootID := alertSess.LarkTopicRootID
-		if topicRootID == "" {
-			topicRootID = rootID
-		}
-		reopened, reopenErr := b.createLarkAlertSessionFromSource(ctx, controller, threadID, topicRootID, alertSess.LarkAlertSourceMessageID, alertSess.LarkAlertSourceContent, text)
-		if reopenErr == nil {
-			defaultLarkMessageRegistry.remember(reopened.ID, messageID, parentID, rootID, threadID)
-		}
-		return reopened.ID, reopenErr
-	}
 	parts := splitLarkPipeline(text)
 	if len(incoming.Attachments) > 0 {
 		return b.routeAttachments(ctx, routeCtx, text, parts, incoming.Attachments)
@@ -1335,7 +893,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		return "", nil
 	}
 	text = parts[0]
-	if sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType, routeCtx.ThreadID); sessionID != "" && b.hasPendingFiles(sessionID) {
+	if sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType); sessionID != "" && b.hasPendingFiles(sessionID) {
 		rt, _, ok, err := b.ensureRouteRuntime(ctx, sessionID, routeCtx)
 		if err != nil {
 			return sessionID, err
@@ -1381,7 +939,7 @@ func (b *LarkReplyBridge) RouteIncomingWithContext(ctx context.Context, routeCtx
 		}
 		return s.ID, err
 	}
-	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType, routeCtx.ThreadID)
+	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType)
 	if isStopCommand(text) {
 		if sessionID == "" {
 			if err := b.replyLarkText(ctx, messageID, "未找到会话"); err != nil {
@@ -1485,7 +1043,7 @@ func (b *LarkReplyBridge) routeAttachments(ctx context.Context, routeCtx larkRou
 	if len(parts) > 0 {
 		text = parts[0]
 	}
-	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType, routeCtx.ThreadID)
+	sessionID := b.resolveSessionID(ctx, text, parentID, rootID, routeCtx.ChatID, routeCtx.ChatType)
 	if sessionID == "" {
 		s, err := b.createImplicitLarkSessionForMessage(ctx, routeCtx)
 		if err != nil {
@@ -2469,22 +2027,7 @@ func (b *LarkReplyBridge) duplicate(messageID string) bool {
 	return false
 }
 
-func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, rootID, chatID, chatType string, threadIDs ...string) string {
-	threadID := ""
-	if len(threadIDs) > 0 {
-		threadID = strings.TrimSpace(threadIDs[0])
-	}
-	if b.manager != nil {
-		if s, ok, err := b.manager.FindLarkAlertSession(ctx, threadID, rootID, parentID); err == nil && ok && s.Live && s.Status != StatusExited && s.Status != StatusFailed {
-			defaultLarkMessageRegistry.remember(s.ID, threadID, rootID, parentID)
-			return s.ID
-		}
-	}
-	if id, ok := defaultLarkMessageRegistry.lookup(threadID, parentID, rootID); ok {
-		if b.sessionIsActive(ctx, id) {
-			return id
-		}
-	}
+func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, rootID, chatID, chatType string) string {
 	if id, ok := defaultLarkMessageRegistry.lookupChat(chatID); ok {
 		if b.sessionIsActive(ctx, id) {
 			return id
@@ -2497,6 +2040,9 @@ func (b *LarkReplyBridge) resolveSessionID(ctx context.Context, text, parentID, 
 			defaultLarkMessageRegistry.rememberChat(chatID, s.ID)
 			return s.ID
 		}
+	}
+	if id, ok := defaultLarkMessageRegistry.lookup(parentID, rootID); ok {
+		return id
 	}
 	if m := regexp.MustCompile(`sess-\d+`).FindString(text); m != "" {
 		return m

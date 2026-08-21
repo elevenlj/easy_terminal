@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,10 +34,6 @@ const (
 	defaultFastWaitingTransitionMs         = 500
 	defaultConservativeWaitingTransitionMs = 500
 	defaultLarkAutoRefreshIntervalMs       = 5000
-	defaultLarkAlertPollIntervalMs         = 5000
-	defaultLarkAlertSessionTimeoutMinutes  = 60
-	defaultLarkAlertAgentCommand           = "codex"
-	defaultLarkAlertPrompt                 = "请分析以下告警，定位可能的根因并给出可执行的排查和处理建议。先核实信息，不要编造结论。"
 	defaultHeadlessSnapshotTimeoutMs       = 10000
 	defaultLarkNotifyMaxLines              = 200
 	defaultLarkNotifyFallbackTailLines     = 100
@@ -70,12 +65,6 @@ type Config struct {
 	LarkSessionChatPrefix           string                                `json:"lark_session_chat_prefix"`
 	LarkIgnoreMessagePrefix         string                                `json:"lark_ignore_message_prefix"`
 	LarkAutoSummaryPrompt           string                                `json:"lark_auto_summary_prompt"`
-	LarkAlertAgentCommand           string                                `json:"lark_alert_agent_command"`
-	LarkAlertPrompt                 string                                `json:"lark_alert_prompt"`
-	LarkAlertAppIDPattern           string                                `json:"lark_alert_app_id_pattern"`
-	LarkAlertCardTitlePattern       string                                `json:"lark_alert_card_title_pattern"`
-	LarkAlertPollIntervalMs         int                                   `json:"lark_alert_poll_interval_ms"`
-	LarkAlertSessionTimeoutMinutes  int                                   `json:"lark_alert_session_timeout_minutes"`
 	FastWaitingTransitionMs         int                                   `json:"fast_waiting_transition_ms"`
 	ConservativeWaitingTransitionMs int                                   `json:"conservative_waiting_transition_ms"`
 	LarkAutoRefreshIntervalMs       int                                   `json:"lark_auto_refresh_interval_ms"`
@@ -172,7 +161,6 @@ func run() error {
 	bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
 	bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
 	bridge.SetAutoSummaryPrompt(cfg.LarkAutoSummaryPrompt)
-	bridge.SetAlertConfig(cfg.LarkAlertAgentCommand, cfg.LarkAlertPrompt, cfg.LarkAlertAppIDPattern, cfg.LarkAlertCardTitlePattern, time.Duration(cfg.LarkAlertPollIntervalMs)*time.Millisecond, time.Duration(cfg.LarkAlertSessionTimeoutMinutes)*time.Minute)
 	bridge.SetStartPresets(cfg.SessionStartPresets)
 	bridge.SetNamePresets(cfg.SessionNamePresets)
 	bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -252,8 +240,6 @@ func loadConfig(path string) Config {
 	cfg.LarkSessionChatPrefix = env("LARK_SESSION_CHAT_PREFIX", cfg.LarkSessionChatPrefix)
 	cfg.LarkIgnoreMessagePrefix = env("LARK_IGNORE_MESSAGE_PREFIX", cfg.LarkIgnoreMessagePrefix)
 	cfg.LarkAutoSummaryPrompt = env("LARK_AUTO_SUMMARY_PROMPT", cfg.LarkAutoSummaryPrompt)
-	cfg.LarkAlertAgentCommand = env("LARK_ALERT_AGENT_COMMAND", cfg.LarkAlertAgentCommand)
-	cfg.LarkAlertPrompt = env("LARK_ALERT_PROMPT", cfg.LarkAlertPrompt)
 	cfg.SessionPreStartCommand = env("SESSION_PRE_START_COMMAND", cfg.SessionPreStartCommand)
 	if v := os.Getenv("LARK_MENTION_ENABLED"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
@@ -279,12 +265,6 @@ func loadConfig(path string) Config {
 	if cfg.LarkAutoRefreshIntervalMs <= 0 {
 		cfg.LarkAutoRefreshIntervalMs = defaultLarkAutoRefreshIntervalMs
 	}
-	if cfg.LarkAlertPollIntervalMs <= 0 {
-		cfg.LarkAlertPollIntervalMs = defaultLarkAlertPollIntervalMs
-	}
-	if cfg.LarkAlertSessionTimeoutMinutes <= 0 {
-		cfg.LarkAlertSessionTimeoutMinutes = defaultLarkAlertSessionTimeoutMinutes
-	}
 	if cfg.HeadlessSnapshotTimeoutMs <= 0 {
 		cfg.HeadlessSnapshotTimeoutMs = defaultHeadlessSnapshotTimeoutMs
 	}
@@ -296,12 +276,6 @@ func loadConfig(path string) Config {
 	}
 	if strings.TrimSpace(cfg.LarkAutoSummaryPrompt) == "" {
 		cfg.LarkAutoSummaryPrompt = defaultLarkAutoSummaryPrompt
-	}
-	if strings.TrimSpace(cfg.LarkAlertAgentCommand) == "" {
-		cfg.LarkAlertAgentCommand = defaultLarkAlertAgentCommand
-	}
-	if strings.TrimSpace(cfg.LarkAlertPrompt) == "" {
-		cfg.LarkAlertPrompt = defaultLarkAlertPrompt
 	}
 	cfg.LarkNotifyDropLineRules = mergeRequiredLarkNotifyDropLineRules(cfg.LarkNotifyDropLineRules)
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(cfg.LarkSessionChatPrefix)
@@ -363,10 +337,6 @@ func defaultConfig() Config {
 		FastWaitingTransitionMs:         defaultFastWaitingTransitionMs,
 		ConservativeWaitingTransitionMs: defaultConservativeWaitingTransitionMs,
 		LarkAutoRefreshIntervalMs:       defaultLarkAutoRefreshIntervalMs,
-		LarkAlertPollIntervalMs:         defaultLarkAlertPollIntervalMs,
-		LarkAlertSessionTimeoutMinutes:  defaultLarkAlertSessionTimeoutMinutes,
-		LarkAlertAgentCommand:           defaultLarkAlertAgentCommand,
-		LarkAlertPrompt:                 defaultLarkAlertPrompt,
 		HeadlessSnapshotTimeoutMs:       defaultHeadlessSnapshotTimeoutMs,
 		LarkNotifyMaxLines:              defaultLarkNotifyMaxLines,
 		LarkNotifyFallbackTailLines:     defaultLarkNotifyFallbackTailLines,
@@ -472,42 +442,8 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 			req.HeadlessSnapshotTimeoutMs = defaultHeadlessSnapshotTimeoutMs
 		}
 	}
-	if req.LarkAlertPollIntervalMs <= 0 {
-		req.LarkAlertPollIntervalMs = cfg.LarkAlertPollIntervalMs
-		if req.LarkAlertPollIntervalMs <= 0 {
-			req.LarkAlertPollIntervalMs = defaultLarkAlertPollIntervalMs
-		}
-	}
-	if req.LarkAlertSessionTimeoutMinutes <= 0 {
-		req.LarkAlertSessionTimeoutMinutes = cfg.LarkAlertSessionTimeoutMinutes
-		if req.LarkAlertSessionTimeoutMinutes <= 0 {
-			req.LarkAlertSessionTimeoutMinutes = defaultLarkAlertSessionTimeoutMinutes
-		}
-	}
-	if strings.TrimSpace(req.LarkAlertAgentCommand) == "" {
-		req.LarkAlertAgentCommand = strings.TrimSpace(cfg.LarkAlertAgentCommand)
-		if req.LarkAlertAgentCommand == "" {
-			req.LarkAlertAgentCommand = defaultLarkAlertAgentCommand
-		}
-	}
-	if strings.TrimSpace(req.LarkAlertPrompt) == "" {
-		req.LarkAlertPrompt = strings.TrimSpace(cfg.LarkAlertPrompt)
-		if req.LarkAlertPrompt == "" {
-			req.LarkAlertPrompt = defaultLarkAlertPrompt
-		}
-	}
-	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.LarkAlertPollIntervalMs <= 0 || req.LarkAlertSessionTimeoutMinutes <= 0 || req.HeadlessSnapshotTimeoutMs <= 0 || req.LarkNotifyMaxLines <= 0 || req.LarkNotifyFallbackTailLines <= 0 {
+	if req.FastWaitingTransitionMs <= 0 || req.ConservativeWaitingTransitionMs <= 0 || req.LarkAutoRefreshIntervalMs <= 0 || req.HeadlessSnapshotTimeoutMs <= 0 || req.LarkNotifyMaxLines <= 0 || req.LarkNotifyFallbackTailLines <= 0 {
 		return httpapi.RuntimeConfig{}, errors.New("numeric settings must be greater than zero")
-	}
-	if strings.TrimSpace(req.LarkAlertAgentCommand) == "" {
-		return httpapi.RuntimeConfig{}, errors.New("alert agent command is required")
-	}
-	for _, pattern := range []string{req.LarkAlertAppIDPattern, req.LarkAlertCardTitlePattern} {
-		if strings.TrimSpace(pattern) != "" {
-			if _, err := regexp.Compile(pattern); err != nil {
-				return httpapi.RuntimeConfig{}, fmt.Errorf("invalid alert filter regex: %w", err)
-			}
-		}
 	}
 	if req.SessionStartPresets == nil {
 		req.SessionStartPresets = map[string]session.SessionStartPreset{}
@@ -523,12 +459,6 @@ func (s *appConfigService) UpdateRuntimeConfig(req httpapi.RuntimeConfig) (httpa
 	cfg.LarkSessionChatPrefix = normalizeLarkSessionChatPrefix(req.LarkSessionChatPrefix)
 	cfg.LarkIgnoreMessagePrefix = strings.TrimSpace(req.LarkIgnoreMessagePrefix)
 	cfg.LarkAutoSummaryPrompt = normalizeLarkAutoSummaryPrompt(req.LarkAutoSummaryPrompt)
-	cfg.LarkAlertAgentCommand = strings.TrimSpace(req.LarkAlertAgentCommand)
-	cfg.LarkAlertPrompt = strings.TrimSpace(req.LarkAlertPrompt)
-	cfg.LarkAlertAppIDPattern = strings.TrimSpace(req.LarkAlertAppIDPattern)
-	cfg.LarkAlertCardTitlePattern = strings.TrimSpace(req.LarkAlertCardTitlePattern)
-	cfg.LarkAlertPollIntervalMs = req.LarkAlertPollIntervalMs
-	cfg.LarkAlertSessionTimeoutMinutes = req.LarkAlertSessionTimeoutMinutes
 	cfg.FastWaitingTransitionMs = req.FastWaitingTransitionMs
 	cfg.ConservativeWaitingTransitionMs = req.ConservativeWaitingTransitionMs
 	cfg.LarkAutoRefreshIntervalMs = req.LarkAutoRefreshIntervalMs
@@ -576,7 +506,6 @@ func applyRuntimeConfig(cfg Config, manager *session.Manager, bridge *session.La
 		bridge.SetSessionChatPrefix(cfg.LarkSessionChatPrefix)
 		bridge.SetIgnoreMessagePrefix(cfg.LarkIgnoreMessagePrefix)
 		bridge.SetAutoSummaryPrompt(cfg.LarkAutoSummaryPrompt)
-		bridge.SetAlertConfig(cfg.LarkAlertAgentCommand, cfg.LarkAlertPrompt, cfg.LarkAlertAppIDPattern, cfg.LarkAlertCardTitlePattern, time.Duration(cfg.LarkAlertPollIntervalMs)*time.Millisecond, time.Duration(cfg.LarkAlertSessionTimeoutMinutes)*time.Minute)
 		bridge.SetStartPresets(cfg.SessionStartPresets)
 		bridge.SetNamePresets(cfg.SessionNamePresets)
 		bridge.SetCustomShortcuts(cfg.LarkCustomShortcuts)
@@ -610,12 +539,6 @@ func runtimeConfigFromConfig(cfg Config) httpapi.RuntimeConfig {
 		LarkSessionChatPrefix:           cfg.LarkSessionChatPrefix,
 		LarkIgnoreMessagePrefix:         cfg.LarkIgnoreMessagePrefix,
 		LarkAutoSummaryPrompt:           cfg.LarkAutoSummaryPrompt,
-		LarkAlertAgentCommand:           cfg.LarkAlertAgentCommand,
-		LarkAlertPrompt:                 cfg.LarkAlertPrompt,
-		LarkAlertAppIDPattern:           cfg.LarkAlertAppIDPattern,
-		LarkAlertCardTitlePattern:       cfg.LarkAlertCardTitlePattern,
-		LarkAlertPollIntervalMs:         cfg.LarkAlertPollIntervalMs,
-		LarkAlertSessionTimeoutMinutes:  cfg.LarkAlertSessionTimeoutMinutes,
 		SessionStartPresets:             cfg.SessionStartPresets,
 		SessionNamePresets:              cfg.SessionNamePresets,
 		LarkCustomShortcuts:             cfg.LarkCustomShortcuts,
